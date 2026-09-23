@@ -36,7 +36,22 @@ export const LUMI_EXTENSION_FOLDER_PATTERN = /(?:cardsorting\.lumi|lumi-vscode|d
 
 export function rebuildBetterSqlite3(repoRoot) {
 	console.log(`[vsix] rebuilding better-sqlite3 for Electron ${ELECTRON_VERSION}...`)
-	execFileSync("npm", ["run", "rebuild:electron:better-sqlite3"], {
+	const npmArgs = ["run", "rebuild:electron:better-sqlite3"]
+	if (process.env.npm_execpath) {
+		execFileSync(process.execPath, [process.env.npm_execpath, ...npmArgs], {
+			stdio: "inherit",
+			cwd: repoRoot,
+		})
+		return
+	}
+	if (process.platform === "win32") {
+		execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `npm ${npmArgs.join(" ")}`], {
+			stdio: "inherit",
+			cwd: repoRoot,
+		})
+		return
+	}
+	execFileSync("npm", npmArgs, {
 		stdio: "inherit",
 		cwd: repoRoot,
 	})
@@ -44,9 +59,11 @@ export function rebuildBetterSqlite3(repoRoot) {
 
 function listVsixEntries(vsixPath) {
 	if (!fs.existsSync(vsixPath)) {
-		return ""
+		return Buffer.alloc(0)
 	}
-	return execFileSync("unzip", ["-l", vsixPath], { encoding: "utf8" })
+	// ZIP entry names are stored uncompressed in the central directory. Read the
+	// archive directly so package validation works on Windows without `unzip`.
+	return fs.readFileSync(vsixPath)
 }
 
 function packagePathInVsix(packageName) {

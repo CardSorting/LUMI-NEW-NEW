@@ -1,0 +1,75 @@
+name: Build Marketplace VSIX Packages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-vsix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: windows-2025
+            target: win32-x64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: macos-15
+            target: darwin-arm64
+    defaults:
+      run:
+        shell: bash
+    env:
+      DIETCODE_ENVIRONMENT: production
+      TELEMETRY_SERVICE_API_KEY: ${{ secrets.TELEMETRY_SERVICE_API_KEY }}
+      ERROR_SERVICE_API_KEY: ${{ secrets.ERROR_SERVICE_API_KEY }}
+      OTEL_TELEMETRY_ENABLED: ${{ secrets.OTEL_TELEMETRY_ENABLED }}
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${{ secrets.OTEL_EXPORTER_OTLP_PROTOCOL }}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
+      OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            webview-ui/package-lock.json
+      - name: Install extension dependencies
+        run: npm ci --include=optional
+      - name: Install webview dependencies
+        run: npm ci --include=optional
+        working-directory: webview-ui
+      - name: Build extension assets
+        run: npm run vscode:prepublish
+      - name: Package VS Code Marketplace VSIX
+        run: npm run package:vsix -- --target "${{ matrix.target }}"
+      - name: Package Open VSX VSIX
+        run: npm run package:vsix:openvsx -- --target "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marketplace-vsix-${{ matrix.target }}
+          path: dist/lumi*.vsix
+          if-no-files-found: error
+          retention-days: 14

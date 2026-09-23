@@ -1,132 +1,211 @@
-name: "Publish Release"
+name: Publish Release
 
 on:
-    workflow_dispatch:
-        inputs:
-            release-type:
-                description: "Choose release type (release or pre-release)"
-                required: true
-                default: "release"
-                type: choice
-                options:
-                    - pre-release
-                    - release
-            tag:
-                description: "Enter existing tag to publish (e.g., v3.1.2)"
-                required: true
-                type: string
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release-type:
+        description: Choose release type
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - pre-release
+      tag:
+        description: Existing version tag to publish (for example v20.0.1)
+        required: true
+        type: string
 
 permissions:
-    contents: write
-    packages: write
-    checks: write
-    pull-requests: write
+  contents: write
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: marketplace-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-    test:
-        uses: ./.github/workflows/test.yml
+  test:
+    uses: ./.github/workflows/test.yml
 
-    publish:
-        needs: test
-        name: Publish Extension
-        runs-on: ubuntu-latest
-        environment: publish
+  resolve-release:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      pre-release: ${{ steps.release.outputs.pre-release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Resolve and validate release
+        id: release
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+            PRE_RELEASE="${{ inputs.release-type == 'pre-release' }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "$TAG" == *-* ]]; then PRE_RELEASE=true; else PRE_RELEASE=false; fi
+          fi
+          if [[ "${TAG#v}" != "$VERSION" ]]; then
+            echo "Tag $TAG must match package.json version $VERSION (optionally prefixed with v)." >&2
+            exit 1
+          fi
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          git rev-parse "$TAG" >/dev/null
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "pre-release=$PRE_RELEASE" >> "$GITHUB_OUTPUT"
 
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  ref: ${{ github.event.inputs.tag }}
-                  fetch-depth: 0
-                  fetch-tags: true
+  package:
+    name: Package ${{ matrix.target }}
+    needs: [test, resolve-release]
+    environment: publish
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: windows-2025
+            target: win32-x64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: macos-15
+            target: darwin-arm64
+    defaults:
+      run:
+        shell: bash
+    env:
+      DIETCODE_ENVIRONMENT: production
+      TELEMETRY_SERVICE_API_KEY: ${{ secrets.TELEMETRY_SERVICE_API_KEY }}
+      ERROR_SERVICE_API_KEY: ${{ secrets.ERROR_SERVICE_API_KEY }}
+      OTEL_TELEMETRY_ENABLED: ${{ secrets.OTEL_TELEMETRY_ENABLED }}
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${{ secrets.OTEL_EXPORTER_OTLP_PROTOCOL }}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
+      OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            webview-ui/package-lock.json
+      - name: Install extension dependencies
+        run: npm ci --include=optional
+      - name: Install webview dependencies
+        run: npm ci --include=optional
+        working-directory: webview-ui
+      - name: Build extension assets
+        run: npm run vscode:prepublish
+      - name: Package VS Code Marketplace VSIX
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.resolve-release.outputs.pre-release }}" == "true" ]]; then PRERELEASE_FLAG="--pre-release"; fi
+          npm run package:vsix -- --target "${{ matrix.target }}" $PRERELEASE_FLAG
+      - name: Package Open VSX VSIX
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.resolve-release.outputs.pre-release }}" == "true" ]]; then PRERELEASE_FLAG="--pre-release"; fi
+          npm run package:vsix:openvsx -- --target "${{ matrix.target }}" $PRERELEASE_FLAG
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marketplace-vsix-${{ matrix.target }}
+          path: dist/lumi*.vsix
+          if-no-files-found: error
+          retention-days: 14
 
-            - name: Setup Node.js
-              uses: actions/setup-node@v4
-              with:
-                  node-version: 22
+  publish:
+    name: Publish to both marketplaces
+    needs: [package, resolve-release]
+    runs-on: ubuntu-24.04
+    environment: publish
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install marketplace tools
+        run: npm install --global @vscode/vsce ovsx
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: marketplace-vsix-*
+          path: dist
+          merge-multiple: true
+      - name: Verify platform packages
+        run: |
+          test "$(find dist -maxdepth 1 -name 'lumi-vscode-*.vsix' | wc -l)" -eq 4
+          test "$(find dist -maxdepth 1 -name 'lumi-${{ needs.resolve-release.outputs.version }}-*.vsix' | wc -l)" -eq 4
+      - name: Publish VS Code Marketplace packages
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.resolve-release.outputs.pre-release }}" == "true" ]]; then PRERELEASE_FLAG="--pre-release"; fi
+          for package in dist/lumi-vscode-*.vsix; do
+            npx --yes @vscode/vsce publish $PRERELEASE_FLAG --packagePath "$package"
+          done
+      - name: Publish Open VSX packages
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          for package in dist/lumi-${{ needs.resolve-release.outputs.version }}-*.vsix; do
+            npx --yes ovsx publish "$package" --pat "$OVSX_PAT"
+          done
 
-            - name: Install root dependencies
-              run: npm install --include=optional
+  release:
+    name: Create GitHub Release
+    needs: [publish, resolve-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: marketplace-vsix-*
+          path: dist
+          merge-multiple: true
+      - name: Get previous tag
+        id: previous
+        run: |
+          PREVIOUS=$(git describe --tags --abbrev=0 "${{ needs.resolve-release.outputs.tag }}^" 2>/dev/null || true)
+          echo "tag=$PREVIOUS" >> "$GITHUB_OUTPUT"
+      - name: Get changelog entry
+        id: changelog
+        run: |
+          CONTENT=$(awk '/^## \[/{if(found) exit; found=1; next} found{print}' CHANGELOG.md)
+          echo "content<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CONTENT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
+          files: |
+            dist/lumi-vscode-*.vsix
+            dist/lumi-${{ needs.resolve-release.outputs.version }}-*.vsix
+          body: |
+            ${{ steps.changelog.outputs.content }}
 
-            - name: Install webview-ui dependencies
-              run: cd webview-ui && npm install --include=optional
-
-            - name: Install Publishing Tools
-              run: npm install -g @vscode/vsce ovsx
-
-            - name: Get Version
-              id: get_version
-              run: |
-                  VERSION=$(node -p "require('./package.json').version")
-                  echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-            - name: Validate Tag
-              id: validate_tag
-              run: |
-                  TAG="${{ github.event.inputs.tag }}"
-                  echo "tag=$TAG" >> $GITHUB_OUTPUT
-                  echo "Using existing tag: $TAG"
-
-                  # Verify the tag exists
-                  if ! git rev-parse "$TAG" >/dev/null 2>&1; then
-                    echo "Error: Tag '$TAG' does not exist in the repository"
-                    exit 1
-                  fi
-
-                  echo "Tag '$TAG' validated successfully"
-
-            - name: Package and Publish Extension
-              env:
-                  VSCE_PAT: ${{ secrets.VSCE_PAT }}
-                  OVSX_PAT: ${{ secrets.OVSX_PAT }}
-                  DIETCODE_ENVIRONMENT: production
-                  TELEMETRY_SERVICE_API_KEY: ${{ secrets.TELEMETRY_SERVICE_API_KEY }}
-                  ERROR_SERVICE_API_KEY: ${{ secrets.ERROR_SERVICE_API_KEY }}
-                  # OpenTelemetry production defaults (can be overridden at runtime)
-                  OTEL_TELEMETRY_ENABLED: ${{ secrets.OTEL_TELEMETRY_ENABLED }}
-                  OTEL_LOGS_EXPORTER: otlp
-                  OTEL_METRICS_EXPORTER: otlp
-                  OTEL_EXPORTER_OTLP_PROTOCOL: ${{ secrets.OTEL_EXPORTER_OTLP_PROTOCOL }}
-                  OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
-                  OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
-              run: |
-                  npm run package:vsix:all
-                  npm run doctor -- --ci
-
-                  if [ "${{ github.event.inputs.release-type }}" = "pre-release" ]; then
-                    npm run publish:marketplace:prerelease
-                    echo "Successfully published pre-release version ${{ steps.get_version.outputs.version }} to VS Code Marketplace and Open VSX Registry"
-                  else
-                    npm run publish:marketplace
-                    echo "Successfully published release version ${{ steps.get_version.outputs.version }} to VS Code Marketplace and Open VSX Registry"
-                  fi
-
-            - name: Get Previous Tag
-              id: prev_tag
-              run: |
-                  CURRENT_TAG="${{ steps.validate_tag.outputs.tag }}"
-                  PREV_TAG=$(git describe --tags --abbrev=0 "$CURRENT_TAG^" 2>/dev/null || echo "")
-                  echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
-
-            - name: Get Changelog Entry
-              id: changelog
-              run: |
-                  # Get content between first ## [ and second ## [
-                  CONTENT=$(awk '/^## \[/{if(found) exit; found=1; next} found{print}' CHANGELOG.md)
-                  echo "content<<EOF" >> $GITHUB_OUTPUT
-                  echo "$CONTENT" >> $GITHUB_OUTPUT
-                  echo "EOF" >> $GITHUB_OUTPUT
-
-            - name: Create GitHub Release
-              uses: softprops/action-gh-release@v1
-              with:
-                  tag_name: ${{ steps.validate_tag.outputs.tag }}
-                  files: |
-                      dist/lumi-vscode-*.vsix
-                      dist/lumi-[0-9]*.vsix
-                  body: |
-                      ${{ steps.changelog.outputs.content }}
-
-                      **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.prev_tag.outputs.prev_tag }}...${{ steps.validate_tag.outputs.tag }}
-                  prerelease: ${{ github.event.inputs.release-type == 'pre-release' }}
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.previous.outputs.tag }}...${{ needs.resolve-release.outputs.tag }}
+          prerelease: ${{ needs.resolve-release.outputs.pre-release == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

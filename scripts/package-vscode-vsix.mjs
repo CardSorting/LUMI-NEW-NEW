@@ -16,16 +16,32 @@ import { assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-d
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
 const packageJsonPath = path.join(repoRoot, "package.json")
+const VALID_TARGETS = new Set(["linux-x64", "win32-x64", "darwin-x64", "darwin-arm64"])
+
+function readPackageOptions() {
+	const targetIndex = process.argv.indexOf("--target")
+	const target = targetIndex === -1 ? undefined : process.argv[targetIndex + 1]
+	if (targetIndex !== -1 && (!target || !VALID_TARGETS.has(target))) {
+		throw new Error(`Unsupported VSIX target: ${target || "(missing)"}`)
+	}
+	return { target, preRelease: process.argv.includes("--pre-release") }
+}
 
 function main() {
+	const { target, preRelease } = readPackageOptions()
 	const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"))
-	const outPath = path.join(repoRoot, "dist", `lumi-vscode-${pkg.version}.vsix`)
+	const targetSuffix = target ? `-${target}` : ""
+	const outPath = path.join(repoRoot, "dist", `lumi-vscode-${pkg.version}${targetSuffix}.vsix`)
 
 	fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
 	try {
 		rebuildBetterSqlite3(repoRoot)
-		execFileSync("vsce", ["package", "--allow-package-secrets", "sendgrid", "--out", outPath], {
+		const args = ["package", "--allow-package-secrets", "sendgrid"]
+		if (target) args.push("--target", target)
+		if (preRelease) args.push("--pre-release")
+		args.push("--out", outPath)
+		execFileSync(process.execPath, [path.join(repoRoot, "node_modules", "@vscode", "vsce", "vsce"), ...args], {
 			stdio: "inherit",
 			cwd: repoRoot,
 		})
