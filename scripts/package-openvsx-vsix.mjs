@@ -8,7 +8,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-deps.mjs"
+import { assertNativeModuleArchitecture, assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-deps.mjs"
 import { runVsce } from "./vsix-package-utils.mjs"
 import { createWorkspaceLinkManager } from "./workspace-link.mjs"
 
@@ -53,7 +53,9 @@ function main() {
 	fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
 	try {
-		if (!skipNativeRebuild) rebuildBetterSqlite3(repoRoot)
+		const nativeTarget = target ?? `${process.platform}-${process.arch}`
+		if (!skipNativeRebuild) rebuildBetterSqlite3(repoRoot, nativeTarget)
+		else assertNativeModuleArchitecture(repoRoot, nativeTarget)
 
 		if (pkg.name !== OPENVSX_EXTENSION_NAME) {
 			pkg.name = OPENVSX_EXTENSION_NAME

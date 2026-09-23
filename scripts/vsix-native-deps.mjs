@@ -34,9 +34,101 @@ export const LUMI_EXTENSION_FOLDER_PATTERN = /(?:cardsorting\.lumi|lumi-vscode|d
  * @typedef {{ id: string, status: CheckStatus, title: string, detail?: string, fix?: string[] }} HealthCheck
  */
 
-export function rebuildBetterSqlite3(repoRoot) {
-	console.log(`[vsix] rebuilding better-sqlite3 for Electron ${ELECTRON_VERSION}...`)
-	const npmArgs = ["run", "rebuild:electron:better-sqlite3"]
+function parseTargetArchitecture(target) {
+	const arch = target?.split("-").at(-1)
+	if (arch === "x64" || arch === "arm64" || arch === "armhf") return arch
+	if (arch === "arm") return "armhf"
+	throw new Error(`Cannot determine native module architecture from target: ${target}`)
+}
+
+function binaryArchitectures(binaryPath) {
+	const binary = fs.readFileSync(binaryPath)
+	if (binary.length < 20) return []
+
+	// Thin and universal Mach-O binaries.
+	const magic = binary.subarray(0, 4).toString("hex")
+	const machoCpuName = (cpuType) => {
+		const cpu = cpuType >>> 0
+		if (cpu === 0x01000007) return "x64"
+		if (cpu === 0x0100000c) return "arm64"
+		return undefined
+	}
+	if (magic === "cffaedfe" || magic === "cefaedfe") return [machoCpuName(binary.readUInt32LE(4))].filter(Boolean)
+	if (magic === "feedfacf" || magic === "feedface") return [machoCpuName(binary.readUInt32BE(4))].filter(Boolean)
+	if (magic === "cafebabe" || magic === "cafebabf" || magic === "bebafeca" || magic === "bfbafeca") {
+		const littleEndian = magic === "bebafeca" || magic === "bfbafeca"
+		const is64 = magic === "cafebabf" || magic === "bfbafeca"
+		const count = littleEndian ? binary.readUInt32LE(4) : binary.readUInt32BE(4)
+		const stride = is64 ? 32 : 20
+		const architectures = []
+		for (let index = 0; index < count && 8 + (index + 1) * stride <= binary.length; index++) {
+			const offset = 8 + index * stride
+			const cpuType = littleEndian ? binary.readUInt32LE(offset) : binary.readUInt32BE(offset)
+			const name = machoCpuName(cpuType)
+			if (name) architectures.push(name)
+		}
+		return [...new Set(architectures)]
+	}
+
+	// ELF (Linux) and PE/COFF (Windows) modules.
+	if (binary.subarray(0, 4).toString("hex") === "7f454c46") {
+		const littleEndian = binary[5] === 1
+		const machine = littleEndian ? binary.readUInt16LE(18) : binary.readUInt16BE(18)
+		if (machine === 62) return ["x64"]
+		if (machine === 183) return ["arm64"]
+		if (machine === 40) return ["armhf"]
+	}
+	if (binary.length >= 0x40 && binary.subarray(0, 2).toString("hex") === "4d5a") {
+		const peOffset = binary.readUInt32LE(0x3c)
+		if (peOffset + 6 <= binary.length && binary.subarray(peOffset, peOffset + 4).toString("hex") === "50450000") {
+			const machine = binary.readUInt16LE(peOffset + 4)
+			if (machine === 0x8664) return ["x64"]
+			if (machine === 0xaa64) return ["arm64"]
+		}
+	}
+	return []
+}
+
+function binaryFormat(binaryPath) {
+	const magic = fs.readFileSync(binaryPath).subarray(0, 4).toString("hex")
+	if (["cffaedfe", "cefaedfe", "feedfacf", "feedface", "cafebabe", "cafebabf", "bebafeca", "bfbafeca"].includes(magic)) {
+		return "macho"
+	}
+	if (magic === "7f454c46") return "elf"
+	if (magic.startsWith("4d5a")) return "pe"
+	return "unknown"
+}
+
+function hostTarget() {
+	const platform = process.platform
+	return `${platform}-${process.arch}`
+}
+
+export function assertNativeModuleArchitecture(repoRoot, target) {
+	const expectedArch = parseTargetArchitecture(target)
+	const binaryPath = path.join(repoRoot, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node")
+	if (!fs.existsSync(binaryPath)) {
+		throw new Error(`better-sqlite3 native module is missing: ${binaryPath}`)
+	}
+	const actualArchitectures = binaryArchitectures(binaryPath)
+	const expectedFormat = target.startsWith("darwin-") ? "macho" : target.startsWith("win32-") ? "pe" : "elf"
+	const actualFormat = binaryFormat(binaryPath)
+	if (actualFormat !== expectedFormat) {
+		throw new Error(`better-sqlite3 binary format mismatch for ${target}: expected ${expectedFormat}, found ${actualFormat}`)
+	}
+	const requiredArchitectures = target.startsWith("darwin-") ? ["x64", "arm64"] : [expectedArch]
+	const missingArchitectures = requiredArchitectures.filter((arch) => !actualArchitectures.includes(arch))
+	if (missingArchitectures.length > 0) {
+		const actual = actualArchitectures.length > 0 ? actualArchitectures.join(", ") : "unknown"
+		throw new Error(
+			`better-sqlite3 architecture mismatch for ${target}: expected ${requiredArchitectures.join(" + ")}, found ${actual}`,
+		)
+	}
+	console.log(`[vsix] verified better-sqlite3 architecture: ${actualArchitectures.join(" + ")}`)
+}
+
+function runElectronRebuild(repoRoot, arch) {
+	const npmArgs = ["run", "rebuild:electron:better-sqlite3", "--", `--arch=${arch}`]
 	if (process.env.npm_execpath) {
 		execFileSync(process.execPath, [process.env.npm_execpath, ...npmArgs], {
 			stdio: "inherit",
@@ -55,6 +147,48 @@ export function rebuildBetterSqlite3(repoRoot) {
 		stdio: "inherit",
 		cwd: repoRoot,
 	})
+}
+
+export function rebuildBetterSqlite3(repoRoot, target = `${process.platform}-${process.arch}`) {
+	const requestedArch = parseTargetArchitecture(target)
+	const nativeBinaryPath = path.join(repoRoot, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node")
+	console.log(`[vsix] rebuilding better-sqlite3 for Electron ${ELECTRON_VERSION} (${target})...`)
+
+	if (target.startsWith("darwin-")) {
+		if (process.platform !== "darwin") {
+			throw new Error(`Build ${target} packages on macOS; cross-OS native builds are not supported.`)
+		}
+
+		// Keep macOS VSIXes usable even when an editor selects the other Mac platform variant.
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lumi-better-sqlite3-universal-"))
+		try {
+			for (const arch of ["x64", "arm64"]) {
+				console.log(`[vsix] compiling macOS SQLite slice: ${arch}`)
+				runElectronRebuild(repoRoot, arch)
+				const builtArchs = binaryArchitectures(nativeBinaryPath)
+				if (!builtArchs.includes(arch)) {
+					throw new Error(`Electron rebuild requested ${arch}, but produced ${builtArchs.join(", ") || "unknown"}`)
+				}
+				fs.copyFileSync(nativeBinaryPath, path.join(tempDir, `${arch}.node`))
+			}
+
+			const universalPath = path.join(tempDir, "universal.node")
+			execFileSync(
+				"lipo",
+				["-create", path.join(tempDir, "x64.node"), path.join(tempDir, "arm64.node"), "-output", universalPath],
+				{ stdio: "inherit" },
+			)
+			const mode = fs.statSync(path.join(tempDir, "arm64.node")).mode
+			fs.copyFileSync(universalPath, nativeBinaryPath)
+			fs.chmodSync(nativeBinaryPath, mode)
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		}
+	} else {
+		runElectronRebuild(repoRoot, requestedArch)
+	}
+
+	assertNativeModuleArchitecture(repoRoot, target)
 }
 
 function listVsixEntries(vsixPath) {
@@ -154,8 +288,15 @@ export function auditExtensionHealth(extensionDir, { ideLabel = "Editor" } = {})
 	if (fs.existsSync(binaryPath)) {
 		const size = fs.statSync(binaryPath).size
 		if (size >= MIN_NATIVE_BINARY_BYTES) {
-			binaryStatus = "pass"
-			binaryDetail = undefined
+			const expectedArch = parseTargetArchitecture(hostTarget())
+			const actualArchs = binaryArchitectures(binaryPath)
+			if (actualArchs.includes(expectedArch)) {
+				binaryStatus = "pass"
+				binaryDetail = undefined
+			} else {
+				binaryStatus = "fail"
+				binaryDetail = `Wrong architecture: found ${actualArchs.join(", ") || "unknown"}; this editor requires ${expectedArch}`
+			}
 		} else {
 			binaryStatus = "warn"
 			binaryDetail = `Binary exists but is unusually small (${size} bytes)`
@@ -170,7 +311,11 @@ export function auditExtensionHealth(extensionDir, { ideLabel = "Editor" } = {})
 		fix:
 			binaryStatus === "pass"
 				? undefined
-				: ["Run: npm run doctor -- --fix", "If that fails, delete the extension folder and reinstall from a fresh VSIX"],
+				: [
+						"Install the VSIX matching this editor architecture",
+						"Run: npm run doctor -- --fix",
+						"If that fails, delete the extension folder and reinstall from a fresh VSIX",
+					],
 	})
 
 	return checks
@@ -241,13 +386,24 @@ export function pickRepairVsix(distDir, extensionFolderName) {
 	}
 
 	const lower = extensionFolderName.toLowerCase()
-	const openVsx = candidates.find((file) => /[/\\]lumi-\d/.test(file) && !file.includes("lumi-vscode"))
-	const marketplace = candidates.find((file) => file.includes("lumi-vscode"))
+	const prefersOpenVsx = lower.includes("cardsorting.lumi") || /\.lumi-/.test(lower)
+	const openVsxPackages = candidates.filter((file) => /[/\\]lumi-\d/.test(file) && !file.includes("lumi-vscode"))
+	const marketplacePackages = candidates.filter((file) => file.includes("lumi-vscode"))
+	const preferred = prefersOpenVsx ? openVsxPackages : marketplacePackages
+	const fallback = prefersOpenVsx ? marketplacePackages : openVsxPackages
+	const platform = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "win32" : process.platform
+	const targetSuffix = `-${platform}-${process.arch}.vsix`
+	const newest = (files) =>
+		[...files].sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }))[0]
 
-	if (lower.includes("cardsorting.lumi") || /\.lumi-/.test(lower)) {
-		return openVsx ?? marketplace ?? candidates.at(-1)
-	}
-	return marketplace ?? openVsx ?? candidates.at(-1)
+	// Never repair an installation with a package for a different architecture.
+	return (
+		newest(preferred.filter((file) => file.endsWith(targetSuffix))) ??
+		newest(fallback.filter((file) => file.endsWith(targetSuffix))) ??
+		newest(preferred.filter((file) => !/-((darwin|win32|linux)-)(x64|arm64|armhf)\.vsix$/.test(file))) ??
+		newest(fallback.filter((file) => !/-((darwin|win32|linux)-)(x64|arm64|armhf)\.vsix$/.test(file))) ??
+		null
+	)
 }
 
 export function repairExtensionFromVsix({ extensionDir, vsixPath }) {

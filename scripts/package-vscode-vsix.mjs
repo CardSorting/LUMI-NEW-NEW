@@ -11,7 +11,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-deps.mjs"
+import { assertNativeModuleArchitecture, assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-deps.mjs"
 import { runVsce } from "./vsix-package-utils.mjs"
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -41,7 +41,9 @@ function main() {
 	fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
 	try {
-		if (!skipNativeRebuild) rebuildBetterSqlite3(repoRoot)
+		const nativeTarget = target ?? `${process.platform}-${process.arch}`
+		if (!skipNativeRebuild) rebuildBetterSqlite3(repoRoot, nativeTarget)
+		else assertNativeModuleArchitecture(repoRoot, nativeTarget)
 		const args = ["package", "--allow-package-secrets", "sendgrid"]
 		if (target) args.push("--target", target)
 		if (preRelease) args.push("--pre-release")

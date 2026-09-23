@@ -1,7 +1,7 @@
 ---
 title: "LUMI Won't Start"
 sidebarTitle: "Extension Won't Start"
-description: "Fix missing database component errors when LUMI fails to activate"
+description: "Fix missing or incompatible database driver errors when LUMI fails to activate"
 ---
 
 ## What you might see
@@ -9,14 +9,15 @@ description: "Fix missing database component errors when LUMI fails to activate"
 If LUMI cannot start, your editor may show an error like:
 
 - `Cannot find module 'better-sqlite3'`
+- `better_sqlite3.node ... incompatible architecture (have 'x86_64', need 'arm64')`
 - `Activating extension 'CardSorting.lumi' failed`
-- A LUMI popup: **"required component is missing"**
+- A LUMI popup that says the database driver is missing or for the wrong processor architecture
 
-This means the extension install is **incomplete** — the local database driver did not ship with the download. It is **not** your project code or settings.
+This points to the extension's bundled SQLite driver, not your project code or settings. The driver may be missing, incomplete, or built for a different processor than your editor.
 
 ---
 
-## Try this first (in your editor)
+## If LUMI opens
 
 <Steps>
   <Step title="Open the health check">
@@ -25,8 +26,7 @@ This means the extension install is **incomplete** — the local database driver
     3. Press Enter
   </Step>
   <Step title="Read the LUMI Health panel">
-    A panel named **LUMI Health** opens with a simple checklist (`OK` / `FAIL`).
-    Follow the numbered steps at the bottom if anything failed.
+    A panel named **LUMI Health** opens with a checklist. It names the missing component or architecture mismatch and gives the next step.
   </Step>
   <Step title="Reload">
     Command Palette → **Developer: Reload Window**
@@ -35,16 +35,15 @@ This means the extension install is **incomplete** — the local database driver
 
 ---
 
-## Reinstall from a VSIX file
+## Install the matching platform build
 
-If the health check shows missing components:
+If LUMI fails during startup, choose **How to fix** in the error message or **Copy details** to share the diagnostic. Your project files and settings are unaffected.
 
-1. Get a fresh `.vsix` from [GitHub Releases](https://github.com/CardSorting/DietCodeMarie/releases)
-2. Open **Extensions**
-3. Click the **`⋯` menu** at the top of the Extensions panel
-4. Choose **Install from VSIX…**
-5. Select the file (e.g. `lumi-1.0.6.vsix` or `lumi-vscode-1.0.6.vsix`)
-6. **Reload** the window
+Apple silicon editors need the **ARM64** build. Intel Mac editors need **x64**. If you see `have 'x86_64', need 'arm64'`, install the `darwin-arm64` VSIX; reinstalling the x64 package will not fix the mismatch.
+
+1. Get the matching `.vsix` from [GitHub Releases](https://github.com/CardSorting/DietCodeMarie/releases). Platform builds include the platform in the filename, such as `lumi-20.0.2-darwin-arm64.vsix`.
+2. In the editor, open **Extensions** → **⋯** → **Install from VSIX…** and select that file.
+3. Run **LUMI: Check Installation** if LUMI opens, then **Developer: Reload Window**.
 
 ---
 
@@ -60,11 +59,11 @@ Then reload your editor window.
 
 ## If you installed from Open VSX
 
-Some older Open VSX builds of `CardSorting.lumi` were packaged without the SQLite native module. If you use **Antigravity**, **VSCodium**, or another Open VSX client:
+Some Open VSX clients may install a platform build that does not match the editor's architecture. If you use **Antigravity**, **VSCodium**, or another Open VSX client:
 
-1. Uninstall LUMI
-2. Reinstall using **Install from VSIX…** above, **or** update once a fixed version is published
-3. Run **LUMI: Check Installation** to confirm everything is `OK`
+1. Download the matching platform VSIX from [GitHub Releases](https://github.com/CardSorting/DietCodeMarie/releases).
+2. Install it using **Install from VSIX…** above.
+3. Run **LUMI: Check Installation** to confirm the database driver loads for this editor.
 
 ---
 

@@ -1,5 +1,13 @@
 # Changelog V3
 
+## [20.0.2] - 2026-09-23
+
+### Hardened macOS SQLite packaging
+
+- macOS VSIX packages now include universal x64 and ARM64 SQLite binaries, so the native driver still loads if a compatible editor selects the other Mac platform variant.
+- Native module builds receive an explicit target architecture and fail packaging if the expected CPU slices are missing.
+- Installation diagnostics identify architecture mismatches and direct users to the matching platform build.
+
 ## [5.10.15] - 2026-04-22
 
 ### 🚀 Integrated Moonshot Kimi K2.6 & NousResearch Hardening

@@ -23,6 +23,7 @@ export type NativeDepsHealthResult = {
 	ok: boolean
 	missingPackages: string[]
 	loadError?: string
+	architectureMismatch?: { builtFor: string; required: string }
 }
 
 const MIN_NATIVE_BINARY_BYTES = 100_000
@@ -31,6 +32,26 @@ const STATUS_LABEL: Record<HealthStatus, string> = {
 	pass: "OK",
 	warn: "WARN",
 	fail: "FAIL",
+}
+
+function architectureLabel(arch: string): string {
+	if (arch === "arm64" || arch === "aarch64") return "Apple silicon (ARM64)"
+	if (arch === "x64" || arch === "x86_64") return "Intel (x64)"
+	return arch
+}
+
+function findArchitectureMismatch(message: string): NativeDepsHealthResult["architectureMismatch"] {
+	const match = message.match(/have ['"]([^'"]+)['"], need ['"]([^'"]+)['"]/i)
+	if (!match) return undefined
+	const normalize = (arch: string) => {
+		const value = arch.toLowerCase()
+		if (value.includes("x86_64") || value === "x64") return "x64"
+		if (value.includes("arm64") || value === "aarch64") return "arm64"
+		return value
+	}
+	const builtFor = normalize(match[1])
+	const required = normalize(match[2])
+	return builtFor === required ? undefined : { builtFor, required }
 }
 
 let healthOutputChannel: vscode.OutputChannel | undefined
@@ -68,10 +89,12 @@ export function checkExtensionNativeDeps(extensionPath: string): NativeDepsHealt
 		extensionRequire(extensionRequire.resolve("better-sqlite3", { paths: [extensionPath] }))
 		return { ok: true, missingPackages: [] }
 	} catch (error) {
+		const loadError = error instanceof Error ? error.message : String(error)
 		return {
 			ok: false,
 			missingPackages,
-			loadError: error instanceof Error ? error.message : String(error),
+			loadError,
+			architectureMismatch: findArchitectureMismatch(loadError),
 		}
 	}
 }
@@ -103,6 +126,7 @@ export function auditCurrentInstallation(extensionPath: string): InstallationHea
 	}
 
 	const binaryPath = path.join(extensionPath, "node_modules/better-sqlite3/build/Release/better_sqlite3.node")
+	const loadResult = checkExtensionNativeDeps(extensionPath)
 	let binaryStatus: HealthStatus = "fail"
 	let binaryDetail = "Native SQLite driver file is missing"
 	if (fs.existsSync(binaryPath)) {
@@ -115,6 +139,10 @@ export function auditCurrentInstallation(extensionPath: string): InstallationHea
 			binaryDetail = `File exists but looks too small (${size} bytes)`
 		}
 	}
+	if (loadResult.architectureMismatch) {
+		binaryStatus = "fail"
+		binaryDetail = `Built for ${architectureLabel(loadResult.architectureMismatch.builtFor)}; this editor requires ${architectureLabel(loadResult.architectureMismatch.required)}`
+	}
 
 	checks.push({
 		id: "binary",
@@ -124,10 +152,12 @@ export function auditCurrentInstallation(extensionPath: string): InstallationHea
 		fix:
 			binaryStatus === "pass"
 				? undefined
-				: ["Reinstall LUMI from a VSIX file (see troubleshooting guide)", "If you build from source: npm run doctor:fix"],
+				: [
+						"Install the VSIX for this editor (Apple silicon: darwin-arm64; Intel Mac: darwin-x64)",
+						"If you maintain a source checkout: npm run doctor:fix",
+					],
 	})
 
-	const loadResult = checkExtensionNativeDeps(extensionPath)
 	checks.push({
 		id: "load",
 		status: loadResult.ok ? "pass" : "fail",
@@ -268,11 +298,15 @@ export async function showNativeDepsFailure(result: NativeDepsHealthResult): Pro
 	const missingSummary =
 		result.missingPackages.length > 0 ? result.missingPackages.join(", ") : "better-sqlite3 (database driver)"
 
-	const detail = result.loadError ? `\n\nTechnical detail: ${result.loadError}` : ""
+	const explanation = result.architectureMismatch
+		? `The installed database driver is built for ${architectureLabel(result.architectureMismatch.builtFor)}, but this editor needs ${architectureLabel(result.architectureMismatch.required)}.`
+		: "The extension may be incomplete or its database driver may not match this editor."
+	const detail = result.loadError ? "\n\nChoose Copy details to include the technical diagnostic." : ""
 
 	const choice = await vscode.window.showErrorMessage(
-		`LUMI could not start because a required component is missing (${missingSummary}). ` +
-			"This usually means the extension install is incomplete — common with some Open VSX downloads." +
+		(result.architectureMismatch
+			? `LUMI’s database driver is for the wrong processor architecture. ${explanation} Install the matching LUMI build, then reload the editor.`
+			: `LUMI could not load its database driver (${missingSummary}). ${explanation} Reinstall LUMI, then reload the editor.`) +
 			detail,
 		"How to fix",
 		"Copy details",
@@ -285,10 +319,13 @@ export async function showNativeDepsFailure(result: NativeDepsHealthResult): Pro
 	if (choice === "Copy details") {
 		const text = [
 			"LUMI native dependency check failed",
-			`Missing: ${missingSummary}`,
+			result.missingPackages.length > 0 ? `Missing: ${missingSummary}` : "Missing: none",
+			result.architectureMismatch
+				? `Architecture: built for ${architectureLabel(result.architectureMismatch.builtFor)}, editor requires ${architectureLabel(result.architectureMismatch.required)}`
+				: "",
 			result.loadError ? `Error: ${result.loadError}` : "",
 			`Help: ${TROUBLESHOOTING_URL}`,
-			"Maintainer fix: npm run doctor:fix",
+			"Repair a local source checkout: npm run doctor:fix",
 		]
 			.filter(Boolean)
 			.join("\n")
@@ -298,6 +335,9 @@ export async function showNativeDepsFailure(result: NativeDepsHealthResult): Pro
 }
 
 export function nativeDepsFailureMessage(result: NativeDepsHealthResult): string {
+	if (result.architectureMismatch) {
+		return `LUMI native dependency architecture mismatch (built for ${result.architectureMismatch.builtFor}, editor requires ${result.architectureMismatch.required})`
+	}
 	const missing = result.missingPackages.length > 0 ? result.missingPackages.join(", ") : "better-sqlite3"
 	return `LUMI native dependency check failed (missing: ${missing})`
 }
