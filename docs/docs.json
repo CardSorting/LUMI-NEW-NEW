@@ -240,7 +240,6 @@
 									"provider-config/asksage",
 									"provider-config/baseten",
 									"provider-config/cerebras",
-									"provider-config/claude-code",
 									"provider-config/deepseek",
 									"provider-config/doubao",
 									"provider-config/fireworks",

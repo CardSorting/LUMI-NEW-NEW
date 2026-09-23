@@ -4,21 +4,22 @@ sidebarTitle: "Providers Overview"
 description: "Which LLM providers are wired in this LUMI build vs legacy reference pages."
 ---
 
-## Active in this build (4)
+## Active in this build (5)
 
 These providers appear in `src/shared/providers/providers.json` and are registered in `buildApiHandler` (`src/core/api/index.ts`):
 
 | Provider | Doc | Handler |
 |----------|-----|---------|
 | OpenRouter | [openrouter](openrouter) | `OpenRouterHandler` (default fallback) |
-| ChatGPT Subscription | [openai-codex](openai-codex) | `OpenAiCodexHandler` |
+| OpenAI Codex (ChatGPT subscription) | [openai-codex](openai-codex) | `OpenAiCodexHandler` |
+| Claude Code (Subscription) | [claude-subscription-directsdk](claude-subscription-directsdk) | `ClaudeSubscriptionDirectSdkHandler` |
 | NousResearch | [nousresearch](nousresearch) | `NousResearchHandler` |
 | Cloudflare Workers AI | [cloudflare](cloudflare) | `CloudflareHandler` |
 
 Start with [Model selection guide](../core-features/model-selection-guide.mdx) and [Authorizing](../getting-started/authorizing-with-dietcode.mdx).
 
 <Warning>
-**Legacy pages:** Other files in this folder (Anthropic, Ollama, Bedrock, Gemini, …) describe provider handlers that **exist in the repo** under `src/core/api/providers/` but are **not wired** in `buildApiHandler` for this build. They are kept as reference for forks and future enablement.
+**Legacy pages:** Provider pages not listed above describe handlers that are present in the repository but are not selectable in this build. They remain as reference for forks and future enablement.
 </Warning>
 
 ## Plan vs Act

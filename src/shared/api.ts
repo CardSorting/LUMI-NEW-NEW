@@ -4,6 +4,7 @@ import type { ApiHandlerSettings } from "./storage/state-keys"
 export type ApiProvider =
 	| "openrouter"
 	| "openai-codex"
+	| "claude-subscription-directsdk-experimental"
 	| "nousResearch"
 	| "cloudflare"
 	| "dietcode"
@@ -378,108 +379,30 @@ export const anthropicModels = {
 	},
 } as const satisfies Record<string, ModelInfo> // as const assertion makes the object deeply readonly
 
-// Claude Code
-export type ClaudeCodeModelId = keyof typeof claudeCodeModels
-export const claudeCodeDefaultModelId: ClaudeCodeModelId = "claude-sonnet-4-5-20250929"
-export const claudeCodeModels = {
-	sonnet: {
-		...anthropicModels["claude-sonnet-4-5-20250929"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"sonnet[1m]": {
-		...anthropicModels["claude-sonnet-4-5-20250929:1m"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	opus: {
-		...anthropicModels["claude-opus-4-6"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"opus[1m]": {
-		...anthropicModels["claude-opus-4-6:1m"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-haiku-4-5-20251001": {
-		...anthropicModels["claude-haiku-4-5-20251001"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-sonnet-4-6": {
-		...anthropicModels["claude-sonnet-4-6"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-sonnet-4-6[1m]": {
-		...anthropicModels["claude-sonnet-4-6:1m"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-sonnet-4-5-20250929": {
-		...anthropicModels["claude-sonnet-4-5-20250929"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-sonnet-4-5-20250929[1m]": {
-		...anthropicModels["claude-sonnet-4-5-20250929:1m"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-sonnet-4-20250514": {
-		...anthropicModels["claude-sonnet-4-20250514"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-opus-4-7": {
-		...anthropicModels["claude-opus-4-7"],
-		supportsImages: false,
-		supportsPromptCache: false,
-		supportsReasoning: false,
-	},
-	"claude-opus-4-7[1m]": {
-		...anthropicModels["claude-opus-4-7:1m"],
-		supportsImages: false,
-		supportsPromptCache: false,
-		supportsReasoning: false,
-	},
-	"claude-opus-4-6": {
-		...anthropicModels["claude-opus-4-6"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-opus-4-6[1m]": {
-		...anthropicModels["claude-opus-4-6:1m"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-opus-4-5-20251101": {
-		...anthropicModels["claude-opus-4-5-20251101"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-opus-4-1-20250805": {
-		...anthropicModels["claude-opus-4-1-20250805"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-opus-4-20250514": {
-		...anthropicModels["claude-opus-4-20250514"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-3-7-sonnet-20250219": {
-		...anthropicModels["claude-3-7-sonnet-20250219"],
-		supportsImages: false,
-		supportsPromptCache: false,
-	},
-	"claude-3-5-haiku-20241022": {
-		...anthropicModels["claude-3-5-haiku-20241022"],
-		supportsImages: true,
-		supportsPromptCache: false,
-	},
-} as const satisfies Record<string, ModelInfo>
+export const claudeSubscriptionDirectSdkDefaultModelId = "claude-sonnet-5[1m]"
+export const claudeSubscriptionDirectSdkModels: Record<string, ModelInfo> = Object.fromEntries(
+	[
+		claudeSubscriptionDirectSdkDefaultModelId,
+		"claude-haiku-4-5-20251001",
+		"claude-opus-5[1m]",
+		"claude-opus-4-8[1m]",
+		"claude-fable-5-1[1m]",
+	].map((id) => [
+		id,
+		{
+			name: id,
+			maxTokens: id.toLowerCase().includes("haiku") ? 64_000 : 128_000,
+			contextWindow: id.includes("[1m]") ? 1_000_000 : 200_000,
+			supportsImages: true,
+			supportsPromptCache: false,
+			supportsReasoning: true,
+			inputPrice: 0,
+			outputPrice: 0,
+			apiFormat: ApiFormat.OPENAI_CHAT,
+			description: "Claude Code account route. Access and usage are managed by your Claude subscription.",
+		},
+	]),
+)
 
 // AWS Bedrock
 // https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html
@@ -2058,95 +1981,6 @@ export const openAiNativeModels = {
 		temperature: 0,
 	},
 } as const satisfies Record<string, OpenAiCompatibleModelInfo>
-
-// OpenAI Codex (ChatGPT Plus/Pro subscription)
-// Uses OAuth authentication via ChatGPT, routes to chatgpt.com/backend-api/codex/responses
-// Subscription-based pricing (all costs are $0)
-export type OpenAiCodexModelId = keyof typeof openAiCodexModels
-export const openAiCodexDefaultModelId: OpenAiCodexModelId = "gpt-5.3-codex"
-export const openAiCodexModels = {
-	"gpt-5.5": {
-		maxTokens: 128_000,
-		contextWindow: 1_000_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		// Subscription-based: no per-token costs
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.5 Codex: OpenAI's latest flagship coding model via ChatGPT subscription",
-	},
-	"gpt-5.4": {
-		maxTokens: 128_000,
-		contextWindow: 1_000_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		// Subscription-based: no per-token costs
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.4 Codex: OpenAI's latest flagship coding model via ChatGPT subscription",
-	},
-	"gpt-5.3-codex": {
-		maxTokens: 128_000,
-		contextWindow: 400_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		// Subscription-based: no per-token costs
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.3 Codex: OpenAI's latest flagship coding model via ChatGPT subscription",
-	},
-	"gpt-5.2-codex": {
-		maxTokens: 128_000,
-		contextWindow: 400_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		// Subscription-based: no per-token costs
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.2 Codex: OpenAI's flagship coding model via ChatGPT subscription",
-	},
-	"gpt-5.1-codex-max": {
-		maxTokens: 128_000,
-		contextWindow: 400_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.1 Codex Max: Maximum capability coding model via ChatGPT subscription",
-	},
-	"gpt-5.1-codex-mini": {
-		maxTokens: 128_000,
-		contextWindow: 400_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.1 Codex Mini: Faster version for coding tasks via ChatGPT subscription",
-	},
-	"gpt-5.2": {
-		maxTokens: 128_000,
-		contextWindow: 400_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		apiFormat: ApiFormat.OPENAI_RESPONSES,
-		inputPrice: 0,
-		outputPrice: 0,
-		description: "GPT-5.2: Latest GPT model via ChatGPT subscription",
-	},
-} as const satisfies Record<string, ModelInfo>
 
 // Azure OpenAI
 // https://learn.microsoft.com/en-us/azure/ai-services/openai/api-version-deprecation

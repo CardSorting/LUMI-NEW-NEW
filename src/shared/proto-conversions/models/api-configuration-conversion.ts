@@ -85,6 +85,10 @@ function convertApiProviderToProto(provider: string | undefined): ProtoApiProvid
 			return ProtoApiProvider.NOUSRESEARCH
 		case "openai-codex":
 			return ProtoApiProvider.OPENAI_CODEX
+		case "claude-code":
+			return ProtoApiProvider.CLAUDE_SUBSCRIPTION_DIRECTSDK
+		case "claude-subscription-directsdk-experimental":
+			return ProtoApiProvider.CLAUDE_SUBSCRIPTION_DIRECTSDK
 		case "cloudflare":
 			return ProtoApiProvider.CLOUDFLARE
 		default:
@@ -101,6 +105,10 @@ export function convertProtoToApiProvider(provider: ProtoApiProvider): ApiProvid
 			return "nousResearch"
 		case ProtoApiProvider.OPENAI_CODEX:
 			return "openai-codex"
+		case ProtoApiProvider.CLAUDE_CODE:
+			return "claude-subscription-directsdk-experimental"
+		case ProtoApiProvider.CLAUDE_SUBSCRIPTION_DIRECTSDK:
+			return "claude-subscription-directsdk-experimental"
 		case ProtoApiProvider.CLOUDFLARE:
 			return "cloudflare"
 		default:
@@ -121,6 +129,8 @@ export function convertApiConfigurationToProto(config: ApiConfiguration): ProtoA
 		nousResearchApiKey: config.nousResearchApiKey,
 		cloudflareAccountId: config.cloudflareAccountId,
 		cloudflareApiToken: config.cloudflareApiToken,
+		claudeSubscriptionDirectSdkPythonPath: config.claudeSubscriptionDirectSdkPythonPath,
+		claudeSubscriptionDirectSdkCommand: config.claudeSubscriptionDirectSdkCommand,
 
 		// Plan mode configurations
 		planModeApiProvider: config.planModeApiProvider ? convertApiProviderToProto(config.planModeApiProvider) : undefined,
@@ -155,6 +165,8 @@ export function convertProtoToApiConfiguration(protoConfig: ProtoApiConfiguratio
 		nousResearchApiKey: protoConfig.nousResearchApiKey,
 		cloudflareAccountId: protoConfig.cloudflareAccountId,
 		cloudflareApiToken: protoConfig.cloudflareApiToken,
+		claudeSubscriptionDirectSdkPythonPath: protoConfig.claudeSubscriptionDirectSdkPythonPath,
+		claudeSubscriptionDirectSdkCommand: protoConfig.claudeSubscriptionDirectSdkCommand,
 
 		// Plan mode configurations
 		planModeApiProvider:

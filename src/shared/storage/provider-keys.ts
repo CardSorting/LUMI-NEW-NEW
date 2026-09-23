@@ -87,6 +87,7 @@ export const ProviderToApiKeyMap: Partial<Record<ApiProvider, keyof Secrets | (k
 } as const
 
 const ProviderDefaultModelMap: Partial<Record<ApiProvider, string>> = {
+	"claude-subscription-directsdk-experimental": "claude-sonnet-5[1m]",
 	anthropic: anthropicDefaultModelId,
 	openrouter: openRouterDefaultModelId,
 	dietcode: openRouterDefaultModelId,

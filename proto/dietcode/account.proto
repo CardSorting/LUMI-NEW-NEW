@@ -56,6 +56,13 @@ service AccountService {
   // Signs out of OpenAI Codex and clears stored credentials
   rpc openAiCodexSignOut(EmptyRequest) returns (Empty);
 
+  // Refresh the models available to the signed-in Codex subscription.
+  rpc refreshOpenAiCodexModels(EmptyRequest) returns (String);
+
+  // Check the local Claude subscription bridge and discover account routes.
+  rpc getClaudeSubscriptionDirectSdkStatus(StringRequest) returns (String);
+  rpc refreshClaudeSubscriptionDirectSdkModels(StringRequest) returns (String);
+
   // Signs out of Google Personal and clears stored credentials
   rpc googleSignOutClicked(EmptyRequest) returns (Empty);
 }

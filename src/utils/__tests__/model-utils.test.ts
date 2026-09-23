@@ -38,7 +38,7 @@ describe("isClaude4PlusModelFamily", () => {
 	})
 
 	it("should return true for Claude Code short aliases (sonnet, opus)", () => {
-		// These are used by ClaudeCodeHandler.getModel() and should be recognized as Claude 4+
+		// Claude route aliases should be recognized as Claude 4+.
 		isClaude4PlusModelFamily("sonnet").should.equal(true)
 		isClaude4PlusModelFamily("opus").should.equal(true)
 	})

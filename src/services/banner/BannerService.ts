@@ -30,7 +30,7 @@ const IDE_MAP: Record<string, string> = {
 }
 
 const PROVIDER_ALIASES: Record<string, string[]> = {
-	anthropic: ["anthropic", "claude-code"],
+	anthropic: ["anthropic"],
 	openai: ["openai", "openai-native"],
 	qwen: ["qwen", "qwen-code"],
 }

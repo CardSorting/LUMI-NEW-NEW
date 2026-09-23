@@ -41,7 +41,14 @@ export async function readTextFromClipboard(): Promise<string> {
  * @returns Promise that resolves when the operation is complete
  */
 export async function openExternal(url: string): Promise<void> {
-	Logger.log("Opening browser:", url)
+	let safeUrl = "external link"
+	try {
+		const parsedUrl = new URL(url)
+		safeUrl = `${parsedUrl.origin}${parsedUrl.pathname}`
+	} catch {
+		// Avoid logging potentially sensitive query values even for malformed URLs.
+	}
+	Logger.log("Opening browser:", safeUrl)
 	try {
 		await HostProvider.env.openExternal(StringRequest.create({ value: url }))
 	} catch (error) {
@@ -54,7 +61,7 @@ export async function openExternal(url: string): Promise<void> {
 			Logger.error(`Fallback 'open' also failed: ${fallbackError}`)
 			HostProvider.window.showMessage({
 				type: ShowMessageType.ERROR,
-				message: `Failed to open URL: ${url}`,
+				message: `Could not open ${safeUrl}. Open the link again or try another browser.`,
 			})
 		}
 	}

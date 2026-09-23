@@ -218,11 +218,6 @@ export function getConfiguredProviders(
 	// VSCode LM - always potentially available
 	configured.push("vscode-lm")
 
-	// Claude Code - requires path
-	if (apiConfiguration.claudeCodePath) {
-		configured.push("claude-code")
-	}
-
 	// Qwen Code - requires API key (same as Qwen)
 	if (apiConfiguration.qwenApiKey) {
 		configured.push("qwen-code")

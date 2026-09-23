@@ -1,0 +1,43 @@
+---
+title: "Claude Code (Subscription)"
+sidebarTitle: "Claude Code Subscription"
+description: "Connect Claude Code subscription routes through the experimental local DirectSDK bridge."
+---
+
+Choose **Claude Code (Subscription)** to use your signed-in Claude Code account through LUMI's bundled subscription transport. Sign-in and available model routes come from the Claude Code CLI.
+
+## Requirements
+
+- Claude Code installed and signed in to the account you want to use. Run `claude auth login` if needed.
+- Python 3.10 or newer.
+- Claude Code 2.1.263 was the transport's recorded qualification version; later CLI releases may change native protocol behavior.
+
+LUMI includes the transport source and its MIT license. You do not need to install or select a separate plugin folder.
+
+## Set up
+
+1. In LUMI Settings → API Configuration, choose **Claude Code (Subscription)**.
+2. Choose **Check setup**. Resolve any missing Python, Claude CLI, or sign-in instructions shown there.
+3. Choose **Refresh routes** to load models exposed by your Claude account, then choose the route for Plan or Act.
+
+The **Advanced runtime options** fields are optional. Leave them blank to use `python3` and `claude` from your `PATH`; use them when those executables have different names or locations.
+
+## What LUMI does
+
+Each request starts a short-lived local Python process, passes the current conversation and tool definitions over standard input, and reads one versioned JSON response. The bridge validates the bundled transport manifest, limits request and response sizes, redacts bounded error output, and terminates the process on cancellation or timeout. Account credentials remain under Claude Code's control. LUMI reports tokens but cannot read your subscription invoice or extra-usage charges; its API cost field stays at zero and must not be read as evidence that the account incurred no usage.
+
+The bridge currently returns a complete response before LUMI emits its text and tool-call chunks, so generation does not stream incrementally. Model availability and use remain subject to Claude's account entitlements and limits.
+
+## Troubleshooting
+
+- **Bundled transport missing:** reinstall or rebuild LUMI so its packaged Python files are restored.
+- **Python could not start:** install Python 3.10+ or set **Python executable** to its full path.
+- **Claude Code is not authenticated:** run `claude auth status`; then authenticate the intended account with `claude auth login`.
+- **Routes are stale:** select **Refresh routes** after signing in or changing account access.
+- **Requests time out:** check the CLI first. The bridge has a bounded request timeout and stops the child process when cancelled.
+
+This transport is experimental and depends on compatibility between the bundled transport, Claude Code, and Python versions.
+
+## Bundled component
+
+LUMI vendors the DirectSDK transport from [NousResearch/hermes-plugin-claude-subscription-directsdk](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk) under its MIT license. The source and license are included in LUMI at `src/integrations/claude-subscription-directsdk/vendor`; the bundled version is adapted to use LUMI's tool namespace and shipped with every extension build.

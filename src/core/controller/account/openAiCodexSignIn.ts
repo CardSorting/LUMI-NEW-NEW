@@ -13,34 +13,37 @@ import { openExternal } from "@/utils/env"
 export async function openAiCodexSignIn(controller: Controller, _: EmptyRequest): Promise<Empty> {
 	try {
 		// Start the authorization flow and get the auth URL
-		const authUrl = openAiCodexOAuthManager.startAuthorizationFlow()
+		const authUrl = await openAiCodexOAuthManager.startAuthorizationFlow()
+		const callback = openAiCodexOAuthManager.waitForCallback()
 
 		// Open the auth URL in the browser
 		await openExternal(authUrl)
+		await controller.postStateToWebview()
 
-		// Wait for the OAuth callback in the background
-		// The callback will save credentials when complete
-		openAiCodexOAuthManager
-			.waitForCallback()
-			.then(async () => {
-				HostProvider.window.showMessage({
-					type: ShowMessageType.INFORMATION,
-					message: "Successfully signed in to OpenAI Codex",
-				})
-				await controller.postStateToWebview()
-			})
-			.catch((error) => {
-				Logger.error("[openAiCodexSignIn] OAuth callback failed:", error)
-				openAiCodexOAuthManager.cancelAuthorizationFlow()
-				// Don't show notification for timeouts (user likely just abandoned)
-				const errorMessage = error instanceof Error ? error.message : String(error)
-				if (!errorMessage.includes("timed out")) {
+		// Keep the settings UI in sync when approval succeeds, fails, or is cancelled.
+		void callback
+			.then(
+				async () => {
 					HostProvider.window.showMessage({
-						type: ShowMessageType.ERROR,
-						message: `OpenAI Codex sign in failed: ${errorMessage}`,
+						type: ShowMessageType.INFORMATION,
+						message: "Successfully signed in to OpenAI Codex",
 					})
-				}
-			})
+				},
+				async (error) => {
+					Logger.error("[openAiCodexSignIn] OAuth callback failed:", error)
+					openAiCodexOAuthManager.cancelAuthorizationFlow()
+					// Don't show notifications when the user cancelled or abandoned sign-in.
+					const errorMessage = error instanceof Error ? error.message : String(error)
+					if (!/timed out|cancelled/i.test(errorMessage)) {
+						HostProvider.window.showMessage({
+							type: ShowMessageType.ERROR,
+							message: "OpenAI Codex sign-in couldn’t be completed. Return to Settings and try again.",
+						})
+					}
+				},
+			)
+			.finally(() => controller.postStateToWebview())
+			.catch((error) => Logger.error("[openAiCodexSignIn] Failed to refresh sign-in state:", error))
 	} catch (error) {
 		Logger.error("[openAiCodexSignIn] Failed to start OAuth flow:", error)
 		openAiCodexOAuthManager.cancelAuthorizationFlow()

@@ -1,4 +1,4 @@
-import { ModelInfo, OpenAiCodexModelId, openAiCodexDefaultModelId, openAiCodexModels } from "@shared/api"
+import { ModelInfo } from "@shared/api"
 import { normalizeOpenaiReasoningEffort } from "@shared/storage/types"
 import OpenAI from "openai"
 import type { ChatCompletionTool } from "openai/resources/chat/completions"
@@ -98,7 +98,19 @@ export class OpenAiCodexHandler implements ApiHandler {
 	}
 
 	async *createMessage(systemPrompt: string, messages: DietCodeStorageMessage[], tools?: ChatCompletionTool[]): ApiStream {
-		const model = this.getModel()
+		const availableModels = await openAiCodexOAuthManager.listModels()
+		const requestedModelId = this.options.apiModelId?.trim()
+		const modelId = requestedModelId || Object.keys(availableModels)[0]
+		if (!modelId) {
+			throw new Error("Your ChatGPT account returned no Codex models. Refresh the model list in Settings and try again.")
+		}
+		const modelInfo = availableModels[modelId]
+		if (!modelInfo) {
+			throw new Error(
+				`OpenAI Codex model "${modelId}" is not available to this account. Choose an available model in Settings.`,
+			)
+		}
+		const model = { id: modelId, info: modelInfo }
 
 		// Reset state for this request
 		this.pendingToolCallId = undefined
@@ -110,17 +122,19 @@ export class OpenAiCodexHandler implements ApiHandler {
 			throw new Error("Not authenticated with OpenAI Codex. Please sign in using the OpenAI Codex OAuth flow in settings.")
 		}
 		const useWebsocketMode = this.useWebsocketMode(model.info.apiFormat)
-		const { input, previousResponseId } = convertToOpenAIResponsesInput(messages, { usePreviousResponseId: useWebsocketMode })
-		const usePreviousResponseId = useWebsocketMode && !!previousResponseId
+		// Codex requests use `store: false`, so a response referenced by
+		// `previous_response_id` may no longer be available on the next turn.
+		// Keep continuation self-contained by sending the complete transcript,
+		// including encrypted reasoning items, on both HTTP and WebSocket paths.
+		const { input } = convertToOpenAIResponsesInput(messages, { usePreviousResponseId: false })
 
 		// Build request body
-		const requestBody = this.buildRequestBody(model, input, systemPrompt, tools, previousResponseId)
-		const fallbackRequestBody = this.buildRequestBody(model, input, systemPrompt, tools)
+		const requestBody = this.buildRequestBody(model, input, systemPrompt, tools)
 
 		// Make the request with retry on auth failure
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				yield* this.executeRequest(requestBody, fallbackRequestBody, model, accessToken, usePreviousResponseId)
+				yield* this.executeRequest(requestBody, model, accessToken, useWebsocketMode)
 				return
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
@@ -154,7 +168,6 @@ export class OpenAiCodexHandler implements ApiHandler {
 		formattedInput: any,
 		systemPrompt: string,
 		tools?: ChatCompletionTool[],
-		previousResponseId?: string,
 	): any {
 		// Determine reasoning effort
 		const reasoningEffort = normalizeOpenaiReasoningEffort(this.options.reasoningEffort)
@@ -166,8 +179,9 @@ export class OpenAiCodexHandler implements ApiHandler {
 			stream: true,
 			store: false,
 			instructions: systemPrompt,
-			...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
-			...(includeReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
+			parallel_tool_calls: false,
+			...(model.info.maxTokens ? { max_output_tokens: model.info.maxTokens } : {}),
+			include: ["reasoning.encrypted_content"],
 			...(includeReasoning
 				? {
 						reasoning: {
@@ -197,7 +211,6 @@ export class OpenAiCodexHandler implements ApiHandler {
 
 	private async *executeRequest(
 		requestBody: any,
-		fallbackRequestBody: any,
 		model: { id: string; info: ModelInfo },
 		accessToken: string,
 		useWebsocketMode: boolean,
@@ -220,7 +233,7 @@ export class OpenAiCodexHandler implements ApiHandler {
 
 			if (useWebsocketMode) {
 				try {
-					yield* this.createResponseStreamWebsocket(requestBody, fallbackRequestBody, accessToken, codexHeaders, model)
+					yield* this.createResponseStreamWebsocket(requestBody, accessToken, codexHeaders, model)
 					return
 				} catch (error) {
 					Logger.error("OpenAI Codex websocket mode failed, falling back to HTTP Responses API:", error)
@@ -268,7 +281,6 @@ export class OpenAiCodexHandler implements ApiHandler {
 
 	private async *createResponseStreamWebsocket(
 		primaryParams: any,
-		fallbackParams: any,
 		accessToken: string,
 		codexHeaders: Record<string, string>,
 		model: { id: string; info: ModelInfo },
@@ -281,12 +293,10 @@ export class OpenAiCodexHandler implements ApiHandler {
 				yield* this.processEvent(event, model)
 			}
 		} catch (error) {
-			if (this.shouldRetryWebsocketWithFullContext(error, !!primaryParams.previous_response_id)) {
-				Logger.log(
-					"Retrying Codex websocket response with full context after previous_response_not_found or socket reset",
-				)
+			if (this.shouldRetryWebsocketAfterReset(error)) {
+				Logger.log("Retrying Codex websocket response with the complete transcript after a socket reset")
 				this.closeResponsesWebsocket()
-				for await (const event of this.createResponseEventsViaWebsocket(fallbackParams, accessToken, codexHeaders)) {
+				for await (const event of this.createResponseEventsViaWebsocket(primaryParams, accessToken, codexHeaders)) {
 					if (this.abortController?.signal.aborted) {
 						return
 					}
@@ -298,15 +308,12 @@ export class OpenAiCodexHandler implements ApiHandler {
 		}
 	}
 
-	private shouldRetryWebsocketWithFullContext(error: unknown, hadPreviousResponseId: boolean): boolean {
+	private shouldRetryWebsocketAfterReset(error: unknown): boolean {
 		const errorCode =
 			typeof error === "object" && error && "code" in error && typeof (error as { code: unknown }).code === "string"
 				? (error as { code: string }).code
 				: undefined
 
-		if (hadPreviousResponseId && errorCode === "previous_response_not_found") {
-			return true
-		}
 		if (errorCode === "websocket_closed" || errorCode === "websocket_error") {
 			return true
 		}
@@ -695,12 +702,23 @@ export class OpenAiCodexHandler implements ApiHandler {
 		this.abortController?.abort()
 	}
 
-	getModel(): { id: OpenAiCodexModelId; info: ModelInfo } {
+	getModel(): { id: string; info: ModelInfo } {
 		const modelId = this.options.apiModelId
 
-		const id = modelId && modelId in openAiCodexModels ? (modelId as OpenAiCodexModelId) : openAiCodexDefaultModelId
+		const id = modelId || ""
 
-		const info: ModelInfo = openAiCodexModels[id]
+		const info: ModelInfo = {
+			name: id,
+			maxTokens: 128_000,
+			contextWindow: 400_000,
+			supportsImages: true,
+			supportsPromptCache: false,
+			supportsReasoning: true,
+			inputPrice: 0,
+			outputPrice: 0,
+			apiFormat: ApiFormat.OPENAI_RESPONSES,
+			description: "Model metadata is provided by the signed-in OpenAI Codex account.",
+		}
 
 		return { id, info }
 	}

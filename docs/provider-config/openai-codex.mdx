@@ -4,7 +4,7 @@ sidebarTitle: "OpenAI Codex"
 description: "Connect your OpenAI account to LUMI via OAuth for seamless access to OpenAI models."
 ---
 
-OpenAI Codex lets you connect your OpenAI account directly to LUMI using OAuth, meaning you don't need to manage API keys. Simply sign in with your OpenAI account through a one-click browser authentication, and you'll automatically have access to all the models available on your OpenAI plan. No additional configuration required. 
+OpenAI Codex connects your ChatGPT account to LUMI with OAuth. LUMI refreshes the account's available model list in Settings and sends the full conversation context with each turn, so a follow-up does not depend on a stored server-side response.
 
 <Tip>
 If you prefer to use API keys instead, see the [OpenAI (API Key)](/provider-config/openai) provider configuration.
@@ -29,7 +29,7 @@ The models available to you depend on your OpenAI account's subscription tier. S
     Choose **"OpenAI Codex"** from the "API Provider" dropdown menu.
   </Step>
   <Step title="Sign In with OpenAI">
-    Click the **"Sign in with OpenAI"** button. This will open a browser window for authentication.
+    Click **"Connect ChatGPT"**. This opens a browser window for authentication.
   </Step>
   <Step title="Authorize LUMI">
     In the browser window that opens:
@@ -38,7 +38,7 @@ The models available to you depend on your OpenAI account's subscription tier. S
     3. Click **"Authorize"** to grant access
   </Step>
   <Step title="Select Your Model">
-    Once authorized, you'll be returned to LUMI. Choose your desired model from the **"Model"** dropdown.
+    Once authorized, LUMI loads the models available to your account. Choose a model from the **"Model"** dropdown; use **"Refresh account models"** after changing account access.
   </Step>
 </Steps>
 
@@ -95,7 +95,7 @@ OAuth tokens are automatically refreshed by LUMI. If you encounter authenticatio
 
 ## Good to Know
 
-LUMI only requests the permissions necessary to make API calls on your behalf. Your OpenAI credentials are never stored by LUMI.
+LUMI stores the OAuth credentials in its local secret storage so it can refresh the session. They are used to authenticate Codex requests and are not shown in the model catalog.
 
 When using ChatGPT Subscription (`openai-codex`), LUMI accesses models through your OpenAI/ChatGPT subscription. There is no separate per-token API billing for this provider; usage and limits are governed by your subscription plan.
 

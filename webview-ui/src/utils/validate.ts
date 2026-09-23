@@ -78,8 +78,8 @@ export function validateApiConfiguration(currentMode: Mode, apiConfiguration?: A
 				}
 				break
 			case "openai-codex":
-				// Authentication is handled via OAuth, not API key
-				// Validation happens at runtime in the handler
+			case "claude-subscription-directsdk-experimental":
+				// Account and bridge checks run in the selected provider.
 				break
 			case "openai":
 				if (

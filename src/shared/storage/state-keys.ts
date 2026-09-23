@@ -111,6 +111,8 @@ const API_HANDLER_SETTINGS_FIELDS = {
 	openAiHeaders: { default: {} as Record<string, string> },
 	openRouterProviderSorting: { default: undefined as string | undefined },
 	cloudflareAccountId: { default: undefined as string | undefined },
+	claudeSubscriptionDirectSdkPythonPath: { default: undefined as string | undefined },
+	claudeSubscriptionDirectSdkCommand: { default: undefined as string | undefined },
 
 	// Embedding configuration
 	embeddingProvider: { default: DEFAULT_API_PROVIDER as ApiProvider },

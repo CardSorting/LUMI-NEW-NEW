@@ -1,13 +1,13 @@
 import {
 	ApiConfiguration,
 	ApiProvider,
+	claudeSubscriptionDirectSdkDefaultModelId,
+	claudeSubscriptionDirectSdkModels,
 	cloudflareDefaultModelId,
 	cloudflareModels,
 	ModelInfo,
 	nousResearchDefaultModelId,
 	nousResearchModels,
-	openAiCodexDefaultModelId,
-	openAiCodexModels,
 	openRouterDefaultModelId,
 	openRouterDefaultModelInfo,
 } from "@shared/api"
@@ -31,7 +31,9 @@ export function getModelsForProvider(
 		case "cloudflare":
 			return cloudflareModels
 		case "openai-codex":
-			return openAiCodexModels
+			return undefined
+		case "claude-subscription-directsdk-experimental":
+			return claudeSubscriptionDirectSdkModels
 		case "nousResearch":
 			return nousResearchModels
 		default:
@@ -55,8 +57,12 @@ export function normalizeApiConfiguration(
 	apiConfiguration: ApiConfiguration | undefined,
 	currentMode: Mode,
 ): NormalizedApiConfig {
-	const provider =
+	const storedProvider =
 		(currentMode === "plan" ? apiConfiguration?.planModeApiProvider : apiConfiguration?.actModeApiProvider) || "openrouter"
+	const provider: ApiProvider =
+		(storedProvider as string) === "claude-code"
+			? "claude-subscription-directsdk-experimental"
+			: (storedProvider as ApiProvider)
 
 	const modelId = currentMode === "plan" ? apiConfiguration?.planModeApiModelId : apiConfiguration?.actModeApiModelId
 
@@ -66,6 +72,9 @@ export function normalizeApiConfiguration(
 		if (modelId && modelId in models) {
 			selectedModelId = modelId
 			selectedModelInfo = models[modelId]
+		} else if (modelId && (provider === "openai-codex" || provider === "claude-subscription-directsdk-experimental")) {
+			selectedModelId = modelId
+			selectedModelInfo = models[defaultId]
 		} else {
 			selectedModelId = defaultId
 			selectedModelInfo = models[defaultId]
@@ -78,10 +87,24 @@ export function normalizeApiConfiguration(
 	}
 
 	switch (provider) {
+		case "openai-codex":
+			return {
+				selectedProvider: provider,
+				selectedModelId: modelId || "",
+				selectedModelInfo: {
+					name: modelId || "Connect ChatGPT to load available models",
+					maxTokens: 0,
+					contextWindow: 0,
+					supportsImages: false,
+					supportsPromptCache: false,
+					inputPrice: 0,
+					outputPrice: 0,
+				},
+			}
 		case "cloudflare":
 			return getProviderData(cloudflareModels, cloudflareDefaultModelId)
-		case "openai-codex":
-			return getProviderData(openAiCodexModels, openAiCodexDefaultModelId)
+		case "claude-subscription-directsdk-experimental":
+			return getProviderData(claudeSubscriptionDirectSdkModels, claudeSubscriptionDirectSdkDefaultModelId)
 		case "openrouter":
 			const openRouterModelId =
 				currentMode === "plan" ? apiConfiguration?.planModeOpenRouterModelId : apiConfiguration?.actModeOpenRouterModelId

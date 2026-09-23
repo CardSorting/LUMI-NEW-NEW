@@ -451,7 +451,8 @@ enum ApiProvider {
   CEREBRAS = 23;
   GROQ = 24;
   SAPAICORE = 25;
-  CLAUDE_CODE = 26;
+  // Retained so older saved configurations can migrate to the bundled subscription provider.
+  CLAUDE_CODE = 26 [deprecated = true];
   MOONSHOT = 27;
   HUGGINGFACE = 28;
   HUAWEI_CLOUD_MAAS = 29;
@@ -468,6 +469,7 @@ enum ApiProvider {
   OPENAI_CODEX = 40;
   CLOUDFLARE = 41;
   GOOGLE_PERSONAL = 42;
+  CLAUDE_SUBSCRIPTION_DIRECTSDK = 43;
 }
 
 enum ApiFormat {
@@ -612,6 +614,10 @@ message ModelsApiConfiguration {
   optional string embedding_open_ai_base_url = 90;
   optional string cloudflare_account_id = 91;
   optional string cloudflare_api_token = 92;
+  // Legacy external-plugin path; retained on the wire and ignored because LUMI now bundles the transport.
+  optional string claude_subscription_direct_sdk_plugin_dir = 93;
+  optional string claude_subscription_direct_sdk_python_path = 94;
+  optional string claude_subscription_direct_sdk_command = 95;
 
   // Plan mode configurations
   optional ApiProvider plan_mode_api_provider = 100;

@@ -6,7 +6,11 @@
 		},
 		{
 			"value": "openai-codex",
-			"label": "ChatGPT Subscription"
+			"label": "OpenAI Codex (ChatGPT subscription)"
+		},
+		{
+			"value": "claude-subscription-directsdk-experimental",
+			"label": "Claude Code (Subscription)"
 		},
 		{
 			"value": "nousResearch",

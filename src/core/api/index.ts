@@ -1,6 +1,7 @@
 import { ApiConfiguration } from "@shared/api"
 import { Mode } from "@shared/storage/types"
 import { Logger } from "@/shared/services/Logger"
+import { ClaudeSubscriptionDirectSdkHandler } from "./providers/claude-subscription-directsdk"
 import { CloudflareHandler } from "./providers/cloudflare"
 import { NousResearchHandler } from "./providers/nousresearch"
 import { OpenAiCodexHandler } from "./providers/openai-codex"
@@ -34,6 +35,17 @@ function createHandlerForProvider(
 				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
 			})
+		case "claude-code": // Migrate saved legacy configurations to the bundled subscription provider.
+		case "claude-subscription-directsdk-experimental":
+			return new ClaudeSubscriptionDirectSdkHandler({
+				onRetryAttempt: options.onRetryAttempt,
+				claudeSubscriptionDirectSdkModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				claudeSubscriptionDirectSdkPythonPath: options.claudeSubscriptionDirectSdkPythonPath,
+				claudeSubscriptionDirectSdkCommand: options.claudeSubscriptionDirectSdkCommand,
+				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
+				thinkingBudgetTokens:
+					mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
+			})
 		case "cloudflare":
 			return new CloudflareHandler({
 				onRetryAttempt: options.onRetryAttempt,
@@ -64,7 +76,7 @@ function createHandlerForProvider(
 export function buildApiHandler(configuration: ApiConfiguration, mode: Mode): ApiHandler {
 	const { planModeApiProvider, actModeApiProvider, ...options } = configuration
 
-	const apiProvider = mode === "plan" ? planModeApiProvider : actModeApiProvider
+	const apiProvider: string | undefined = mode === "plan" ? planModeApiProvider : actModeApiProvider
 
 	// Validate thinking budget tokens against model's maxTokens to prevent API errors
 	// wrapped in a try-catch for safety, but this should never throw
@@ -94,7 +106,16 @@ export function buildApiHandler(configuration: ApiConfiguration, mode: Mode): Ap
 		return createHandlerForProvider(apiProvider, options, mode)
 	} catch (error) {
 		Logger.error("buildApiHandler: CRITICAL failure in createHandlerForProvider", error)
-		// Fallback to a safe default if even creation fails
+		// Provider selection expresses the user's account and billing intent.
+		// Never turn a setup or construction failure into a different provider.
+		if (
+			apiProvider === "openai-codex" ||
+			apiProvider === "claude-code" ||
+			apiProvider === "claude-subscription-directsdk-experimental"
+		) {
+			throw error
+		}
+		// Keep the legacy safe default for stale unsupported values.
 		return createHandlerForProvider("openrouter", options, mode)
 	}
 }

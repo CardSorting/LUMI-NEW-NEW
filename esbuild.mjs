@@ -139,6 +139,13 @@ const copyWasmFiles = {
 				const filename = `tree-sitter-${lang}.wasm`
 				fs.copyFileSync(path.join(languageWasmDir, filename), path.join(targetDir, filename))
 			})
+
+			const bridgeSource = path.join(__dirname, "src", "integrations", "claude-subscription-directsdk", "bridge.py")
+			const bridgeTargetDirectory = path.join(targetDir, "integrations", "claude-subscription-directsdk")
+			fs.mkdirSync(bridgeTargetDirectory, { recursive: true })
+			fs.copyFileSync(bridgeSource, path.join(bridgeTargetDirectory, "bridge.py"))
+			const vendorSource = path.join(__dirname, "src", "integrations", "claude-subscription-directsdk", "vendor")
+			fs.cpSync(vendorSource, path.join(bridgeTargetDirectory, "vendor"), { recursive: true, force: true })
 		})
 	},
 }

@@ -103,7 +103,7 @@ message Secrets {
   optional string cloudflare_api_token = 50;
   optional string embedding_api_key = 53;
   optional string vertex_api_key = 58;
-  optional string openai_codex_oauth_credentials = 92;
+  optional string openai_codex_oauth_credentials = 95;
 }
 
 // NOTE: Add new fields under API_HANDLER_SETTINGS_FIELDS or USER_SETTINGS_FIELDS
@@ -186,7 +186,9 @@ message Settings {
   optional bool audit_sarif_hook_export_enabled = 219;
   optional bool audit_workspace_artifacts_enabled = 220;
   optional string audit_advisory_auto_scroll_mode = 222;
-  map<string, string> open_ai_headers = 223;
+  optional string claude_subscription_direct_sdk_python_path = 225;
+  optional string claude_subscription_direct_sdk_command = 226;
+  map<string, string> open_ai_headers = 229;
 }
 
 message State {

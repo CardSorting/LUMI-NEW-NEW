@@ -1,8 +1,11 @@
+import type { ModelInfo } from "@shared/api"
+import { ApiFormat } from "@shared/proto/dietcode/models"
 import * as crypto from "crypto"
 import * as http from "http"
 import { URL } from "url"
 import { z } from "zod"
 import { StateManager } from "@/core/storage/StateManager"
+import { ExtensionRegistryInfo } from "@/registry"
 import { fetch } from "@/shared/net"
 import { Logger } from "@/shared/services/Logger"
 
@@ -25,8 +28,53 @@ export const OPENAI_CODEX_OAUTH_CONFIG = {
 	callbackPort: 1455,
 } as const
 
+const CALLBACK_PATH = "/auth/callback"
+const CALLBACK_PORTS = [1455, 1457] as const
+const CALLBACK_TIMEOUT_MS = 5 * 60_000
+
 // Token storage key - must match the key in SECRETS_KEYS (state-keys.ts)
-const _OPENAI_CODEX_CREDENTIALS_KEY = "openai-codex-oauth-credentials"
+const OPENAI_CODEX_CREDENTIALS_KEY = "openai-codex-oauth-credentials"
+const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models"
+const CODEX_MODELS_CACHE_MS = 5 * 60_000
+
+function safeModelString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined
+	const text = value.replace(/\p{Cc}/gu, " ").trim()
+	return text.length > 0 && text.length <= 200 ? text : undefined
+}
+
+function positiveModelNumber(value: unknown): number | undefined {
+	const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : undefined
+	return number !== undefined && Number.isFinite(number) && number > 0 ? number : undefined
+}
+
+export function normalizeOpenAiCodexModels(payload: unknown): Record<string, ModelInfo> {
+	const root = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : undefined
+	const rows = Array.isArray(payload) ? payload : root?.models
+	if (!Array.isArray(rows)) throw new Error("OpenAI Codex model catalog response did not contain a models list")
+	const result: Record<string, ModelInfo> = {}
+	for (const value of rows) {
+		if (typeof value !== "object" || value === null) continue
+		const row = value as Record<string, unknown>
+		const id = safeModelString(row.slug) ?? safeModelString(row.id)
+		if (!id || id.includes("/") || id in result) continue
+		const modalities = Array.isArray(row.input_modalities) ? row.input_modalities : undefined
+		const levels = Array.isArray(row.supported_reasoning_levels) ? row.supported_reasoning_levels : undefined
+		result[id] = {
+			name: safeModelString(row.display_name) ?? safeModelString(row.name) ?? id,
+			maxTokens: positiveModelNumber(row.max_output_tokens),
+			contextWindow: positiveModelNumber(row.context_window) ?? positiveModelNumber(row.max_context_window),
+			supportsImages: modalities ? modalities.some((entry) => entry === "image") : true,
+			supportsPromptCache: false,
+			supportsReasoning: Boolean(levels?.length || safeModelString(row.default_reasoning_level)),
+			inputPrice: 0,
+			outputPrice: 0,
+			description: safeModelString(row.description),
+			apiFormat: ApiFormat.OPENAI_RESPONSES,
+		}
+	}
+	return result
+}
 
 // Credentials schema
 const openAiCodexCredentialsSchema = z.object({
@@ -34,7 +82,7 @@ const openAiCodexCredentialsSchema = z.object({
 	access_token: z.string().min(1),
 	refresh_token: z.string().min(1),
 	// expires is in milliseconds since epoch
-	expires: z.number(),
+	expires: z.number().finite().positive(),
 	email: z.string().optional(),
 	// ChatGPT account ID extracted from JWT claims (for ChatGPT-Account-Id header)
 	accountId: z.string().optional(),
@@ -44,10 +92,10 @@ export type OpenAiCodexCredentials = z.infer<typeof openAiCodexCredentialsSchema
 
 // Token response schema from OpenAI
 const tokenResponseSchema = z.object({
-	access_token: z.string(),
+	access_token: z.string().min(1),
 	refresh_token: z.string().min(1).optional(),
 	id_token: z.string().optional(),
-	expires_in: z.number(),
+	expires_in: z.number().finite().positive(),
 	email: z.string().optional(),
 	token_type: z.string().optional(),
 })
@@ -57,6 +105,8 @@ const tokenResponseSchema = z.object({
  */
 interface IdTokenClaims {
 	chatgpt_account_id?: string
+	account_id?: string
+	"https://api.openai.com/auth.chatgpt_account_id"?: string
 	organizations?: Array<{ id: string }>
 	email?: string
 	"https://api.openai.com/auth"?: {
@@ -74,7 +124,8 @@ function parseJwtClaims(token: string): IdTokenClaims | undefined {
 	try {
 		// Use base64url decoding (Node.js Buffer handles this)
 		const payload = Buffer.from(parts[1], "base64url").toString("utf-8")
-		return JSON.parse(payload) as IdTokenClaims
+		const claims: unknown = JSON.parse(payload)
+		return typeof claims === "object" && claims !== null && !Array.isArray(claims) ? (claims as IdTokenClaims) : undefined
 	} catch {
 		return undefined
 	}
@@ -88,7 +139,13 @@ function parseJwtClaims(token: string): IdTokenClaims | undefined {
  * 3. First organization ID
  */
 function extractAccountIdFromClaims(claims: IdTokenClaims): string | undefined {
-	return claims.chatgpt_account_id || claims["https://api.openai.com/auth"]?.chatgpt_account_id || claims.organizations?.[0]?.id
+	const value =
+		claims["https://api.openai.com/auth.chatgpt_account_id"] ||
+		claims.chatgpt_account_id ||
+		claims["https://api.openai.com/auth"]?.chatgpt_account_id ||
+		claims.account_id ||
+		claims.organizations?.[0]?.id
+	return typeof value === "string" && value.length > 0 && value.length <= 200 ? value : undefined
 }
 
 /**
@@ -132,7 +189,7 @@ class OpenAiCodexOAuthTokenError extends Error {
 	}
 }
 
-function parseOAuthErrorDetails(errorText: string): { errorCode?: string; errorMessage?: string } {
+function parseOAuthErrorDetails(errorText: string): { errorCode?: string } {
 	try {
 		const json: unknown = JSON.parse(errorText)
 		if (!json || typeof json !== "object") {
@@ -149,23 +206,24 @@ function parseOAuthErrorDetails(errorText: string): { errorCode?: string; errorM
 					? ((errorField as Record<string, unknown>).type as string)
 					: undefined
 
-		const errorDescription = obj.error_description
-		const errorMessageFromError =
-			errorField && typeof errorField === "object" ? (errorField as Record<string, unknown>).message : undefined
-
-		const errorMessage: string | undefined =
-			typeof errorDescription === "string"
-				? errorDescription
-				: typeof errorMessageFromError === "string"
-					? errorMessageFromError
-					: typeof obj.message === "string"
-						? obj.message
-						: undefined
-
-		return { errorCode, errorMessage }
+		return { errorCode }
 	} catch {
 		return {}
 	}
+}
+
+async function oauthResponseError(operation: "exchange" | "refresh", response: Response): Promise<OpenAiCodexOAuthTokenError> {
+	let errorCode: string | undefined
+	try {
+		const details = parseOAuthErrorDetails(await response.text())
+		if (details.errorCode && /^[a-z0-9_.-]{1,80}$/i.test(details.errorCode)) errorCode = details.errorCode
+	} catch {
+		// Keep error bodies out of logs and user facing messages.
+	}
+	return new OpenAiCodexOAuthTokenError(
+		`Token ${operation} failed (HTTP ${response.status}).${errorCode ? ` Error: ${errorCode}.` : ""}`,
+		{ status: response.status, errorCode },
+	)
 }
 
 /**
@@ -173,7 +231,7 @@ function parseOAuthErrorDetails(errorText: string): { errorCode?: string; errorM
  * Must be 43-128 characters long using unreserved characters
  */
 export function generateCodeVerifier(): string {
-	const buffer = crypto.randomBytes(32)
+	const buffer = crypto.randomBytes(64)
 	return buffer.toString("base64url")
 }
 
@@ -189,22 +247,27 @@ export function generateCodeChallenge(verifier: string): string {
  * Generates a random state parameter for CSRF protection
  */
 export function generateState(): string {
-	return crypto.randomBytes(16).toString("hex")
+	return crypto.randomBytes(32).toString("base64url")
 }
 
 /**
  * Builds the authorization URL for OpenAI Codex OAuth flow
  * Includes Codex-specific parameters per the implementation guide
  */
-export function buildAuthorizationUrl(codeChallenge: string, state: string): string {
+export function buildAuthorizationUrl(
+	codeChallenge: string,
+	state: string,
+	redirectUri: string = OPENAI_CODEX_OAUTH_CONFIG.redirectUri,
+): string {
 	const params = new URLSearchParams({
 		client_id: OPENAI_CODEX_OAUTH_CONFIG.clientId,
-		redirect_uri: OPENAI_CODEX_OAUTH_CONFIG.redirectUri,
+		redirect_uri: redirectUri,
 		scope: OPENAI_CODEX_OAUTH_CONFIG.scopes,
 		code_challenge: codeChallenge,
 		code_challenge_method: "S256",
 		response_type: "code",
 		state,
+		id_token_add_organizations: "true",
 		// Codex-specific parameters
 		codex_cli_simplified_flow: "true",
 		originator: "dietcode",
@@ -213,59 +276,102 @@ export function buildAuthorizationUrl(codeChallenge: string, state: string): str
 	return `${OPENAI_CODEX_OAUTH_CONFIG.authorizationEndpoint}?${params.toString()}`
 }
 
+interface PendingCodexAuthorization {
+	codeVerifier: string
+	state: string
+	redirectUri: string
+	server?: http.Server
+	timeout?: NodeJS.Timeout
+	callback: Promise<OpenAiCodexCredentials>
+	resolve: (credentials: OpenAiCodexCredentials) => void
+	reject: (error: Error) => void
+	callbackAccepted: boolean
+	finished: boolean
+	generation: number
+	abortController: AbortController
+}
+
+function writeCallbackPage(response: http.ServerResponse, outcome: "success" | "cancelled" | "failed"): void {
+	if (response.destroyed || response.headersSent) return
+	const pages = {
+		success: ["Sign-in complete", "OpenAI Codex is connected. Return to LUMI to choose a model."],
+		cancelled: ["Sign-in cancelled", "No changes were made to your existing connection. Return to LUMI to try again."],
+		failed: ["Sign-in incomplete", "LUMI could not finish connecting this account. Return to LUMI and try again."],
+	} as const
+	const [title, message] = pages[outcome]
+	response.writeHead(outcome === "success" ? 200 : outcome === "cancelled" ? 400 : 502, {
+		"Content-Type": "text/html; charset=utf-8",
+		"Cache-Control": "no-store, max-age=0",
+		"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+		"Referrer-Policy": "no-referrer",
+		"X-Content-Type-Options": "nosniff",
+	})
+	response.end(
+		`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · LUMI</title><style>body{font:16px system-ui,sans-serif;max-width:36rem;margin:18vh auto;padding:0 1.5rem;color:#e5e7eb;background:#111827}h1{font-size:1.7rem}p{line-height:1.6;color:#b7c0ce}</style></head><body><main><h1>${title}</h1><p>${message}</p></main></body></html>`,
+	)
+}
+
 /**
  * Exchanges the authorization code for tokens
  * Important: Uses application/x-www-form-urlencoded (not JSON)
  * Important: state must NOT be included in token exchange body
  */
-export async function exchangeCodeForTokens(code: string, codeVerifier: string): Promise<OpenAiCodexCredentials> {
+export async function exchangeCodeForTokens(
+	code: string,
+	codeVerifier: string,
+	redirectUri: string = OPENAI_CODEX_OAUTH_CONFIG.redirectUri,
+	signal?: AbortSignal,
+): Promise<OpenAiCodexCredentials> {
 	// Per the implementation guide: use application/x-www-form-urlencoded
 	// and do NOT include state in the body (OpenAI returns error if included)
 	const body = new URLSearchParams({
 		grant_type: "authorization_code",
 		client_id: OPENAI_CODEX_OAUTH_CONFIG.clientId,
 		code,
-		redirect_uri: OPENAI_CODEX_OAUTH_CONFIG.redirectUri,
+		redirect_uri: redirectUri,
 		code_verifier: codeVerifier,
 	})
 
-	const response = await fetch(OPENAI_CODEX_OAUTH_CONFIG.tokenEndpoint, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/x-www-form-urlencoded",
-		},
-		body: body.toString(),
-		signal: AbortSignal.timeout(30000),
-	})
+	if (signal?.aborted) throw new Error("OpenAI Codex sign-in was cancelled.")
+	const controller = new AbortController()
+	const timeout = setTimeout(() => controller.abort(), 30_000)
+	const abortFromCaller = () => controller.abort()
+	signal?.addEventListener("abort", abortFromCaller, { once: true })
+	try {
+		const response = await fetch(OPENAI_CODEX_OAUTH_CONFIG.tokenEndpoint, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+			},
+			body: body.toString(),
+			signal: controller.signal,
+		})
+		if (!response.ok) throw await oauthResponseError("exchange", response)
 
-	if (!response.ok) {
-		const errorText = await response.text()
-		throw new Error(`Token exchange failed: ${response.status} ${response.statusText} - ${errorText}`)
-	}
+		const tokenResponse = tokenResponseSchema.parse(await response.json())
 
-	const data = await response.json()
-	const tokenResponse = tokenResponseSchema.parse(data)
+		if (!tokenResponse.refresh_token) throw new Error("Token exchange did not return a refresh_token")
 
-	if (!tokenResponse.refresh_token) {
-		throw new Error("Token exchange did not return a refresh_token")
-	}
+		// Per the implementation guide: expires is in milliseconds since epoch.
+		const expiresAt = Date.now() + tokenResponse.expires_in * 1000
 
-	// Per the implementation guide: expires is in milliseconds since epoch
-	const expiresAt = Date.now() + tokenResponse.expires_in * 1000
+		const accountId = extractAccountId({ id_token: tokenResponse.id_token, access_token: tokenResponse.access_token })
 
-	// Extract ChatGPT account ID from JWT claims
-	const accountId = extractAccountId({
-		id_token: tokenResponse.id_token,
-		access_token: tokenResponse.access_token,
-	})
-
-	return {
-		type: "openai-codex",
-		access_token: tokenResponse.access_token,
-		refresh_token: tokenResponse.refresh_token,
-		expires: expiresAt,
-		email: tokenResponse.email,
-		accountId,
+		return {
+			type: "openai-codex",
+			access_token: tokenResponse.access_token,
+			refresh_token: tokenResponse.refresh_token,
+			expires: expiresAt,
+			email: tokenResponse.email,
+			accountId,
+		}
+	} catch (error) {
+		if (signal?.aborted) throw new Error("OpenAI Codex sign-in was cancelled.")
+		if (controller.signal.aborted) throw new Error("OpenAI Codex token exchange timed out. Try signing in again.")
+		throw error
+	} finally {
+		clearTimeout(timeout)
+		signal?.removeEventListener("abort", abortFromCaller)
 	}
 }
 
@@ -290,13 +396,7 @@ export async function refreshAccessToken(credentials: OpenAiCodexCredentials): P
 	})
 
 	if (!response.ok) {
-		const errorText = await response.text()
-		const { errorCode, errorMessage } = parseOAuthErrorDetails(errorText)
-		const details = errorMessage ? errorMessage : errorText
-		throw new OpenAiCodexOAuthTokenError(
-			`Token refresh failed: ${response.status} ${response.statusText}${details ? ` - ${details}` : ""}`,
-			{ status: response.status, errorCode },
-		)
+		throw await oauthResponseError("refresh", response)
 	}
 
 	const data = await response.json()
@@ -335,45 +435,74 @@ export function isTokenExpired(credentials: OpenAiCodexCredentials): boolean {
  * OpenAiCodexOAuthManager - Handles OAuth flow and token management
  */
 export class OpenAiCodexOAuthManager {
+	private cachedModels: Record<string, ModelInfo> = {}
+	private cachedModelsAt = 0
 	private credentials: OpenAiCodexCredentials | null = null
 	private refreshPromise: Promise<OpenAiCodexCredentials> | null = null
-	private pendingAuth: {
-		codeVerifier: string
-		state: string
-		server?: http.Server
-	} | null = null
+	private credentialGeneration = 0
+	private authorizationGeneration = 0
+	private credentialWriteQueue: Promise<void> = Promise.resolve()
+	private pendingAuth: PendingCodexAuthorization | null = null
+
+	private async serializeCredentialWrite<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.credentialWriteQueue
+		let release!: () => void
+		this.credentialWriteQueue = new Promise<void>((resolve) => {
+			release = resolve
+		})
+		await previous
+		try {
+			return await operation()
+		} finally {
+			release()
+		}
+	}
 
 	/**
 	 * Force a refresh using the stored refresh token even if the access token is not expired.
 	 * Useful when the server invalidates an access token early.
 	 */
 	async forceRefreshAccessToken(): Promise<string | null> {
-		if (!this.credentials) {
-			await this.loadCredentials()
-		}
-
-		if (!this.credentials) {
+		try {
+			const credentials = await this.refreshCredentials(true)
+			return credentials?.access_token ?? null
+		} catch (error) {
+			Logger.error("[openai-codex-oauth] Failed to force refresh token:", error)
 			return null
 		}
+	}
 
-		try {
-			// De-dupe concurrent refreshes
-			if (!this.refreshPromise) {
-				this.refreshPromise = refreshAccessToken(this.credentials)
+	private async refreshCredentials(force: boolean): Promise<OpenAiCodexCredentials | null> {
+		if (!this.credentials) await this.loadCredentials()
+		if (!this.credentials) return null
+		if (!force && !isTokenExpired(this.credentials)) return this.credentials
+		if (this.refreshPromise) return this.refreshPromise
+
+		const previous = this.credentials
+		const generation = this.credentialGeneration
+		const refresh = (async () => {
+			const refreshed = await refreshAccessToken(previous)
+			if (generation !== this.credentialGeneration || this.credentials?.refresh_token !== previous.refresh_token) {
+				throw new Error("OpenAI Codex sign-in changed while refreshing credentials")
 			}
-
-			const newCredentials = await this.refreshPromise
-			this.refreshPromise = null
-			await this.saveCredentials(newCredentials)
-			return newCredentials.access_token
+			await this.saveCredentials(refreshed, generation)
+			return refreshed
+		})()
+		this.refreshPromise = refresh
+		try {
+			return await refresh
 		} catch (error) {
-			this.refreshPromise = null
-			Logger.error("[openai-codex-oauth] Failed to force refresh token:", error)
-			if (error instanceof OpenAiCodexOAuthTokenError && error.isLikelyInvalidGrant()) {
-				Logger.log("[openai-codex-oauth] Refresh token appears invalid; clearing stored credentials")
+			if (
+				generation === this.credentialGeneration &&
+				error instanceof OpenAiCodexOAuthTokenError &&
+				error.isLikelyInvalidGrant()
+			) {
+				Logger.log("[openai-codex-oauth] Refresh token is invalid; clearing stored credentials")
 				await this.clearCredentials()
 			}
-			return null
+			throw error
+		} finally {
+			if (this.refreshPromise === refresh) this.refreshPromise = null
 		}
 	}
 
@@ -381,19 +510,21 @@ export class OpenAiCodexOAuthManager {
 	 * Load credentials from storage via StateManager.
 	 */
 	async loadCredentials(): Promise<OpenAiCodexCredentials | null> {
+		const generation = this.credentialGeneration
 		try {
 			const stateManager = StateManager.get()
-			const credentialsJson = stateManager.getSecretKey("openai-codex-oauth-credentials")
+			const credentialsJson = stateManager.getSecretKey(OPENAI_CODEX_CREDENTIALS_KEY)
 
 			if (!credentialsJson) {
 				return null
 			}
 
 			const parsed = JSON.parse(credentialsJson)
-			this.credentials = openAiCodexCredentialsSchema.parse(parsed)
+			const credentials = openAiCodexCredentialsSchema.parse(parsed)
+			if (generation === this.credentialGeneration) this.credentials = credentials
 			return this.credentials
 		} catch (error) {
-			Logger.error("[openai-codex-oauth] Failed to load credentials:", error)
+			Logger.error("[openai-codex-oauth] Failed to load stored credentials:", error)
 			return null
 		}
 	}
@@ -401,61 +532,74 @@ export class OpenAiCodexOAuthManager {
 	/**
 	 * Save credentials to storage via StateManager
 	 */
-	async saveCredentials(credentials: OpenAiCodexCredentials): Promise<void> {
-		const stateManager = StateManager.get()
-		stateManager.setSecret("openai-codex-oauth-credentials", JSON.stringify(credentials))
-		await stateManager.flushPendingState()
-		this.credentials = credentials
+	async saveCredentials(credentials: OpenAiCodexCredentials, expectedGeneration?: number): Promise<void> {
+		await this.serializeCredentialWrite(async () => {
+			if (expectedGeneration !== undefined && expectedGeneration !== this.credentialGeneration) {
+				throw new Error("OpenAI Codex authentication changed before credentials could be saved")
+			}
+			const stateManager = StateManager.get()
+			const previous = stateManager.getSecretKey(OPENAI_CODEX_CREDENTIALS_KEY)
+			stateManager.setSecret(OPENAI_CODEX_CREDENTIALS_KEY, JSON.stringify(credentials))
+			try {
+				await stateManager.flushPendingState()
+			} catch (error) {
+				stateManager.setSecret(OPENAI_CODEX_CREDENTIALS_KEY, previous)
+				await stateManager
+					.flushPendingState()
+					.catch((restoreError) => Logger.error("[openai-codex-oauth] Failed to restore credentials:", restoreError))
+				throw error
+			}
+			if (expectedGeneration !== undefined && expectedGeneration !== this.credentialGeneration) {
+				stateManager.setSecret(OPENAI_CODEX_CREDENTIALS_KEY, previous)
+				await stateManager
+					.flushPendingState()
+					.catch((error) => Logger.error("[openai-codex-oauth] Failed to restore credentials:", error))
+				throw new Error("OpenAI Codex authentication changed before credentials could be saved")
+			}
+			this.credentials = credentials
+			this.cachedModels = {}
+			this.cachedModelsAt = 0
+		})
 	}
 
 	/**
 	 * Clear credentials from storage
 	 */
 	async clearCredentials(): Promise<void> {
-		const stateManager = StateManager.get()
-		stateManager.setSecret("openai-codex-oauth-credentials", undefined)
-		await stateManager.flushPendingState()
+		this.credentialGeneration += 1
+		this.refreshPromise = null
 		this.credentials = null
+		this.cachedModels = {}
+		this.cachedModelsAt = 0
+		await this.serializeCredentialWrite(async () => {
+			const stateManager = StateManager.get()
+			const previous = stateManager.getSecretKey(OPENAI_CODEX_CREDENTIALS_KEY)
+			stateManager.setSecret(OPENAI_CODEX_CREDENTIALS_KEY, undefined)
+			try {
+				await stateManager.flushPendingState()
+			} catch (error) {
+				stateManager.setSecret(OPENAI_CODEX_CREDENTIALS_KEY, previous)
+				await stateManager
+					.flushPendingState()
+					.catch((restoreError) =>
+						Logger.error("[openai-codex-oauth] Failed to restore credentials after sign-out error:", restoreError),
+					)
+				throw error
+			}
+		})
 	}
 
 	/**
 	 * Get a valid access token, refreshing if necessary
 	 */
 	async getAccessToken(): Promise<string | null> {
-		// Try to load credentials if not already loaded
-		if (!this.credentials) {
-			await this.loadCredentials()
-		}
-
-		if (!this.credentials) {
+		try {
+			const credentials = await this.refreshCredentials(false)
+			return credentials?.access_token ?? null
+		} catch (error) {
+			Logger.error("[openai-codex-oauth] Failed to refresh token:", error)
 			return null
 		}
-
-		// Check if token is expired and refresh if needed
-		if (isTokenExpired(this.credentials)) {
-			try {
-				// De-dupe concurrent refreshes
-				if (!this.refreshPromise) {
-					this.refreshPromise = refreshAccessToken(this.credentials)
-				}
-
-				const newCredentials = await this.refreshPromise
-				this.refreshPromise = null
-				await this.saveCredentials(newCredentials)
-			} catch (error) {
-				this.refreshPromise = null
-				Logger.error("[openai-codex-oauth] Failed to refresh token:", error)
-
-				// Only clear secrets when the refresh token is clearly invalid/revoked.
-				if (error instanceof OpenAiCodexOAuthTokenError && error.isLikelyInvalidGrant()) {
-					Logger.log("[openai-codex-oauth] Refresh token appears invalid; clearing stored credentials")
-					await this.clearCredentials()
-				}
-				return null
-			}
-		}
-
-		return this.credentials.access_token
 	}
 
 	/**
@@ -493,202 +637,285 @@ export class OpenAiCodexOAuthManager {
 	}
 
 	/**
-	 * Start the OAuth authorization flow
-	 * Returns the authorization URL to open in browser
+	 * Load the model catalog exposed by the signed-in ChatGPT Codex account.
+	 * Results are cached briefly so opening settings and starting a turn do not
+	 * create a burst of identical catalog requests.
 	 */
-	startAuthorizationFlow(): string {
-		// Cancel any existing authorization flow before starting a new one
-		this.cancelAuthorizationFlow()
+	async listModels(forceRefresh = false): Promise<Record<string, ModelInfo>> {
+		if (
+			!forceRefresh &&
+			this.cachedModelsAt > Date.now() - CODEX_MODELS_CACHE_MS &&
+			Object.keys(this.cachedModels).length > 0
+		) {
+			return { ...this.cachedModels }
+		}
+		const requestCatalog = async (token: string): Promise<Response> => {
+			const controller = new AbortController()
+			const timer = setTimeout(() => controller.abort(), 8_000)
+			try {
+				const accountId = await this.getAccountId()
+				return await fetch(
+					`${CODEX_MODELS_ENDPOINT}?client_version=${encodeURIComponent(ExtensionRegistryInfo.version)}`,
+					{
+						headers: {
+							Accept: "application/json",
+							Authorization: `Bearer ${token}`,
+							originator: "dietcode",
+							"User-Agent": `dietcode/${ExtensionRegistryInfo.version}`,
+							...(accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+						},
+						signal: controller.signal,
+					},
+				)
+			} catch (error) {
+				if (controller.signal.aborted) throw new Error("OpenAI Codex model catalog request timed out after 8 seconds")
+				throw error
+			} finally {
+				clearTimeout(timer)
+			}
+		}
 
+		let token = await this.getAccessToken()
+		if (!token) throw new Error("Not signed in to OpenAI Codex. Sign in from provider settings and try again.")
+		let response = await requestCatalog(token)
+		if (response.status === 401) {
+			await response.body?.cancel().catch(() => undefined)
+			token = (await this.forceRefreshAccessToken()) ?? ""
+			if (!token) throw new Error("OpenAI Codex rejected the session. Sign out, then sign in again.")
+			response = await requestCatalog(token)
+		}
+		if (!response.ok) {
+			await response.body?.cancel().catch(() => undefined)
+			throw new Error(`OpenAI Codex model catalog request failed (HTTP ${response.status})`)
+		}
+		let payload: unknown
+		try {
+			payload = await response.json()
+		} catch {
+			throw new Error("OpenAI Codex returned an invalid model catalog")
+		}
+		const models = normalizeOpenAiCodexModels(payload)
+		if (Object.keys(models).length === 0) throw new Error("OpenAI Codex returned no usable models for this account")
+		this.cachedModels = models
+		this.cachedModelsAt = Date.now()
+		return { ...models }
+	}
+
+	/** Start the callback listener before returning a URL that can open the browser. */
+	async startAuthorizationFlow(): Promise<string> {
+		this.cancelAuthorizationFlow()
+		this.credentialGeneration += 1
 		const codeVerifier = generateCodeVerifier()
 		const codeChallenge = generateCodeChallenge(codeVerifier)
-		const state = generateState()
-
-		this.pendingAuth = {
-			codeVerifier,
-			state,
-		}
-
-		return buildAuthorizationUrl(codeChallenge, state)
-	}
-
-	/**
-	 * Start a local server to receive the OAuth callback
-	 * Returns a promise that resolves when authentication is complete
-	 */
-	async waitForCallback(): Promise<OpenAiCodexCredentials> {
-		if (!this.pendingAuth) {
-			throw new Error("No pending authorization flow")
-		}
-
-		// Close any existing server before starting a new one
-		if (this.pendingAuth.server) {
-			try {
-				this.pendingAuth.server.close()
-			} catch {
-				// Ignore errors when closing
-			}
-			this.pendingAuth.server = undefined
-		}
-
-		return new Promise((resolve, reject) => {
-			const server = http.createServer(async (req, res) => {
-				try {
-					const url = new URL(req.url || "", `http://localhost:${OPENAI_CODEX_OAUTH_CONFIG.callbackPort}`)
-
-					if (url.pathname !== "/auth/callback") {
-						res.writeHead(404)
-						res.end("Not Found")
-						return
-					}
-
-					const code = url.searchParams.get("code")
-					const state = url.searchParams.get("state")
-					const error = url.searchParams.get("error")
-
-					if (error) {
-						res.writeHead(400)
-						res.end(`Authentication failed: ${error}`)
-						reject(new Error(`OAuth error: ${error}`))
-						server.close()
-						return
-					}
-
-					if (!code || !state) {
-						res.writeHead(400)
-						res.end("Missing code or state parameter")
-						reject(new Error("Missing code or state parameter"))
-						server.close()
-						return
-					}
-
-					if (state !== this.pendingAuth?.state) {
-						res.writeHead(400)
-						res.end("State mismatch - possible CSRF attack")
-						reject(new Error("State mismatch"))
-						server.close()
-						return
-					}
-
-					try {
-						// Note: state is validated above but not passed to exchangeCodeForTokens
-						// per the implementation guide (OpenAI rejects it)
-						const credentials = await exchangeCodeForTokens(code, this.pendingAuth.codeVerifier)
-
-						await this.saveCredentials(credentials)
-
-						res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
-						res.end(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authentication Successful</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    color: #fff;
-  }
-  .container { text-align: center; padding: 48px; max-width: 420px; }
-  .icon {
-    width: 72px; height: 72px; margin: 0 auto 24px;
-    background: linear-gradient(135deg, #10a37f 0%, #1a7f64 100%);
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .icon svg { width: 36px; height: 36px; stroke: #fff; stroke-width: 3; fill: none; }
-  h1 { font-size: 24px; font-weight: 600; margin-bottom: 12px; }
-  p { font-size: 15px; color: rgba(255,255,255,0.7); line-height: 1.5; }
-  .closing { margin-top: 32px; font-size: 13px; color: rgba(255,255,255,0.5); }
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="icon">
-    <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
-  </div>
-  <h1>Authentication Successful</h1>
-  <p>You're now signed in to OpenAI Codex. You can close this window and return to your IDE.</p>
-  <p class="closing">This window will close automatically...</p>
-</div>
-<script>setTimeout(() => window.close(), 3000);</script>
-</body>
-</html>`)
-
-						this.pendingAuth = null
-						server.close()
-						resolve(credentials)
-					} catch (exchangeError) {
-						res.writeHead(500)
-						res.end(`Token exchange failed: ${exchangeError}`)
-						reject(exchangeError)
-						server.close()
-					}
-				} catch (err) {
-					res.writeHead(500)
-					res.end("Internal server error")
-					reject(err)
-					server.close()
-				}
-			})
-
-			server.on("error", (err: NodeJS.ErrnoException) => {
-				this.pendingAuth = null
-				if (err.code === "EADDRINUSE") {
-					reject(
-						new Error(
-							`Port ${OPENAI_CODEX_OAUTH_CONFIG.callbackPort} is already in use. ` +
-								`Please close any other applications using this port and try again.`,
-						),
-					)
-				} else {
-					reject(err)
-				}
-			})
-
-			// Set a timeout for the callback
-			const timeout = setTimeout(
-				() => {
-					server.close()
-					reject(new Error("Authentication timed out"))
-				},
-				5 * 60 * 1000,
-			) // 5 minutes
-
-			server.listen(OPENAI_CODEX_OAUTH_CONFIG.callbackPort, () => {
-				if (this.pendingAuth) {
-					this.pendingAuth.server = server
-				}
-			})
-
-			// Clear timeout when server closes
-			server.on("close", () => {
-				clearTimeout(timeout)
-			})
+		const generation = ++this.authorizationGeneration
+		let resolve!: (credentials: OpenAiCodexCredentials) => void
+		let reject!: (error: Error) => void
+		const callback = new Promise<OpenAiCodexCredentials>((res, rej) => {
+			resolve = res
+			reject = rej
 		})
-	}
-
-	/**
-	 * Cancel any pending authorization flow
-	 */
-	cancelAuthorizationFlow(): void {
-		if (this.pendingAuth?.server) {
-			this.pendingAuth.server.close()
+		void callback.catch(() => undefined)
+		const pending: PendingCodexAuthorization = {
+			codeVerifier,
+			state: generateState(),
+			redirectUri: OPENAI_CODEX_OAUTH_CONFIG.redirectUri,
+			callback,
+			resolve,
+			reject,
+			callbackAccepted: false,
+			finished: false,
+			generation,
+			abortController: new AbortController(),
 		}
-		this.pendingAuth = null
+		this.pendingAuth = pending
+
+		try {
+			const port = await this.listenForCallback(pending)
+			if (pending.finished || this.pendingAuth !== pending || generation !== this.authorizationGeneration) {
+				throw new Error("OpenAI Codex sign-in was cancelled.")
+			}
+			pending.redirectUri = `http://localhost:${port}${CALLBACK_PATH}`
+			return buildAuthorizationUrl(codeChallenge, pending.state, pending.redirectUri)
+		} catch (error) {
+			this.finishAuthorization(pending, error instanceof Error ? error : new Error(String(error)))
+			throw error
+		}
 	}
 
-	/**
-	 * Get the current credentials (for display purposes)
-	 */
-	getCredentials(): OpenAiCodexCredentials | null {
-		return this.credentials
+	private async listenForCallback(pending: PendingCodexAuthorization): Promise<number> {
+		for (const port of CALLBACK_PORTS) {
+			try {
+				await new Promise<void>((resolve, reject) => {
+					let listening = false
+					const server = http.createServer({ maxHeaderSize: 8 * 1024 }, (request, response) => {
+						void this.handleCallback(pending, request, response)
+					})
+					pending.server = server
+					server.on("error", (error: NodeJS.ErrnoException) => {
+						if (!listening) reject(error)
+						else
+							this.finishAuthorization(
+								pending,
+								new Error("The local OpenAI Codex callback listener stopped unexpectedly."),
+							)
+					})
+					server.listen(port, "127.0.0.1", () => {
+						listening = true
+						if (pending.finished || this.pendingAuth !== pending) {
+							server.close()
+							reject(new Error("OpenAI Codex sign-in was cancelled."))
+							return
+						}
+						resolve()
+					})
+				})
+				if (pending.finished || this.pendingAuth !== pending) {
+					throw new Error("OpenAI Codex sign-in was cancelled.")
+				}
+				pending.timeout = setTimeout(
+					() =>
+						this.finishAuthorization(
+							pending,
+							new Error("OpenAI Codex sign-in timed out. Start a new sign-in to try again."),
+						),
+					CALLBACK_TIMEOUT_MS,
+				)
+				pending.timeout.unref?.()
+				return port
+			} catch (error) {
+				try {
+					pending.server?.close()
+				} catch {
+					// The listener may not have started.
+				}
+				pending.server = undefined
+				if ((error as NodeJS.ErrnoException).code === "EADDRINUSE" && port !== CALLBACK_PORTS.at(-1)) continue
+				if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+					throw new Error(
+						"OpenAI Codex sign-in could not reserve a local callback port. Close another sign-in and try again.",
+					)
+				}
+				throw error
+			}
+		}
+		throw new Error("OpenAI Codex sign-in could not start its local callback listener.")
+	}
+
+	private async handleCallback(
+		pending: PendingCodexAuthorization,
+		request: http.IncomingMessage,
+		response: http.ServerResponse,
+	): Promise<void> {
+		if (request.method !== "GET") {
+			response.writeHead(405, { Allow: "GET", "Cache-Control": "no-store" }).end()
+			return
+		}
+
+		let url: URL
+		try {
+			url = new URL(request.url || "/", pending.redirectUri)
+		} catch {
+			response.writeHead(400, { "Cache-Control": "no-store" }).end()
+			return
+		}
+		if (url.origin !== new URL(pending.redirectUri).origin) {
+			response.writeHead(400, { "Cache-Control": "no-store" }).end()
+			return
+		}
+		if (url.pathname !== CALLBACK_PATH) {
+			response.writeHead(404, { "Cache-Control": "no-store" }).end()
+			return
+		}
+		if (pending.finished || pending.callbackAccepted) {
+			response.writeHead(409, { "Cache-Control": "no-store" }).end()
+			return
+		}
+
+		const states = url.searchParams.getAll("state")
+		if (states.length !== 1 || states[0] !== pending.state) {
+			writeCallbackPage(response, "failed")
+			return
+		}
+
+		const oauthErrors = url.searchParams.getAll("error")
+		if (oauthErrors.length > 1) {
+			writeCallbackPage(response, "failed")
+			return
+		}
+		if (oauthErrors.length === 1) {
+			pending.callbackAccepted = true
+			const cancelled = oauthErrors[0] === "access_denied"
+			writeCallbackPage(response, cancelled ? "cancelled" : "failed")
+			this.finishAuthorization(
+				pending,
+				new Error(cancelled ? "OpenAI Codex sign-in was cancelled." : "OpenAI Codex could not complete sign-in."),
+			)
+			return
+		}
+
+		const codes = url.searchParams.getAll("code")
+		if (codes.length !== 1 || !codes[0]) {
+			writeCallbackPage(response, "failed")
+			return
+		}
+		pending.callbackAccepted = true
+
+		try {
+			const credentials = await exchangeCodeForTokens(
+				codes[0],
+				pending.codeVerifier,
+				pending.redirectUri,
+				pending.abortController.signal,
+			)
+			if (this.pendingAuth !== pending || pending.generation !== this.authorizationGeneration) {
+				throw new Error("OpenAI Codex sign-in was cancelled.")
+			}
+			this.credentialGeneration += 1
+			this.refreshPromise = null
+			await this.saveCredentials(credentials, this.credentialGeneration)
+			writeCallbackPage(response, "success")
+			this.finishAuthorization(pending, undefined, credentials)
+		} catch (error) {
+			writeCallbackPage(response, "failed")
+			const safeError = error instanceof Error ? error : new Error("OpenAI Codex could not complete sign-in.")
+			this.finishAuthorization(pending, safeError)
+		}
+	}
+
+	private finishAuthorization(pending: PendingCodexAuthorization, error?: Error, credentials?: OpenAiCodexCredentials): void {
+		if (pending.finished) return
+		pending.finished = true
+		if (pending.timeout) clearTimeout(pending.timeout)
+		if (error) pending.abortController.abort()
+		try {
+			pending.server?.close()
+		} catch {
+			// Closing an already stopped listener is harmless.
+		}
+		if (this.pendingAuth === pending) this.pendingAuth = null
+		if (error) pending.reject(error)
+		else if (credentials) pending.resolve(credentials)
+		else pending.reject(new Error("OpenAI Codex sign-in ended without credentials."))
+	}
+
+	/** Wait for the callback from the already-listening local server. */
+	waitForCallback(): Promise<OpenAiCodexCredentials> {
+		if (!this.pendingAuth) throw new Error("No pending authorization flow")
+		return this.pendingAuth.callback
+	}
+
+	/** Expose only the flow state needed to keep the provider settings UI in sync. */
+	isAuthorizationPending(): boolean {
+		return this.pendingAuth !== null && !this.pendingAuth.finished
+	}
+
+	/** Cancel any pending authorization flow. */
+	cancelAuthorizationFlow(): void {
+		this.authorizationGeneration += 1
+		if (this.pendingAuth) {
+			this.credentialGeneration += 1
+			this.finishAuthorization(this.pendingAuth, new Error("OpenAI Codex sign-in was cancelled."))
+		}
 	}
 }
 
