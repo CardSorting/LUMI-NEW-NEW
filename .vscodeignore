@@ -6,7 +6,6 @@ CLAUDE.local.md
 out/
 dist-standalone/
 node_modules/
-!node_modules/better-sqlite3/**
 !node_modules/bindings/**
 !node_modules/file-uri-to-path/**
 !node_modules/prebuild-install/**
@@ -19,10 +18,40 @@ node_modules/
 !node_modules/simple-get/**
 !node_modules/tar-fs/**
 !node_modules/tunnel-agent/**
+# Keep the better-sqlite3 runtime, plus its rebuilt Electron native module.
+!node_modules/better-sqlite3/package.json
+!node_modules/better-sqlite3/lib/**
+!node_modules/better-sqlite3/build/Release/better_sqlite3.node
 src/**
 standalone/**
+proto/**
+scripts/**
+.agents/**
+.codex/**
+.dietcode/**
+.dietcoderules/**
+.wiki/**
+.changeset/**
+locales/**
+optional-skills/**
+scratch/**
+test_workspace/**
 .gitignore
 .yarnrc
+package-lock.json
+bun.lock
+biome.jsonc
+knip.json
+esbuild.mjs
+build_output*.txt
+biome_errors*.txt
+grounding.txt
+pre-flight.md
+rename_list.txt
+rename_script.py
+bench.md
+opencode.md
+RELEASE_SUMMARY*.md
 esbuild.js
 vsc-extension-quickstart.md
 tsconfig*.json
@@ -46,6 +75,8 @@ broccolidb/**
 
 # Custom
 **/demo.gif
+**/build_output.txt
+**/biome_errors.txt
 .nvmrc
 .gitattributes
 .prettierignore
@@ -67,6 +98,15 @@ webview-ui/README.md
 webview-ui/package.json
 webview-ui/package-lock.json
 webview-ui/node_modules/**
+webview-ui/.storybook/**
+webview-ui/docs/**
+webview-ui/components.json
+webview-ui/tailwind.config.mjs
+webview-ui/tsconfig*.json
+webview-ui/vite.config.*
+webview-ui/vitest.config.*
+webview-ui/eslint.config.*
+webview-ui/postcss.config.*
 **/.gitignore
 
 # Ignore docs
