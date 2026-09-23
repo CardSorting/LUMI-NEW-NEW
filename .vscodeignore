@@ -18,10 +18,12 @@ node_modules/
 !node_modules/simple-get/**
 !node_modules/tar-fs/**
 !node_modules/tunnel-agent/**
-# Keep the better-sqlite3 runtime, plus its rebuilt Electron native module.
+# Keep the better-sqlite3 runtime, plus its prebuilds and rebuilt Electron native module.
 !node_modules/better-sqlite3/package.json
 !node_modules/better-sqlite3/lib/**
+!node_modules/better-sqlite3/prebuilds/**
 !node_modules/better-sqlite3/build/Release/better_sqlite3.node
+!node_modules/node-addon-api/**
 src/**
 standalone/**
 proto/**

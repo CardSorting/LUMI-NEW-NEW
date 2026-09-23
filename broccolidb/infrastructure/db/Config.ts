@@ -2,7 +2,7 @@
 // @classification MODERN
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { CompiledQuery, Kysely, SqliteDialect } from 'kysely';
 import { Logger } from '../../shared/services/Logger.js';
 
@@ -309,6 +309,34 @@ export function getDbPath(): string {
   return _dbPath;
 }
 
+let _driverLoadError: string | null = null;
+let _cachedDriverConstructor: (new (filename: string | Buffer, options?: any) => Database.Database) | null = null;
+
+function loadBetterSqlite3(): new (filename: string | Buffer, options?: any) => Database.Database {
+  if (_cachedDriverConstructor) {
+    return _cachedDriverConstructor;
+  }
+  try {
+    const driver = require('better-sqlite3');
+    _cachedDriverConstructor = driver;
+    _driverLoadError = null;
+    return driver;
+  } catch (err: any) {
+    _driverLoadError = err instanceof Error ? err.message : String(err);
+    Logger.error(`[Config] Failed to load better-sqlite3 native driver in broccolidb: ${_driverLoadError}`);
+    throw err;
+  }
+}
+
+export function getDatabaseHealth() {
+  return {
+    driverLoaded: _cachedDriverConstructor !== null,
+    driverType: _cachedDriverConstructor ? 'native' : 'degraded',
+    error: _driverLoadError ?? undefined,
+    dbPath: getDbPath(),
+  };
+}
+
 export async function getDb(): Promise<Kysely<Schema>> {
   await _lifecyclePromise;
   if (_db) return _db;
@@ -325,9 +353,17 @@ export async function getDb(): Promise<Kysely<Schema>> {
         Logger.error(`[Config] Failed to create directory for database at ${dbDir}: ${dirError.message}`);
       }
 
+      let DatabaseConstructor: new (filename: string | Buffer, options?: any) => Database.Database;
+      try {
+        DatabaseConstructor = loadBetterSqlite3();
+      } catch (loadErr: any) {
+        Logger.error(`[Config] Native SQLite driver unavailable: ${loadErr.message}. Operating in degraded mode.`);
+        throw new Error(`Database driver unavailable: ${loadErr.message}`);
+      }
+
       let rawDb: Database.Database;
       try {
-        rawDb = new Database(configuredDbPath);
+        rawDb = new DatabaseConstructor(configuredDbPath);
       } catch (error: any) {
         Logger.error(`[Config] Failed to open database file at ${configuredDbPath}: ${error.message}`);
 
@@ -341,14 +377,14 @@ export async function getDb(): Promise<Kysely<Schema>> {
               if (fs.existsSync(`${configuredDbPath}-wal`)) fs.renameSync(`${configuredDbPath}-wal`, `${corruptBackupPath}-wal`);
               if (fs.existsSync(`${configuredDbPath}-shm`)) fs.renameSync(`${configuredDbPath}-shm`, `${corruptBackupPath}-shm`);
             }
-            rawDb = new Database(configuredDbPath);
+            rawDb = new DatabaseConstructor(configuredDbPath);
           } catch (recoveryError: any) {
             Logger.error(`[Config] Database recovery failed: ${recoveryError.message}. Falling back to in-memory database.`);
-            rawDb = new Database(':memory:');
+            rawDb = new DatabaseConstructor(':memory:');
           }
         } else {
           Logger.warn(`[Config] Falling back to in-memory database due to database initialization failure: ${error.message}`);
-          rawDb = new Database(':memory:');
+          rawDb = new DatabaseConstructor(':memory:');
         }
       }
 

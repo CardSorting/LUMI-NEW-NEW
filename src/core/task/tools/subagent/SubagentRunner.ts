@@ -34,7 +34,6 @@ import {
 	getCompletionGateOperationalState,
 	getCompletionGatePressureLevel,
 	getCompletionGateRetryPolicy,
-	wrapFormattedCompletionError,
 } from "../attemptCompletionUtils"
 import { validateSubagentCompletionGates } from "../subagentCompletionGates"
 import { ToolValidator } from "../ToolValidator"
@@ -789,14 +788,19 @@ export class SubagentRunner {
 							continue
 						}
 
-						const gateError = await validateSubagentCompletionGates(
-							this.baseConfig,
-							completionResult,
-							typeof toolCallParams?.task_progress === "string" ? toolCallParams.task_progress : undefined,
-							typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
-						)
+						let gateError: string | null = null
+						try {
+							gateError = await validateSubagentCompletionGates(
+								this.baseConfig,
+								completionResult,
+								typeof toolCallParams?.task_progress === "string" ? toolCallParams.task_progress : undefined,
+								typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
+							)
+						} catch (err) {
+							Logger.warn("[SubagentRunner] Subagent completion gate check error:", err)
+						}
 						if (gateError) {
-							pushSubagentToolResultBlock(toolResultBlocks, call, toolName, wrapFormattedCompletionError(gateError))
+							pushSubagentToolResultBlock(toolResultBlocks, call, toolName, gateError)
 							continue
 						}
 

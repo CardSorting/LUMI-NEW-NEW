@@ -225,9 +225,13 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 		// We perform a non-blocking check for Knowledge Ledger compliance.
 		// If non-compliant, we provide a passive advisory to the agent.
 		if (config.universalGuard) {
-			const compliance = await config.universalGuard.checkForensicCompliance()
-			if (!compliance.compliant && compliance.advisory) {
-				await config.callbacks.say("info", compliance.advisory)
+			try {
+				const compliance = await config.universalGuard.checkForensicCompliance()
+				if (!compliance.compliant && compliance.advisory) {
+					await config.callbacks.say("info", compliance.advisory)
+				}
+			} catch (error) {
+				Logger.warn("[AttemptCompletionHandler] Passive forensic compliance check skipped:", error)
 			}
 		}
 
@@ -438,18 +442,18 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			// user didn't reject, but the command may have output
 			commandResult = execCommandResult
 
-			telemetryService.captureTaskCompleted(
-				config.ulid,
-				getTaskCompletionTelemetry(config, auditMetadata, {
-					advisoryMetadata: config.taskState.lastAdvisoryAudit,
-					planBaseline,
-				}),
-			)
 			try {
+				telemetryService.captureTaskCompleted(
+					config.ulid,
+					getTaskCompletionTelemetry(config, auditMetadata, {
+						advisoryMetadata: config.taskState.lastAdvisoryAudit,
+						planBaseline,
+					}),
+				)
 				config.services.joyRideCache.flushTask(config.taskId, "task_completed")
 				await finalizeRoadmapSession(config.cwd, config.taskId)
 			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Roadmap session finalize skipped:", error)
+				Logger.warn("[AttemptCompletionHandler] Post-completion cleanup or telemetry skipped:", error)
 			}
 		} else {
 			// Send the complete completion_result message (partial was already removed above)
@@ -463,18 +467,18 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			)
 			await config.callbacks.saveCheckpoint(true, completionMessageTs)
 			await addNewChangesFlagToLastCompletionResultMessage()
-			telemetryService.captureTaskCompleted(
-				config.ulid,
-				getTaskCompletionTelemetry(config, auditMetadata, {
-					advisoryMetadata: config.taskState.lastAdvisoryAudit,
-					planBaseline,
-				}),
-			)
 			try {
+				telemetryService.captureTaskCompleted(
+					config.ulid,
+					getTaskCompletionTelemetry(config, auditMetadata, {
+						advisoryMetadata: config.taskState.lastAdvisoryAudit,
+						planBaseline,
+					}),
+				)
 				config.services.joyRideCache.flushTask(config.taskId, "task_completed")
 				await finalizeRoadmapSession(config.cwd, config.taskId)
 			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Roadmap session finalize skipped:", error)
+				Logger.warn("[AttemptCompletionHandler] Post-completion cleanup or telemetry skipped:", error)
 			}
 		}
 

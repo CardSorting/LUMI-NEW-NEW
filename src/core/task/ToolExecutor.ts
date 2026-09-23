@@ -815,8 +815,8 @@ export class ToolExecutor {
 				}
 			}
 
-			// Re-throw the error after PostToolUse completes
-			throw error
+			// Deliver tool failure back to the agent so it can recover gracefully without crashing the task
+			this.pushToolResult(toolResult, block)
 		}
 
 		// Early return if hook requested cancellation

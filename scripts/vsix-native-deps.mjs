@@ -205,11 +205,16 @@ function packagePathInVsix(packageName) {
 }
 
 function nativeBinaryPathInExtension(extensionDir) {
+	const hostArch = `${process.platform}-${process.arch}`
+	const prebuildPath = path.join(extensionDir, `node_modules/better-sqlite3/prebuilds/${hostArch}.node`)
+	if (fs.existsSync(prebuildPath)) {
+		return prebuildPath
+	}
 	return path.join(extensionDir, INSTALLED_NATIVE_MODULE_RELATIVE)
 }
 
 function nativeBinaryPathInVsixListing(listing) {
-	return listing.includes(VSIX_NATIVE_MODULE_MARKER)
+	return listing.includes(VSIX_NATIVE_MODULE_MARKER) || listing.includes("extension/node_modules/better-sqlite3/prebuilds/")
 }
 
 function packagePresentInVsix(listing, packageName) {
@@ -538,12 +543,14 @@ export function verifyVscodeignoreWhitelist(repoRoot) {
 
 	for (const pkg of REQUIRED_RUNTIME_PACKAGES) {
 		const needle = `!node_modules/${pkg}/**`
+		const whitelisted =
+			ignore.includes(needle) || (pkg === "better-sqlite3" && ignore.includes("!node_modules/better-sqlite3/"))
 		checks.push({
 			id: `vscodeignore:${pkg}`,
-			status: ignore.includes(needle) ? "pass" : "fail",
+			status: whitelisted ? "pass" : "fail",
 			title: `.vscodeignore whitelists ${pkg}`,
-			detail: ignore.includes(needle) ? undefined : `Expected line: ${needle}`,
-			fix: ignore.includes(needle) ? undefined : [`Add "${needle}" to .vscodeignore`],
+			detail: whitelisted ? undefined : `Expected line: ${needle}`,
+			fix: whitelisted ? undefined : [`Add "${needle}" to .vscodeignore`],
 		})
 	}
 

@@ -450,11 +450,21 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			"",
 			"### AGENT DETAILS",
 			...entries.map((entry) => {
-				const header = `[${entry.index}] ${entry.name} - ${entry.status.toUpperCase()}`
-				const subPrompt = `Prompt: ${excerpt(entry.prompt, 100)}`
+				const header = `#### [${entry.index}] ${entry.name} - ${entry.status.toUpperCase()}`
+				const isSingleAgent = entries.length === 1
+				const promptLimit = isSingleAgent ? 1000 : 300
+				const resultLimit = isSingleAgent ? 8000 : 2500
+
+				const subPrompt = `**Objective:** ${excerpt(entry.prompt, promptLimit)}`
 				const detail =
-					entry.status === "completed" ? `Result: ${excerpt(entry.result, 300)}` : `Error: ${excerpt(entry.error, 300)}`
-				return `${header}\n${subPrompt}\n${detail}\n`
+					entry.status === "completed"
+						? `**Result:**\n${excerpt(entry.result, resultLimit)}`
+						: `**Error:**\n${entry.error || "Unknown error"}`
+				const signals =
+					entry.criticalSignals && entry.criticalSignals.length > 0
+						? `\n**Signals:** ${entry.criticalSignals.join(", ")}`
+						: ""
+				return `${header}\n${subPrompt}\n${detail}${signals}\n`
 			}),
 			...(blackboard.length > 0 ? ["", "### SHARED SWARM FINDINGS (Blackboard)", ...blackboard.map((f) => `- ${f}`)] : []),
 		].join("\n")
