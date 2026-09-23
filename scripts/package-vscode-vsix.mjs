@@ -8,11 +8,11 @@
  * Usage:
  *   npm run package:vsix
  */
-import { execFileSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-deps.mjs"
+import { runVsce } from "./vsix-package-utils.mjs"
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
 const packageJsonPath = path.join(repoRoot, "package.json")
@@ -24,11 +24,16 @@ function readPackageOptions() {
 	if (targetIndex !== -1 && (!target || !VALID_TARGETS.has(target))) {
 		throw new Error(`Unsupported VSIX target: ${target || "(missing)"}`)
 	}
-	return { target, preRelease: process.argv.includes("--pre-release") }
+	return {
+		target,
+		preRelease: process.argv.includes("--pre-release"),
+		skipPrepublish: process.argv.includes("--skip-prepublish"),
+		skipNativeRebuild: process.argv.includes("--skip-native-rebuild"),
+	}
 }
 
 function main() {
-	const { target, preRelease } = readPackageOptions()
+	const { target, preRelease, skipPrepublish, skipNativeRebuild } = readPackageOptions()
 	const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"))
 	const targetSuffix = target ? `-${target}` : ""
 	const outPath = path.join(repoRoot, "dist", `lumi-vscode-${pkg.version}${targetSuffix}.vsix`)
@@ -36,15 +41,12 @@ function main() {
 	fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
 	try {
-		rebuildBetterSqlite3(repoRoot)
+		if (!skipNativeRebuild) rebuildBetterSqlite3(repoRoot)
 		const args = ["package", "--allow-package-secrets", "sendgrid"]
 		if (target) args.push("--target", target)
 		if (preRelease) args.push("--pre-release")
 		args.push("--out", outPath)
-		execFileSync(process.execPath, [path.join(repoRoot, "node_modules", "@vscode", "vsce", "vsce"), ...args], {
-			stdio: "inherit",
-			cwd: repoRoot,
-		})
+		runVsce({ repoRoot, args, skipPrepublish })
 		assertVsixHasNativeModule(outPath)
 		console.log(`[vscode] packaged ${outPath}`)
 	} catch (error) {

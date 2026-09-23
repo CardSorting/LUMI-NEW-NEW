@@ -14,21 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  package:
-    name: Package ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: linux-x64
-          - runner: windows-2022
-            target: win32-x64
-          - runner: macos-15-intel
-            target: darwin-x64
-          - runner: macos-15
-            target: darwin-arm64
+  build-assets:
+    name: Build shared extension assets
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -57,15 +45,56 @@ jobs:
       - name: Install webview dependencies
         run: npm ci --include=optional
         working-directory: webview-ui
-      - name: Install Rosetta for protoc on Apple silicon
-        if: matrix.target == 'darwin-arm64'
-        run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Build extension assets
         run: npm run vscode:prepublish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-assets
+          path: |
+            dist/**
+            webview-ui/build/**
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: windows-2022
+            target: win32-x64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: macos-15
+            target: darwin-arm64
+    defaults:
+      run:
+        shell: bash
+    needs: build-assets
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            webview-ui/package-lock.json
+      - name: Install extension dependencies
+        run: npm ci --include=optional
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-assets
+          path: .
       - name: Package VS Code Marketplace VSIX
-        run: npm run package:vsix -- --target "${{ matrix.target }}"
+        run: npm run package:vsix -- --target "${{ matrix.target }}" --skip-prepublish
       - name: Package Open VSX VSIX
-        run: npm run package:vsix:openvsx -- --target "${{ matrix.target }}"
+        run: npm run package:vsix:openvsx -- --target "${{ matrix.target }}" --skip-prepublish --skip-native-rebuild
       - uses: actions/upload-artifact@v4
         with:
           name: marketplace-vsix-${{ matrix.target }}

@@ -486,7 +486,7 @@
 		"test:webview": "cd webview-ui && npm run test",
 		"package:vsix": "node scripts/package-vscode-vsix.mjs",
 		"package:vsix:openvsx": "node scripts/package-openvsx-vsix.mjs",
-		"package:vsix:all": "npm run package:vsix && npm run package:vsix:openvsx",
+		"package:vsix:all": "npm run package:vsix && npm run package:vsix:openvsx -- --skip-prepublish --skip-native-rebuild",
 		"doctor": "node scripts/lumi-doctor.mjs",
 		"doctor:fix": "node scripts/lumi-doctor.mjs --fix",
 		"doctor:ci": "node scripts/lumi-doctor.mjs --ci",
