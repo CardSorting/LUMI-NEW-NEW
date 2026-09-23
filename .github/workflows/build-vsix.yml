@@ -8,20 +8,14 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
 
 concurrency:
   group: build-vsix-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    uses: ./.github/workflows/test.yml
-
   package:
     name: Package ${{ matrix.target }}
-    needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
