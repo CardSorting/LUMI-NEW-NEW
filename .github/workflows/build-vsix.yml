@@ -57,6 +57,9 @@ jobs:
       - name: Install webview dependencies
         run: npm ci --include=optional
         working-directory: webview-ui
+      - name: Install Rosetta for protoc on Apple silicon
+        if: matrix.target == 'darwin-arm64'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Build extension assets
         run: npm run vscode:prepublish
       - name: Package VS Code Marketplace VSIX

@@ -164,21 +164,14 @@ function checkAppleSiliconCompatibility() {
 	const cpuArchitecture = os.arch()
 	if (cpuArchitecture === "arm64") {
 		try {
-			// Check if Rosetta is installed
-			const rosettaCheck = execSync('/usr/bin/pgrep oahd || echo "NOT_INSTALLED"').toString().trim()
-
-			if (rosettaCheck === "NOT_INSTALLED") {
-				console.log(chalk.yellow("Detected Apple Silicon (ARM64) architecture."))
-				console.log(
-					chalk.red("Rosetta 2 is NOT installed. The npm version of protoc is not compatible with Apple Silicon."),
-				)
-				console.log(chalk.cyan("Please install Rosetta 2 using the following command:"))
-				console.log(chalk.cyan("  softwareupdate --install-rosetta --agree-to-license"))
-				console.log(chalk.red("Aborting build process."))
-				process.exit(1)
-			}
+			// Test the translation path directly; process listings may be restricted in CI.
+			execSync("arch -x86_64 /usr/bin/true", { stdio: "ignore" })
 		} catch (_error) {
-			console.log(chalk.yellow("Could not determine Rosetta installation status. Proceeding anyway."))
+			console.log(chalk.yellow("Detected Apple Silicon (ARM64) architecture."))
+			console.log(chalk.red("Rosetta 2 is required because the npm protoc binary runs as Intel."))
+			console.log(chalk.cyan("Install it with: softwareupdate --install-rosetta --agree-to-license"))
+			console.log(chalk.red("Aborting build process."))
+			process.exit(1)
 		}
 	}
 }
