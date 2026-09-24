@@ -70,6 +70,10 @@ export interface SubagentRunResult {
 	result?: string
 	error?: string
 	stats: SubagentRunStats
+	filesModified?: string[]
+	filesViewed?: string[]
+	durationMs?: number
+	isPartial?: boolean
 }
 
 interface ConfigWithExtensions extends TaskConfig {
@@ -83,6 +87,9 @@ interface SubagentProgressUpdate {
 	result?: string
 	error?: string
 	activeSignals?: string[]
+	filesModified?: string[]
+	filesViewed?: string[]
+	durationMs?: number
 }
 
 interface SubagentRunStats {
@@ -381,6 +388,9 @@ export class SubagentRunner {
 	): Promise<SubagentRunResult> {
 		this.streamId = streamId
 		this.abortRequested = false
+		const startTime = Date.now()
+		const filesModified = new Set<string>()
+		const filesViewed = new Set<string>()
 		const state = new TaskState()
 		let emptyAssistantResponseRetries = 0
 		const usageState: SubagentUsageState = {
@@ -624,21 +634,66 @@ export class SubagentRunner {
 							if (stats.maxTokens && stats.inputTokens + stats.outputTokens > stats.maxTokens) {
 								const error = `Swarm Token Budget Exceeded (${stats.maxTokens} tokens). Terminating subagent to prevent runaway costs.`
 								Logger.warn(`[SubagentRunner] ${error}`)
-								onProgress({ status: "failed", error, stats: { ...stats } })
-								return { status: "failed", error, stats }
+								const durationMs = Date.now() - startTime
+								onProgress({
+									status: "failed",
+									error,
+									stats: { ...stats },
+									filesModified: Array.from(filesModified),
+									filesViewed: Array.from(filesViewed),
+									durationMs,
+								})
+								return {
+									status: "failed",
+									error,
+									stats,
+									filesModified: Array.from(filesModified),
+									filesViewed: Array.from(filesViewed),
+									durationMs,
+								}
 							}
 							if (stats.maxCost && stats.totalCost > stats.maxCost) {
 								const error = `Swarm Cost Budget Exceeded ($${stats.maxCost}). Terminating subagent to prevent runaway costs.`
 								Logger.warn(`[SubagentRunner] ${error}`)
-								onProgress({ status: "failed", error, stats: { ...stats } })
-								return { status: "failed", error, stats }
+								const durationMs = Date.now() - startTime
+								onProgress({
+									status: "failed",
+									error,
+									stats: { ...stats },
+									filesModified: Array.from(filesModified),
+									filesViewed: Array.from(filesViewed),
+									durationMs,
+								})
+								return {
+									status: "failed",
+									error,
+									stats,
+									filesModified: Array.from(filesModified),
+									filesViewed: Array.from(filesViewed),
+									durationMs,
+								}
 							}
 
 							if (stats.toolCalls >= MAX_TOTAL_TOOL_CALLS) {
 								const error = `Swarm Tool Call Limit Exceeded (${MAX_TOTAL_TOOL_CALLS}). Terminating subagent to prevent infinite tool loops.`
 								Logger.warn(`[SubagentRunner] ${error}`)
-								onProgress({ status: "failed", error, stats: { ...stats } })
-								return { status: "failed", error, stats }
+								const durationMs = Date.now() - startTime
+								onProgress({
+									status: "failed",
+									error,
+									stats: { ...stats },
+									filesModified: Array.from(filesModified),
+									filesViewed: Array.from(filesViewed),
+									durationMs,
+								})
+								return {
+									status: "failed",
+									error,
+									stats,
+									filesModified: Array.from(filesModified),
+									filesViewed: Array.from(filesViewed),
+									durationMs,
+								}
 							}
 							break
 						case "text":
@@ -738,9 +793,67 @@ export class SubagentRunner {
 				if (finalizedToolCalls.length === 0) {
 					emptyAssistantResponseRetries += 1
 					if (emptyAssistantResponseRetries > MAX_EMPTY_ASSISTANT_RETRIES) {
+						const durationMs = Date.now() - startTime
+						// Industry Standard (Claude Code / Swarm): If the model provided a direct substantive answer,
+						// accept it as the completion result instead of discarding it!
+						if (assistantText.trim().length > 0) {
+							const directResult = assistantText.trim()
+							onProgress({
+								status: "completed",
+								result: directResult,
+								stats: { ...stats },
+								filesModified: Array.from(filesModified),
+								filesViewed: Array.from(filesViewed),
+								durationMs,
+							})
+							return {
+								status: "completed",
+								result: directResult,
+								stats,
+								filesModified: Array.from(filesModified),
+								filesViewed: Array.from(filesViewed),
+								durationMs,
+							}
+						}
+
+						const lastAssistantResponse = this.extractLastAssistantText(conversation)
+						if (lastAssistantResponse) {
+							const partialResult = `[Completed with text response]:\n${lastAssistantResponse}`
+							onProgress({
+								status: "completed",
+								result: partialResult,
+								stats: { ...stats },
+								filesModified: Array.from(filesModified),
+								filesViewed: Array.from(filesViewed),
+								durationMs,
+							})
+							return {
+								status: "completed",
+								result: partialResult,
+								stats,
+								filesModified: Array.from(filesModified),
+								filesViewed: Array.from(filesViewed),
+								durationMs,
+							}
+						}
+
 						const error = "Subagent did not call attempt_completion."
-						onProgress({ status: "failed", error, stats: { ...stats } })
-						return { status: "failed", error, stats }
+						onProgress({
+							status: "failed",
+							error,
+							stats: { ...stats },
+							filesModified: Array.from(filesModified),
+							filesViewed: Array.from(filesViewed),
+							durationMs,
+						})
+						return {
+							status: "failed",
+							error,
+							stats,
+							filesModified: Array.from(filesModified),
+							filesViewed: Array.from(filesViewed),
+							durationMs,
+						}
 					}
 
 					// Mirror the main loop's no-tools-used nudge so empty/blank model turns
@@ -805,11 +918,26 @@ export class SubagentRunner {
 						}
 
 						stats.toolCalls += 1
+						const durationMs = Date.now() - startTime
 						onProgress({ stats: { ...stats } })
-						onProgress({ status: "completed", result: completionResult, stats: { ...stats } })
+						onProgress({
+							status: "completed",
+							result: completionResult,
+							stats: { ...stats },
+							filesModified: Array.from(filesModified),
+							filesViewed: Array.from(filesViewed),
+							durationMs,
+						})
 						await this.signalCriticalFindingsToSwarm(completionResult)
 						await SwarmConsensusHandler.handleSignal(this.baseConfig, completionResult)
-						return { status: "completed", result: completionResult, stats }
+						return {
+							status: "completed",
+							result: completionResult,
+							stats,
+							filesModified: Array.from(filesModified),
+							filesViewed: Array.from(filesViewed),
+							durationMs,
+						}
 					}
 
 					if (!this.allowedTools.includes(toolName)) {
@@ -835,7 +963,8 @@ export class SubagentRunner {
 					onProgress({ latestToolCall })
 
 					const subagentConfig = this.createSubagentTaskConfig()
-					const handler = this.baseConfig.coordinator.getHandler(toolName)
+					const handler =
+						subagentConfig.coordinator?.getHandler(toolName) || this.baseConfig.coordinator?.getHandler(toolName)
 					let toolResult: unknown
 
 					if (!handler) {
@@ -859,6 +988,23 @@ export class SubagentRunner {
 							}
 
 							if (!toolResult) {
+								// Track file side-effects
+								if (toolCallParams?.path && typeof toolCallParams.path === "string") {
+									if (
+										toolName === DietCodeDefaultTool.FILE_NEW ||
+										toolName === DietCodeDefaultTool.FILE_EDIT ||
+										toolName === DietCodeDefaultTool.APPLY_PATCH
+									) {
+										filesModified.add(toolCallParams.path)
+									} else if (
+										toolName === DietCodeDefaultTool.FILE_READ ||
+										toolName === DietCodeDefaultTool.SEARCH ||
+										toolName === DietCodeDefaultTool.LIST_CODE_DEF
+									) {
+										filesViewed.add(toolCallParams.path)
+									}
+								}
+
 								// V227: Sovereign Audit Integration for Swarms
 								// Ensure subagent actions are recorded in the shared StabilityMonitor
 								const guard = this.baseConfig.universalGuard
@@ -911,7 +1057,12 @@ export class SubagentRunner {
 					}
 
 					stats.toolCalls += 1
-					onProgress({ stats: { ...stats } })
+					onProgress({
+						stats: { ...stats },
+						filesModified: Array.from(filesModified),
+						filesViewed: Array.from(filesViewed),
+						durationMs: Date.now() - startTime,
+					})
 
 					const serializedToolResult = serializeToolResult(toolResult)
 					const toolDescription = handler?.getDescription(toolCallBlock) || `[${toolName}]`
@@ -962,33 +1113,110 @@ export class SubagentRunner {
 			}
 
 			const loopError = `Swarm Iteration Limit Exceeded (${MAX_TASK_ITERATIONS}). Subagent failed to complete the task within allowed turns.`
-			onProgress({ status: "failed", error: loopError, stats: { ...stats } })
-			return { status: "failed", error: loopError, stats }
+			const durationMs = Date.now() - startTime
+			const lastAssistantResponse = this.extractLastAssistantText(conversation)
+			if (lastAssistantResponse) {
+				const partialResult = `[Partial Result - turn limit reached]:\n${lastAssistantResponse}`
+				onProgress({
+					status: "completed",
+					result: partialResult,
+					stats: { ...stats },
+					filesModified: Array.from(filesModified),
+					filesViewed: Array.from(filesViewed),
+					durationMs,
+				})
+				return {
+					status: "completed",
+					result: partialResult,
+					error: loopError,
+					isPartial: true,
+					stats,
+					filesModified: Array.from(filesModified),
+					filesViewed: Array.from(filesViewed),
+					durationMs,
+				}
+			}
+
+			onProgress({
+				status: "failed",
+				error: loopError,
+				stats: { ...stats },
+				filesModified: Array.from(filesModified),
+				filesViewed: Array.from(filesViewed),
+				durationMs,
+			})
+			return {
+				status: "failed",
+				error: loopError,
+				stats,
+				filesModified: Array.from(filesModified),
+				filesViewed: Array.from(filesViewed),
+				durationMs,
+			}
 		} catch (error) {
+			const durationMs = Date.now() - startTime
 			if (this.shouldAbort()) {
 				const cancelledError = "Subagent run cancelled."
-				onProgress({ status: "failed", error: cancelledError, stats: { ...stats } })
-				return { status: "failed", error: cancelledError, stats }
+				onProgress({
+					status: "failed",
+					error: cancelledError,
+					stats: { ...stats },
+					filesModified: Array.from(filesModified),
+					filesViewed: Array.from(filesViewed),
+					durationMs,
+				})
+				return {
+					status: "failed",
+					error: cancelledError,
+					stats,
+					filesModified: Array.from(filesModified),
+					filesViewed: Array.from(filesViewed),
+					durationMs,
+				}
 			}
 
 			const errorText = (error as Error).message || "Subagent execution failed."
 			Logger.error("[SubagentRunner] run failed", error)
-			onProgress({ status: "failed", error: errorText, stats: { ...stats } })
-			return { status: "failed", error: errorText, stats }
+			onProgress({
+				status: "failed",
+				error: errorText,
+				stats: { ...stats },
+				filesModified: Array.from(filesModified),
+				filesViewed: Array.from(filesViewed),
+				durationMs,
+			})
+			return {
+				status: "failed",
+				error: errorText,
+				stats,
+				filesModified: Array.from(filesModified),
+				filesViewed: Array.from(filesViewed),
+				durationMs,
+			}
 		} finally {
 			this.activeApiAbort = undefined
 		}
+	}
+
+	private extractLastAssistantText(conversation: DietCodeStorageMessage[]): string | undefined {
+		for (let i = conversation.length - 1; i >= 0; i--) {
+			const msg = conversation[i]
+			if (msg.role === "assistant" && Array.isArray(msg.content)) {
+				for (const part of msg.content) {
+					if (part.type === "text" && part.text?.trim()) {
+						return part.text.trim()
+					}
+				}
+			}
+		}
+		return undefined
 	}
 
 	private createSubagentTaskConfig(): TaskConfig {
 		const baseCallbacks = this.baseConfig.callbacks
 		const { ToolExecutorCoordinator } = require("../ToolExecutorCoordinator")
 		const coordinator = new ToolExecutorCoordinator()
-		const validator = new ToolValidator(
-			this.baseConfig.services.dietcodeIgnoreController,
-			// biome-ignore lint/style/noNonNullAssertion: Guard is guaranteed to exist by SubagentToolHandler validation.
-			this.baseConfig.universalGuard!,
-		) // Add guard from config
+		const validator = new ToolValidator(this.baseConfig.services.dietcodeIgnoreController, this.baseConfig.universalGuard)
 
 		for (const tool of this.allowedTools) {
 			coordinator.registerByName(tool, validator)
@@ -1052,7 +1280,7 @@ export class SubagentRunner {
 
 		const truncated = contextManager
 			.getTruncatedMessages(conversation, deletedRange)
-			.map((message: any) => message as DietCodeStorageMessage)
+			.map((message: unknown) => message as DietCodeStorageMessage)
 		if (truncated.length >= conversation.length) {
 			return optimizationResult.didOptimize
 		}
@@ -1075,7 +1303,7 @@ export class SubagentRunner {
 		}
 
 		const optimizedConversation = optimizationResult.optimizedConversationHistory.map(
-			(message: any) => message as DietCodeStorageMessage,
+			(message: unknown) => message as DietCodeStorageMessage,
 		)
 		conversation.splice(0, conversation.length, ...optimizedConversation)
 		return { didOptimize: true, needToTruncate: optimizationResult.needToTruncate }

@@ -89,6 +89,9 @@ export function getCompletionRetryCooldownMs(blockCount: number): number {
 }
 
 export function getCompletionCooldownRemainingMs(config: TaskConfig): number {
+	if (config.yoloModeToggled || config.isSubagentExecution) {
+		return 0
+	}
 	const blockCount = config.taskState.completionGateBlockCount ?? 0
 	if (blockCount === 0) {
 		return 0

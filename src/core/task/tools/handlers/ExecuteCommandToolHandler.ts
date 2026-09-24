@@ -334,7 +334,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 					settings: config,
 				})
 				if (advisory) {
-					return appendTextToToolResponse(result, advisory)
+					return appendTextToToolResponse(result, advisory) as ToolResponse
 				}
 			} catch (error) {
 				Logger.warn("[ExecuteCommandToolHandler] Command output audit advisory failed:", error)

@@ -337,6 +337,15 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 						if (update.activeSignals !== undefined) {
 							current.criticalSignals = update.activeSignals
 						}
+						if (update.filesModified !== undefined) {
+							current.filesModified = update.filesModified
+						}
+						if (update.filesViewed !== undefined) {
+							current.filesViewed = update.filesViewed
+						}
+						if (update.durationMs !== undefined) {
+							current.durationMs = update.durationMs
+						}
 						if (update.stats) {
 							current.toolCalls = update.stats.toolCalls || 0
 							current.inputTokens = update.stats.inputTokens || 0
@@ -407,6 +416,9 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			entries[index].status = result.value.status
 			entries[index].result = result.value.result
 			entries[index].error = result.value.error
+			entries[index].filesModified = result.value.filesModified
+			entries[index].filesViewed = result.value.filesViewed
+			entries[index].durationMs = result.value.durationMs
 			entries[index].toolCalls = result.value.stats.toolCalls || 0
 			entries[index].inputTokens = result.value.stats.inputTokens || 0
 			entries[index].outputTokens = result.value.stats.outputTokens || 0
@@ -450,12 +462,25 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			"",
 			"### AGENT DETAILS",
 			...entries.map((entry) => {
-				const header = `#### [${entry.index}] ${entry.name} - ${entry.status.toUpperCase()}`
+				const durationSec = entry.durationMs ? `${(entry.durationMs / 1000).toFixed(1)}s` : undefined
+				const metaInfo = [durationSec, entry.toolCalls !== undefined ? `${entry.toolCalls} tool calls` : undefined]
+					.filter(Boolean)
+					.join(", ")
+
+				const header = `#### [${entry.index}] ${entry.name} - ${entry.status.toUpperCase()}${metaInfo ? ` (${metaInfo})` : ""}`
 				const isSingleAgent = entries.length === 1
 				const promptLimit = isSingleAgent ? 1000 : 300
 				const resultLimit = isSingleAgent ? 8000 : 2500
 
 				const subPrompt = `**Objective:** ${excerpt(entry.prompt, promptLimit)}`
+				const filesModifiedBlock =
+					entry.filesModified && entry.filesModified.length > 0
+						? `\n**Files Modified:** ${entry.filesModified.map((f) => `\`${f}\``).join(", ")}`
+						: ""
+				const filesReadBlock =
+					entry.filesViewed && entry.filesViewed.length > 0
+						? `\n**Files Read:** ${entry.filesViewed.map((f) => `\`${f}\``).join(", ")}`
+						: ""
 				const detail =
 					entry.status === "completed"
 						? `**Result:**\n${excerpt(entry.result, resultLimit)}`
@@ -464,7 +489,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 					entry.criticalSignals && entry.criticalSignals.length > 0
 						? `\n**Signals:** ${entry.criticalSignals.join(", ")}`
 						: ""
-				return `${header}\n${subPrompt}\n${detail}${signals}\n`
+				return `${header}\n${subPrompt}${filesModifiedBlock}${filesReadBlock}\n${detail}${signals}\n`
 			}),
 			...(blackboard.length > 0 ? ["", "### SHARED SWARM FINDINGS (Blackboard)", ...blackboard.map((f) => `- ${f}`)] : []),
 		].join("\n")

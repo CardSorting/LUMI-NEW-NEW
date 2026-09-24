@@ -73,6 +73,9 @@ export class AutoApprove {
 				case DietCodeDefaultTool.APPLY_PATCH:
 				case DietCodeDefaultTool.BASH:
 				case DietCodeDefaultTool.USE_SUBAGENTS:
+				case DietCodeDefaultTool.RENAME:
+				case DietCodeDefaultTool.MOVE:
+				case DietCodeDefaultTool.DELETE:
 					return [true, true]
 
 				case DietCodeDefaultTool.BROWSER:
@@ -80,6 +83,34 @@ export class AutoApprove {
 				case DietCodeDefaultTool.WEB_SEARCH:
 				case DietCodeDefaultTool.MCP_ACCESS:
 				case DietCodeDefaultTool.MCP_USE:
+				case DietCodeDefaultTool.MCP_DOCS:
+				case DietCodeDefaultTool.PROJECT_MAP:
+				case DietCodeDefaultTool.MEM_QUERY:
+				case DietCodeDefaultTool.MEM_SNAPSHOT:
+				case DietCodeDefaultTool.MEM_LINK:
+				case DietCodeDefaultTool.MEM_MERGE:
+				case DietCodeDefaultTool.MEM_REFRESH:
+				case DietCodeDefaultTool.MEM_CONTEXT:
+				case DietCodeDefaultTool.MEM_BLAST:
+				case DietCodeDefaultTool.MEM_CHOKE:
+				case DietCodeDefaultTool.MEM_HEAL:
+				case DietCodeDefaultTool.MEM_FORECAST:
+				case DietCodeDefaultTool.MEM_CENTRALITY:
+				case DietCodeDefaultTool.MEM_SUBGRAPH:
+				case DietCodeDefaultTool.MEM_APPEND_SHARED:
+				case DietCodeDefaultTool.MEM_GET_SHARED:
+				case DietCodeDefaultTool.MEM_BUNDLE:
+				case DietCodeDefaultTool.MEM_BLAME:
+				case DietCodeDefaultTool.MEM_CHANGELOG:
+				case DietCodeDefaultTool.MEM_CLAIM:
+				case DietCodeDefaultTool.MEM_RELEASE:
+				case DietCodeDefaultTool.MEM_HUBS:
+				case DietCodeDefaultTool.USE_SKILL:
+				case DietCodeDefaultTool.TODO:
+				case DietCodeDefaultTool.CONDENSE:
+				case DietCodeDefaultTool.SUMMARIZE_TASK:
+				case DietCodeDefaultTool.REPORT_BUG:
+				case DietCodeDefaultTool.GENERATE_EXPLANATION:
 					return true
 			}
 		}
@@ -96,12 +127,43 @@ export class AutoApprove {
 				case DietCodeDefaultTool.APPLY_PATCH:
 				case DietCodeDefaultTool.BASH:
 				case DietCodeDefaultTool.USE_SUBAGENTS:
+				case DietCodeDefaultTool.RENAME:
+				case DietCodeDefaultTool.MOVE:
+				case DietCodeDefaultTool.DELETE:
 					return [true, true]
 				case DietCodeDefaultTool.BROWSER:
 				case DietCodeDefaultTool.WEB_FETCH:
 				case DietCodeDefaultTool.WEB_SEARCH:
 				case DietCodeDefaultTool.MCP_ACCESS:
 				case DietCodeDefaultTool.MCP_USE:
+				case DietCodeDefaultTool.MCP_DOCS:
+				case DietCodeDefaultTool.PROJECT_MAP:
+				case DietCodeDefaultTool.MEM_QUERY:
+				case DietCodeDefaultTool.MEM_SNAPSHOT:
+				case DietCodeDefaultTool.MEM_LINK:
+				case DietCodeDefaultTool.MEM_MERGE:
+				case DietCodeDefaultTool.MEM_REFRESH:
+				case DietCodeDefaultTool.MEM_CONTEXT:
+				case DietCodeDefaultTool.MEM_BLAST:
+				case DietCodeDefaultTool.MEM_CHOKE:
+				case DietCodeDefaultTool.MEM_HEAL:
+				case DietCodeDefaultTool.MEM_FORECAST:
+				case DietCodeDefaultTool.MEM_CENTRALITY:
+				case DietCodeDefaultTool.MEM_SUBGRAPH:
+				case DietCodeDefaultTool.MEM_APPEND_SHARED:
+				case DietCodeDefaultTool.MEM_GET_SHARED:
+				case DietCodeDefaultTool.MEM_BUNDLE:
+				case DietCodeDefaultTool.MEM_BLAME:
+				case DietCodeDefaultTool.MEM_CHANGELOG:
+				case DietCodeDefaultTool.MEM_CLAIM:
+				case DietCodeDefaultTool.MEM_RELEASE:
+				case DietCodeDefaultTool.MEM_HUBS:
+				case DietCodeDefaultTool.USE_SKILL:
+				case DietCodeDefaultTool.TODO:
+				case DietCodeDefaultTool.CONDENSE:
+				case DietCodeDefaultTool.SUMMARIZE_TASK:
+				case DietCodeDefaultTool.REPORT_BUG:
+				case DietCodeDefaultTool.GENERATE_EXPLANATION:
 					return true
 			}
 		}
@@ -119,6 +181,9 @@ export class AutoApprove {
 			case DietCodeDefaultTool.FILE_NEW:
 			case DietCodeDefaultTool.FILE_EDIT:
 			case DietCodeDefaultTool.APPLY_PATCH:
+			case DietCodeDefaultTool.RENAME:
+			case DietCodeDefaultTool.MOVE:
+			case DietCodeDefaultTool.DELETE:
 				return [autoApprovalSettings.actions.editFiles, autoApprovalSettings.actions.editFilesExternally ?? false]
 			case DietCodeDefaultTool.BASH:
 				return [
@@ -126,13 +191,42 @@ export class AutoApprove {
 					autoApprovalSettings.actions.executeAllCommands ?? false,
 				]
 			case DietCodeDefaultTool.BROWSER:
-				return autoApprovalSettings.actions.useBrowser
 			case DietCodeDefaultTool.WEB_FETCH:
 			case DietCodeDefaultTool.WEB_SEARCH:
 				return autoApprovalSettings.actions.useBrowser
 			case DietCodeDefaultTool.MCP_ACCESS:
 			case DietCodeDefaultTool.MCP_USE:
 				return autoApprovalSettings.actions.useMcp
+			case DietCodeDefaultTool.MCP_DOCS:
+			case DietCodeDefaultTool.PROJECT_MAP:
+			case DietCodeDefaultTool.MEM_QUERY:
+			case DietCodeDefaultTool.MEM_CONTEXT:
+			case DietCodeDefaultTool.MEM_REFRESH:
+			case DietCodeDefaultTool.MEM_CENTRALITY:
+			case DietCodeDefaultTool.MEM_SUBGRAPH:
+			case DietCodeDefaultTool.MEM_GET_SHARED:
+			case DietCodeDefaultTool.MEM_BUNDLE:
+			case DietCodeDefaultTool.MEM_BLAME:
+			case DietCodeDefaultTool.MEM_CHANGELOG:
+			case DietCodeDefaultTool.MEM_HUBS:
+			case DietCodeDefaultTool.USE_SKILL:
+			case DietCodeDefaultTool.TODO:
+			case DietCodeDefaultTool.CONDENSE:
+			case DietCodeDefaultTool.SUMMARIZE_TASK:
+			case DietCodeDefaultTool.REPORT_BUG:
+			case DietCodeDefaultTool.GENERATE_EXPLANATION:
+				return autoApprovalSettings.actions.readFiles
+			case DietCodeDefaultTool.MEM_SNAPSHOT:
+			case DietCodeDefaultTool.MEM_LINK:
+			case DietCodeDefaultTool.MEM_MERGE:
+			case DietCodeDefaultTool.MEM_APPEND_SHARED:
+			case DietCodeDefaultTool.MEM_CLAIM:
+			case DietCodeDefaultTool.MEM_RELEASE:
+			case DietCodeDefaultTool.MEM_BLAST:
+			case DietCodeDefaultTool.MEM_CHOKE:
+			case DietCodeDefaultTool.MEM_HEAL:
+			case DietCodeDefaultTool.MEM_FORECAST:
+				return autoApprovalSettings.actions.editFiles || autoApprovalSettings.actions.readFiles
 		}
 		return false
 	}
@@ -179,6 +273,21 @@ export class AutoApprove {
 				DietCodeDefaultTool.LIST_CODE_DEF,
 				DietCodeDefaultTool.SEARCH,
 				DietCodeDefaultTool.NEW_RULE,
+				DietCodeDefaultTool.PROJECT_MAP,
+				DietCodeDefaultTool.MEM_QUERY,
+				DietCodeDefaultTool.MEM_CONTEXT,
+				DietCodeDefaultTool.MEM_REFRESH,
+				DietCodeDefaultTool.MEM_CENTRALITY,
+				DietCodeDefaultTool.MEM_SUBGRAPH,
+				DietCodeDefaultTool.MEM_GET_SHARED,
+				DietCodeDefaultTool.MEM_BUNDLE,
+				DietCodeDefaultTool.MEM_BLAME,
+				DietCodeDefaultTool.MEM_CHANGELOG,
+				DietCodeDefaultTool.MEM_HUBS,
+				DietCodeDefaultTool.MCP_DOCS,
+				DietCodeDefaultTool.TODO,
+				DietCodeDefaultTool.USE_SKILL,
+				DietCodeDefaultTool.GENERATE_EXPLANATION,
 			].includes(blockname)
 
 			if (isReadOnly) {

@@ -17,7 +17,7 @@ export interface KnowledgeNode {
 	embedding: number[] | null
 	confidence: number
 	hubScore: number
-	metadata?: any
+	metadata?: Record<string, unknown>
 	createdAt: number
 }
 
@@ -72,12 +72,16 @@ export class KnowledgeGraphService {
 	}
 
 	async cleanupGhostTasks() {
-		const now = Date.now()
-		const db = await getDb()
-		const expired = await db.selectFrom("agent_knowledge").select("id").where("expiresAt", "<", now).execute()
+		try {
+			const now = Date.now()
+			const db = await getDb()
+			const expired = await db.selectFrom("agent_knowledge").select("id").where("expiresAt", "<", now).execute()
 
-		for (const node of expired) {
-			await this.deleteKnowledge(node.id)
+			for (const node of expired) {
+				await this.deleteKnowledge(node.id)
+			}
+		} catch (error) {
+			Logger.warn("[KnowledgeGraphService] Periodic ghost tasks cleanup skipped:", error)
 		}
 	}
 
@@ -129,7 +133,7 @@ export class KnowledgeGraphService {
 			embedding?: number[]
 			confidence?: number
 			expiresAt?: number
-			metadata?: any
+			metadata?: Record<string, unknown>
 		} = {},
 	): Promise<string> {
 		const id = nanoid()
@@ -241,7 +245,7 @@ export class KnowledgeGraphService {
 	 * Partially update a knowledge graph node.
 	 */
 	async updateKnowledge(id: string, patch: Partial<KnowledgeNode>): Promise<void> {
-		const values: any = { ...patch }
+		const values: Record<string, unknown> = { ...patch }
 		if (patch.tags) values.tags = JSON.stringify(patch.tags)
 		if (patch.embedding) values.embedding = JSON.stringify(patch.embedding)
 		if (patch.metadata) values.metadata = JSON.stringify(patch.metadata)
@@ -294,9 +298,11 @@ export class KnowledgeGraphService {
 	 */
 	async createLandmark(streamId: string, content: string, originalCount: number): Promise<string> {
 		// Landmark summarized using generic ApiHandler is handled elsewhere or we fallback to Gemini summarize if available
-		const summary = (this.embeddingHandler as any).summarizeText
-			? await (this.embeddingHandler as any).summarizeText(content)
-			: `${content.substring(0, 500)}...`
+		const summarizer = this.embeddingHandler as { summarizeText?: (text: string) => Promise<string> }
+		const summary =
+			typeof summarizer.summarizeText === "function"
+				? await summarizer.summarizeText(content)
+				: `${content.substring(0, 500)}...`
 		return this.addKnowledge(streamId, "landmark", summary, {
 			tags: ["memory_summary", "landmark"],
 			metadata: { originalCount, type: "cognitive_landmark" },
@@ -436,7 +442,7 @@ export class KnowledgeGraphService {
 		const nodes = await queryBuilder.execute()
 
 		const ranked = nodes
-			.map((n) => {
+			.map((n): KnowledgeNode & { similarity: number } => {
 				const embedding = n.embedding ? (JSON.parse(n.embedding) as number[]) : null
 				const hubBoost = (Number(n.hubScore) || 0) * 0.01
 
@@ -454,9 +460,10 @@ export class KnowledgeGraphService {
 				}
 
 				return {
-					...n,
-					userId: n.userId,
-					expiresAt: n.expiresAt ? Number(n.expiresAt) : null,
+					id: n.id,
+					streamId: n.streamId,
+					type: n.type,
+					content: n.content,
 					tags: JSON.parse(n.tags || "[]"),
 					embedding,
 					metadata: n.metadata ? JSON.parse(n.metadata) : null,
@@ -480,10 +487,8 @@ export class KnowledgeGraphService {
 						augmentedIds.add(n.id)
 						finalResults.push({
 							...n,
-							userId: (n as any).userId || "default",
-							expiresAt: (n as any).expiresAt || null,
 							similarity: root.similarity * 0.8,
-						} as any) // Decay similarity for neighbors
+						}) // Decay similarity for neighbors
 					}
 				})
 			}
@@ -681,10 +686,11 @@ export class KnowledgeGraphService {
 		const correlations: Record<string, number> = {}
 
 		for (let i = 0; i < history.length - 1; i++) {
-			const curr = history[i]!
-			const prev = history[i + 1]!
-			const currTree = curr.metadata?.tree || {}
-			const prevTree = prev.metadata?.tree || {}
+			const curr = history[i]
+			const prev = history[i + 1]
+			if (!curr || !prev) continue
+			const currTree = (curr.metadata?.tree as Record<string, unknown> | undefined) || {}
+			const prevTree = (prev.metadata?.tree as Record<string, unknown> | undefined) || {}
 
 			const changedFiles = new Set<string>()
 			for (const p of Object.keys(currTree)) if (currTree[p] !== prevTree[p]) changedFiles.add(p)
@@ -715,17 +721,19 @@ export class KnowledgeGraphService {
 		const history = await this.getHistory(streamId, 200)
 
 		while (queue.length > 0) {
-			const current = queue.shift()!
+			const current = queue.shift()
+			if (!current) break
 			if (current.depth >= maxDepth) continue
 
 			const correlations: Record<string, number> = {}
 			const normalizedTarget = current.path.replace(/^\/+/, "").replace(/\/\/+/g, "/")
 
 			for (let i = 0; i < history.length - 1; i++) {
-				const curr = history[i]!
-				const prev = history[i + 1]!
-				const currTree = curr.metadata?.tree || {}
-				const prevTree = prev.metadata?.tree || {}
+				const curr = history[i]
+				const prev = history[i + 1]
+				if (!curr || !prev) continue
+				const currTree = (curr.metadata?.tree as Record<string, unknown> | undefined) || {}
+				const prevTree = (prev.metadata?.tree as Record<string, unknown> | undefined) || {}
 
 				const changedFiles = new Set<string>()
 				for (const p of Object.keys(currTree)) if (currTree[p] !== prevTree[p]) changedFiles.add(p)
@@ -790,15 +798,17 @@ export class KnowledgeGraphService {
 		const stats: Record<string, { churn: number }> = {}
 
 		for (let i = 0; i < history.length - 1; i++) {
-			const curr = history[i]!
-			const prev = history[i + 1]!
-			const currTree = curr.metadata?.tree || {}
-			const prevTree = prev.metadata?.tree || {}
+			const curr = history[i]
+			const prev = history[i + 1]
+			if (!curr || !prev) continue
+			const currTree = (curr.metadata?.tree as Record<string, unknown> | undefined) || {}
+			const prevTree = (prev.metadata?.tree as Record<string, unknown> | undefined) || {}
 
 			for (const p of Object.keys(currTree)) {
 				if (currTree[p] !== prevTree[p]) {
-					if (!stats[p]) stats[p] = { churn: 0 }
-					stats[p]!.churn++
+					const entry = stats[p] || { churn: 0 }
+					entry.churn++
+					stats[p] = entry
 				}
 			}
 		}
@@ -821,7 +831,7 @@ export class KnowledgeGraphService {
 		const normalizedPath = filePath.replace(/^\/+/, "").replace(/\/\/+/g, "/")
 
 		for (const snapshot of history) {
-			const tree = snapshot.metadata?.tree || {}
+			const tree = (snapshot.metadata?.tree as Record<string, string> | undefined) || {}
 			if (normalizedPath in tree) {
 				return {
 					content: snapshot.content,
@@ -843,14 +853,16 @@ export class KnowledgeGraphService {
 		const normalizedPath = filePath.replace(/^\/+/, "").replace(/\/\/+/g, "/")
 
 		for (let i = 0; i < history.length - 1; i++) {
-			const curr = history[i]!
-			const prev = history[i + 1]!
-			const currTree = curr.metadata?.tree || {}
-			const prevTree = prev.metadata?.tree || {}
+			const curr = history[i]
+			const prev = history[i + 1]
+			if (!curr || !prev) continue
+			const currTree = (curr.metadata?.tree as Record<string, unknown> | undefined) || {}
+			const prevTree = (prev.metadata?.tree as Record<string, unknown> | undefined) || {}
 
 			if (currTree[normalizedPath] && currTree[normalizedPath] !== prevTree[normalizedPath]) {
+				const author = typeof curr.metadata?.userId === "string" ? curr.metadata.userId : "agent"
 				return {
-					lastAuthor: (curr as any).userId || "agent",
+					lastAuthor: author,
 					lastNodeId: curr.id,
 					lastMessage: curr.content.substring(0, 100),
 					lastTimestamp: curr.createdAt,
@@ -872,8 +884,8 @@ export class KnowledgeGraphService {
 
 		if (!headNode || !baseNode) return "Base or Head snapshot not found in history."
 
-		const baseTree = baseNode.metadata?.tree || {}
-		const headTree = headNode.metadata?.tree || {}
+		const baseTree = (baseNode.metadata?.tree as Record<string, string> | undefined) || {}
+		const headTree = (headNode.metadata?.tree as Record<string, string> | undefined) || {}
 
 		const added: string[] = []
 		const removed: string[] = []
@@ -920,13 +932,13 @@ Removed: ${removed.join(", ") || "None"}
 		for (const node of targetHistory) {
 			if (sourceIds.has(node.id)) {
 				lcaId = node.id
-				lcaTree = node.metadata?.tree || {}
+				lcaTree = (node.metadata?.tree as Record<string, string> | undefined) || {}
 				break
 			}
 		}
 
-		const sourceTree = sourceHistory[0]?.metadata?.tree || {}
-		const targetTree = targetHistory[0]?.metadata?.tree || {}
+		const sourceTree = (sourceHistory[0]?.metadata?.tree as Record<string, string> | undefined) || {}
+		const targetTree = (targetHistory[0]?.metadata?.tree as Record<string, string> | undefined) || {}
 		const affectedPaths: string[] = []
 		let hasConflicts = false
 
@@ -988,8 +1000,9 @@ Removed: ${removed.join(", ") || "None"}
 		const targetHistory = await this.getHistory(targetStreamId, 50)
 		const targetChangedPaths = new Set<string>()
 		if (targetHistory.length > 1) {
-			const targetHead = targetHistory[0]?.metadata?.tree || {}
-			const targetBase = targetHistory[targetHistory.length - 1]?.metadata?.tree || {}
+			const targetHead = (targetHistory[0]?.metadata?.tree as Record<string, string> | undefined) || {}
+			const targetBase =
+				(targetHistory[targetHistory.length - 1]?.metadata?.tree as Record<string, string> | undefined) || {}
 			for (const path of Object.keys(targetHead)) {
 				if (targetHead[path] !== targetBase[path]) {
 					targetChangedPaths.add(path)
@@ -1006,8 +1019,8 @@ Removed: ${removed.join(", ") || "None"}
 
 		// 4. Compute genuine structural intersection of blast radii (Real semantic overlap)
 		for (const [sourcePath, sourceDepth] of sourceRadii.entries()) {
-			if (targetRadii.has(sourcePath)) {
-				const targetDepth = targetRadii.get(sourcePath)!
+			const targetDepth = targetRadii.get(sourcePath)
+			if (targetDepth !== undefined) {
 				semanticOverlaps.push({
 					path: sourcePath,
 					reason: `Semantic overlap: Multi-hop structural intersection (Source depth: ${sourceDepth}, Target depth: ${targetDepth})`,
@@ -1092,7 +1105,7 @@ Removed: ${removed.join(", ") || "None"}
 	/**
 	 * Returns top N hubs by centrality score.
 	 */
-	async getGlobalCentrality(limit = 10): Promise<any[]> {
+	async getGlobalCentrality(limit = 10): Promise<{ kbId: string; score: number; content: string }[]> {
 		const db = await getDb()
 		const rows = await db.selectFrom("agent_knowledge").selectAll().orderBy("hubScore", "desc").limit(limit).execute()
 
@@ -1106,14 +1119,14 @@ Removed: ${removed.join(", ") || "None"}
 	/**
 	 * Resolves the context for a task, including multi-hop graph neighborhood.
 	 */
-	async getTaskContext(taskId: string): Promise<any> {
+	async getTaskContext(taskId: string): Promise<{ task: unknown; resolvedGraph: KnowledgeNode[] }> {
 		try {
 			const db = await getDb()
 			const task = await db.selectFrom("agent_tasks").selectAll().where("id", "=", taskId).executeTakeFirst()
 			if (!task) return { task: null, resolvedGraph: [] }
 
 			const linkedKnowledgeIds = JSON.parse(task.linkedKnowledgeIds || "[]")
-			const resolvedGraph: any[] = []
+			const resolvedGraph: KnowledgeNode[] = []
 
 			if (linkedKnowledgeIds.length > 0) {
 				const graphPromises = linkedKnowledgeIds.map((kbId: string) => this.traverseGraph(kbId, 2))
@@ -1121,7 +1134,7 @@ Removed: ${removed.join(", ") || "None"}
 
 				const seen = new Set<string>()
 				for (const results of nestedResults) {
-					for (const item of results as any[]) {
+					for (const item of results) {
 						if (!seen.has(item.id)) {
 							seen.add(item.id)
 							resolvedGraph.push(item)

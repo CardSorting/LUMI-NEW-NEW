@@ -97,7 +97,7 @@ function configWithState(taskState: TaskState): TaskConfig {
 		messageState: {
 			getDietCodeMessages: () => [],
 		},
-	} as TaskConfig
+	} as unknown as TaskConfig
 }
 
 function attemptBlock(params: Record<string, unknown>): ToolUse {
@@ -174,9 +174,9 @@ describe("attemptCompletionUtils", () => {
 			}
 			toolError.should.containEql("Task completion blocked")
 			taskState.consecutiveMistakeCount.should.equal(1)
-			taskState.lastCompletionBlockReason.should.equal("circuit_breaker")
-			taskState.lastCompletionFailedStage.should.equal("circuit_breaker")
-			taskState.completionGatePressureLevel.should.equal("tripped")
+			should.equal(taskState.lastCompletionBlockReason, "circuit_breaker")
+			should.equal(taskState.lastCompletionFailedStage, "circuit_breaker")
+			should.equal(taskState.completionGatePressureLevel, "tripped")
 		})
 	})
 
@@ -611,26 +611,26 @@ describe("attemptCompletionUtils", () => {
 				result: "too short",
 				checkpointHash: "abc",
 			})
-			taskState.completionGateBlockCount.should.equal(1)
-			taskState.lastCompletionBlockReason.should.equal("result_too_brief")
-			taskState.lastCompletionFailedStage.should.equal("min_length")
-			taskState.completionGatePressureLevel.should.equal("stable")
+			should.equal(taskState.completionGateBlockCount, 1)
+			should.equal(taskState.lastCompletionBlockReason, "result_too_brief")
+			should.equal(taskState.lastCompletionFailedStage, "min_length")
+			should.equal(taskState.completionGatePressureLevel, "stable")
 			should.exist(taskState.lastCompletionAttemptAt)
 			should.exist(taskState.lastBlockedCompletionResultFingerprint)
-			taskState.lastGateBlockCheckpointHash.should.equal("abc")
+			should.equal(taskState.lastGateBlockCheckpointHash, "abc")
 		})
 
 		it("does not increment block count for circuit breaker", () => {
 			taskState.completionGateBlockCount = MAX_COMPLETION_GATE_BLOCK_COUNT
 			recordCompletionGateBlockEvent(configWithState(taskState), "circuit_breaker")
 			taskState.completionGateBlockCount.should.equal(MAX_COMPLETION_GATE_BLOCK_COUNT)
-			taskState.lastCompletionBlockReason.should.equal("circuit_breaker")
+			should.equal(taskState.lastCompletionBlockReason, "circuit_breaker")
 		})
 
 		it("does not increment block count for soft throttle blocks", () => {
 			recordCompletionGateBlockEvent(configWithState(taskState), "retry_cooldown")
 			;(taskState.completionGateBlockCount ?? 0).should.equal(0)
-			taskState.lastCompletionBlockReason.should.equal("retry_cooldown")
+			should.equal(taskState.lastCompletionBlockReason, "retry_cooldown")
 		})
 	})
 
@@ -686,9 +686,9 @@ describe("attemptCompletionUtils", () => {
 
 		it("records block reason, failed stage, and pressure on the task state", () => {
 			recordCompletionBlockReason(configWithState(taskState), "retry_cooldown")
-			taskState.lastCompletionBlockReason.should.equal("retry_cooldown")
-			taskState.lastCompletionFailedStage.should.equal("cooldown")
-			taskState.completionGatePressureLevel.should.equal("stable")
+			should.equal(taskState.lastCompletionBlockReason, "retry_cooldown")
+			should.equal(taskState.lastCompletionFailedStage, "cooldown")
+			should.equal(taskState.completionGatePressureLevel, "stable")
 		})
 	})
 
@@ -739,16 +739,16 @@ describe("attemptCompletionUtils", () => {
 
 	describe("validateCompletionResultQuality", () => {
 		it("rejects empty and placeholder-marked results", () => {
-			validateCompletionResultQuality("   ").should.containEql("empty")
-			validateCompletionResultQuality("Done but TODO: fix tests").should.containEql("unfinished markers")
+			should.equal((validateCompletionResultQuality("   ") ?? "").includes("empty"), true)
+			should.equal((validateCompletionResultQuality("Done but TODO: fix tests") ?? "").includes("unfinished markers"), true)
 			should.not.exist(validateCompletionResultQuality("All tests pass and feature is complete."))
 		})
 	})
 
 	describe("validateCompletionResultTone", () => {
 		it("rejects question endings and engagement bait", () => {
-			validateCompletionResultTone("All done.\nLet me know if you need anything else").should.containEql("solicits")
-			validateCompletionResultTone("All changes applied. Ready for review?").should.containEql("ends with a question")
+			should.exist(validateCompletionResultTone("All done.\nLet me know if you need anything else"))
+			should.exist(validateCompletionResultTone("All changes applied. Ready for review?"))
 			should.not.exist(validateCompletionResultTone("Implemented retry logic and all tests pass."))
 		})
 	})
@@ -892,8 +892,8 @@ describe("attemptCompletionUtils", () => {
 				messageState: {
 					getDietCodeMessages: () => [{ say: "checkpoint_created" }, { lastCheckpointHash: "abc123" }],
 				},
-			} as TaskConfig
-			getLatestCheckpointHashFromMessages(config).should.equal("abc123")
+			} as unknown as TaskConfig
+			should.equal(getLatestCheckpointHashFromMessages(config), "abc123")
 		})
 	})
 

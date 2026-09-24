@@ -171,7 +171,7 @@ export class RoadmapToolHandler implements IToolHandler {
 				workspace,
 				retryCommand: action === "validate" ? "roadmap(action='validate')" : "roadmap(action='guide')",
 			})
-			await recordLastError(envelope)
+			await recordLastError({ ...envelope })
 			await journalRoadmapToolCall(action, workspace, envelope, config.taskId)
 			return JSON.stringify(envelope, null, 2)
 		}

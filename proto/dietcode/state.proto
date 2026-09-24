@@ -323,6 +323,19 @@ message UpdateSettingsRequest {
   optional bool opt_out_of_remote_config = 39;
   optional bool worktrees_enabled = 40;
   optional bool double_check_completion_enabled = 41;
+  optional bool audit_completion_gate_enabled = 42;
+  optional int32 audit_completion_gate_threshold = 43;
+  optional bool audit_completion_gate_critical_only = 44;
+  optional bool audit_act_mode_advisory_enabled = 45;
+  optional bool audit_advisory_escalation_enabled = 46;
+  optional string audit_advisory_auto_scroll_mode = 47;
+  optional bool audit_plan_regression_gate_enabled = 48;
+  optional bool audit_tool_output_advisory_enabled = 49;
+  optional bool audit_file_write_advisory_enabled = 50;
+  optional bool audit_intent_threshold_adjustments_enabled = 51;
+  optional string audit_intent_threshold_overrides = 52;
+  optional bool audit_sarif_hook_export_enabled = 53;
+  optional bool audit_workspace_artifacts_enabled = 54;
 }
 
 message UpdateTerminalConnectionTimeoutRequest {

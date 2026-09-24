@@ -31,6 +31,98 @@ const AgentConfigFrontmatterSchema = z.object({
 
 export type AgentBaseConfig = z.infer<typeof AgentBaseConfigSchema>
 
+export const BUILTIN_AGENT_ARCHETYPES: Record<string, AgentBaseConfig> = {
+	researcher: {
+		name: "Researcher",
+		description: "Deep exploration, codebase indexing, symbol mapping, and external documentation research specialist.",
+		tools: [
+			DietCodeDefaultTool.FILE_READ,
+			DietCodeDefaultTool.SEARCH,
+			DietCodeDefaultTool.LIST_FILES,
+			DietCodeDefaultTool.LIST_CODE_DEF,
+			DietCodeDefaultTool.PROJECT_MAP,
+			DietCodeDefaultTool.WEB_FETCH,
+			DietCodeDefaultTool.WEB_SEARCH,
+			DietCodeDefaultTool.ATTEMPT,
+		],
+		systemPrompt:
+			"You are an expert technical researcher and codebase explorer. Your objective is to thoroughly investigate the workspace, map symbol declarations and dependencies, read documentation, and provide precise, grounded architectural findings.",
+	},
+	explorer: {
+		name: "Explorer",
+		description: "Codebase exploration, symbol mapping, and directory structure mapping specialist.",
+		tools: [
+			DietCodeDefaultTool.FILE_READ,
+			DietCodeDefaultTool.SEARCH,
+			DietCodeDefaultTool.LIST_FILES,
+			DietCodeDefaultTool.LIST_CODE_DEF,
+			DietCodeDefaultTool.PROJECT_MAP,
+			DietCodeDefaultTool.ATTEMPT,
+		],
+		systemPrompt:
+			"You are a specialized structural explorer. Your mission is to explore file structures, trace imports, and map modules without making modifications.",
+	},
+	verifier: {
+		name: "Verifier",
+		description: "Autonomous quality assurance, verification, regression testing, and code review specialist.",
+		tools: [
+			DietCodeDefaultTool.FILE_READ,
+			DietCodeDefaultTool.SEARCH,
+			DietCodeDefaultTool.LIST_FILES,
+			DietCodeDefaultTool.BASH,
+			DietCodeDefaultTool.STABILITY_DIAGNOSE,
+			DietCodeDefaultTool.ATTEMPT,
+		],
+		systemPrompt:
+			"You are an autonomous quality assurance and verification specialist. Your goal is to critically evaluate code changes, run automated test suites, verify build correctness, and identify regressions or logic flaws.",
+	},
+	reviewer: {
+		name: "Reviewer",
+		description: "Code review, architectural boundary enforcement, and security auditing specialist.",
+		tools: [
+			DietCodeDefaultTool.FILE_READ,
+			DietCodeDefaultTool.SEARCH,
+			DietCodeDefaultTool.LIST_FILES,
+			DietCodeDefaultTool.LIST_CODE_DEF,
+			DietCodeDefaultTool.STABILITY_DIAGNOSE,
+			DietCodeDefaultTool.ATTEMPT,
+		],
+		systemPrompt:
+			"You are a thorough code and architecture reviewer. Audit code changes for security, architectural purity, clean error boundaries, and adherence to established patterns.",
+	},
+	coder: {
+		name: "Coder",
+		description: "Implementation specialist focusing on targeted code edits, new files, and patch application.",
+		tools: [
+			DietCodeDefaultTool.FILE_READ,
+			DietCodeDefaultTool.FILE_EDIT,
+			DietCodeDefaultTool.FILE_NEW,
+			DietCodeDefaultTool.APPLY_PATCH,
+			DietCodeDefaultTool.SEARCH,
+			DietCodeDefaultTool.LIST_FILES,
+			DietCodeDefaultTool.BASH,
+			DietCodeDefaultTool.ATTEMPT,
+		],
+		systemPrompt:
+			"You are an expert software engineer and implementation specialist. Your role is to write clean, robust, well-typed code that strictly adheres to the existing architecture.",
+	},
+	architect: {
+		name: "Architect",
+		description: "High-level design, dependency graph analysis, and boundary enforcement specialist.",
+		tools: [
+			DietCodeDefaultTool.FILE_READ,
+			DietCodeDefaultTool.SEARCH,
+			DietCodeDefaultTool.LIST_FILES,
+			DietCodeDefaultTool.PROJECT_MAP,
+			DietCodeDefaultTool.STABILITY_DIAGNOSE,
+			DietCodeDefaultTool.STABILITY_SWEEP,
+			DietCodeDefaultTool.ATTEMPT,
+		],
+		systemPrompt:
+			"You are a systems architect specializing in component decomposition, dependency graph integrity, and system health.",
+	},
+}
+
 function normalizeToolName(toolName: string): DietCodeDefaultTool {
 	const trimmed = toolName.trim()
 	if (!trimmed) {
@@ -207,11 +299,16 @@ export class AgentConfigLoader {
 		if (!subagentName?.trim()) {
 			return undefined
 		}
-		return this.cachedConfigs.get(normalizeAgentName(subagentName))
+		const normalized = normalizeAgentName(subagentName)
+		return this.cachedConfigs.get(normalized) || BUILTIN_AGENT_ARCHETYPES[normalized]
 	}
 
 	public getAllCachedConfigs(): ReadonlyMap<string, AgentBaseConfig> {
 		return new Map(this.cachedConfigs)
+	}
+
+	public getBuiltinArchetypes(): ReadonlyMap<string, AgentBaseConfig> {
+		return new Map(Object.entries(BUILTIN_AGENT_ARCHETYPES))
 	}
 
 	public getAllCachedConfigsWithToolNames(): Array<{ toolName: string; config: AgentBaseConfig }> {

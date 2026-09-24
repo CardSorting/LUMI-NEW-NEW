@@ -308,6 +308,9 @@ export interface SubagentStatusItem {
 	result?: string
 	error?: string
 	criticalSignals?: string[]
+	filesModified?: string[]
+	filesViewed?: string[]
+	durationMs?: number
 }
 
 export interface DietCodeSaySubagentStatus {

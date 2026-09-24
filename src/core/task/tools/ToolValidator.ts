@@ -12,7 +12,7 @@ export type ValidationResult = { ok: true } | { ok: false; error: string; hint?:
 export class ToolValidator {
 	constructor(
 		private readonly ignoreController: DietCodeIgnoreController,
-		private readonly guard: UniversalGuard,
+		private readonly guard?: UniversalGuard,
 	) {}
 
 	/**
@@ -21,13 +21,13 @@ export class ToolValidator {
 	public async validate(block: ToolUse, ...requiredParams: ToolParamName[]): Promise<ValidationResult> {
 		// 1. Parameter Integrity
 		for (const p of requiredParams) {
-			const val = (block.params as any)?.[p]
+			const val = block.params[p]
 			if (val === undefined || val === null || String(val).trim() === "") {
 				return { ok: false, error: `Missing required parameter '${p}' for tool '${block.name}'.` }
 			}
 		}
 
-		const params = block.params as any
+		const params = block.params
 
 		// 2. Security Audit
 		if (params.path) {
@@ -36,14 +36,14 @@ export class ToolValidator {
 		}
 
 		// 3. Architectural Audit (for writes and patches)
+		const editContent = params.content ?? params.diff
 		if (
 			(block.name === DietCodeDefaultTool.FILE_NEW ||
 				block.name === DietCodeDefaultTool.FILE_EDIT ||
 				block.name === DietCodeDefaultTool.APPLY_PATCH) &&
 			params.path &&
-			(params.content || params.diff || params.patch)
+			editContent
 		) {
-			const editContent = params.content || params.diff || params.patch
 			return await this.checkArchitecturalPurity(params.path, editContent)
 		}
 
@@ -84,18 +84,22 @@ export class ToolValidator {
 	 * instead of fragile emoji-prefix string matching.
 	 */
 	public async checkArchitecturalPurity(filePath: string, content: string): Promise<ValidationResult> {
+		if (!this.guard) {
+			return { ok: true }
+		}
+
 		// Get layer context for actionable guidance
 		const layerContext = this.guard.getLayerContext(filePath)
 
 		// Build a synthetic tool block for the guard's pre-execution check
-		const syntheticBlock = {
-			type: "tool_use" as const,
+		const syntheticBlock: ToolUse = {
+			type: "tool_use",
 			name: DietCodeDefaultTool.FILE_NEW,
 			params: { path: filePath, content },
 			partial: false,
 		}
 
-		const result = await this.guard.guardPreExecution(syntheticBlock as any)
+		const result = await this.guard.guardPreExecution(syntheticBlock)
 
 		if (!result.success) {
 			return {

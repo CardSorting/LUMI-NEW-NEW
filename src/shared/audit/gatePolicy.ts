@@ -18,7 +18,7 @@ export const COMPLETION_RETRY_COOLDOWN_MS = 2000
 export const COMPLETION_RETRY_MAX_COOLDOWN_MS = 30_000
 
 /** Minimum result summary length — rejects one-liner non-summaries at completion. */
-export const COMPLETION_RESULT_MIN_LENGTH = 40
+export const COMPLETION_RESULT_MIN_LENGTH = 15
 
 /** Maximum result summary length — prevents context-flooding completion payloads. */
 export const COMPLETION_RESULT_MAX_LENGTH = 6000

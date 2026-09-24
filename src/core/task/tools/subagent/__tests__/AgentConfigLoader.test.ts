@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert"
+import { afterEach, describe, it } from "node:test"
 import fs from "fs/promises"
-import { afterEach, describe, it } from "mocha"
 import os from "os"
 import * as path from "path"
 import { DietCodeDefaultTool, getToolUseNames } from "@/shared/tools"
@@ -152,5 +152,35 @@ Reviewer prompt`,
 		assert.equal(loader.resolveSubagentNameForTool(withToolNames[0].toolName), "code reviewer")
 		assert.equal(loader.isDynamicSubagentTool(withToolNames[0].toolName), true)
 		assert.ok(getToolUseNames().includes(withToolNames[0].toolName))
+	})
+
+	it("falls back to built-in archetypes when no custom agent config exists", async () => {
+		const tempHome = await createTempHomeDir()
+		tempDirs.push(tempHome)
+
+		const loader = AgentConfigLoader.getInstance(tempHome)
+		await loader.load()
+
+		const researcher = loader.getCachedConfig("researcher")
+		assert.ok(researcher)
+		assert.equal(researcher?.name, "Researcher")
+		assert.ok(researcher?.tools.includes(DietCodeDefaultTool.FILE_READ))
+		assert.ok(researcher?.tools.includes(DietCodeDefaultTool.PROJECT_MAP))
+
+		const verifier = loader.getCachedConfig("verifier")
+		assert.ok(verifier)
+		assert.equal(verifier?.name, "Verifier")
+		assert.ok(verifier?.tools.includes(DietCodeDefaultTool.BASH))
+
+		const coder = loader.getCachedConfig("coder")
+		assert.ok(coder)
+		assert.equal(coder?.name, "Coder")
+		assert.ok(coder?.tools.includes(DietCodeDefaultTool.FILE_EDIT))
+
+		const architect = loader.getCachedConfig("architect")
+		assert.ok(architect)
+		assert.equal(architect?.name, "Architect")
+
+		assert.equal(loader.getCachedConfig("non_existent_random_agent"), undefined)
 	})
 })
