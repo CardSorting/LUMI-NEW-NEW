@@ -17,7 +17,7 @@ import {
 const repoRoot = path.join(import.meta.dirname, "..")
 
 test("REQUIRED_RUNTIME_PACKAGES matches esbuild externals chain", () => {
-	assert.deepEqual(REQUIRED_RUNTIME_PACKAGES, ["better-sqlite3", "bindings", "file-uri-to-path"])
+	assert.deepEqual(REQUIRED_RUNTIME_PACKAGES, ["better-sqlite3"])
 })
 
 test("verifyVscodeignoreWhitelist passes on this repo", () => {
@@ -25,14 +25,14 @@ test("verifyVscodeignoreWhitelist passes on this repo", () => {
 	assert.equal(summarizeChecks(checks).ok, true)
 })
 
-test("buildDoctorReport full scope includes config checks", () => {
-	const report = buildDoctorReport({ repoRoot, distDir: path.join(repoRoot, "dist"), scope: "full" })
+test("buildDoctorReport full scope includes config checks", async () => {
+	const report = await buildDoctorReport({ repoRoot, distDir: path.join(repoRoot, "dist"), scope: "full" })
 	assert.ok(report.configChecks.length >= 3)
 	assert.equal(typeof report.ok, "boolean")
 })
 
-test("buildDoctorReport install scope skips packaging", () => {
-	const report = buildDoctorReport({ repoRoot, distDir: path.join(repoRoot, "dist"), scope: "install" })
+test("buildDoctorReport install scope skips packaging", async () => {
+	const report = await buildDoctorReport({ repoRoot, distDir: path.join(repoRoot, "dist"), scope: "install" })
 	assert.equal(report.configChecks.length, 0)
 	assert.equal(report.vsix.length, 0)
 })
@@ -48,7 +48,7 @@ test("auditExtensionHealth detects missing node_modules", () => {
 	}
 })
 
-test("vsixHasNativeModule on known good dist VSIX when present", () => {
+test("vsixHasNativeModule on known good dist VSIX when present", async () => {
 	const vsixDir = path.join(repoRoot, "dist")
 	if (!fs.existsSync(vsixDir)) {
 		return
@@ -58,6 +58,6 @@ test("vsixHasNativeModule on known good dist VSIX when present", () => {
 		return
 	}
 	const vsixPath = path.join(vsixDir, vsix)
-	assert.equal(vsixHasNativeModule(vsixPath), true)
-	assert.equal(summarizeChecks(auditVsixHealth(vsixPath)).ok, true)
+	assert.equal(await vsixHasNativeModule(vsixPath), true)
+	assert.equal(summarizeChecks(await auditVsixHealth(vsixPath)).ok, true)
 })

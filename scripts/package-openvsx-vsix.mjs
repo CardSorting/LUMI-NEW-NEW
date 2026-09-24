@@ -8,7 +8,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { assertNativeModuleArchitecture, assertVsixHasNativeModule, rebuildBetterSqlite3 } from "./vsix-native-deps.mjs"
+import { assertNativeModuleArchitecture, assertVsixHasNativeModule, createTargetVscodeIgnoreFile } from "./vsix-native-deps.mjs"
 import { runVsce } from "./vsix-package-utils.mjs"
 import { createWorkspaceLinkManager } from "./workspace-link.mjs"
 
@@ -31,7 +31,6 @@ function readPackageOptions() {
 		target,
 		preRelease: process.argv.includes("--pre-release"),
 		skipPrepublish: process.argv.includes("--skip-prepublish"),
-		skipNativeRebuild: process.argv.includes("--skip-native-rebuild"),
 	}
 }
 
@@ -40,8 +39,8 @@ function restorePackageJson(original) {
 	console.log("[openvsx] restored package.json")
 }
 
-function main() {
-	const { target, preRelease, skipPrepublish, skipNativeRebuild } = readPackageOptions()
+async function main() {
+	const { target, preRelease, skipPrepublish } = readPackageOptions()
 	const originalPackageJson = fs.readFileSync(packageJsonPath, "utf8")
 	const pkg = JSON.parse(originalPackageJson)
 	const version = pkg.version
@@ -49,13 +48,14 @@ function main() {
 	const outPath = path.join(repoRoot, "dist", `lumi-${version}${targetSuffix}.vsix`)
 	let didPatchName = false
 	let didReconcileWorkspaceLink = false
+	let ignoreFilePath
 
 	fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
 	try {
 		const nativeTarget = target ?? `${process.platform}-${process.arch}`
-		if (!skipNativeRebuild) rebuildBetterSqlite3(repoRoot, nativeTarget)
-		else assertNativeModuleArchitecture(repoRoot, nativeTarget)
+		assertNativeModuleArchitecture(repoRoot, nativeTarget)
+		ignoreFilePath = createTargetVscodeIgnoreFile(repoRoot, nativeTarget)
 
 		if (pkg.name !== OPENVSX_EXTENSION_NAME) {
 			pkg.name = OPENVSX_EXTENSION_NAME
@@ -75,10 +75,11 @@ function main() {
 		const args = ["package", "--allow-package-secrets", "sendgrid"]
 		if (target) args.push("--target", target)
 		if (preRelease) args.push("--pre-release")
+		args.push("--ignoreFile", ignoreFilePath)
 		args.push("--out", outPath)
 		runVsce({ repoRoot, args, skipPrepublish })
 
-		assertVsixHasNativeModule(outPath)
+		await assertVsixHasNativeModule(outPath)
 		console.log(`[openvsx] packaged ${outPath}`)
 	} catch (error) {
 		process.exitCode = 1
@@ -86,6 +87,7 @@ function main() {
 			console.error(`[openvsx] ${error.message}`)
 		}
 	} finally {
+		if (ignoreFilePath) fs.rmSync(path.dirname(ignoreFilePath), { recursive: true, force: true })
 		workspaceLinks.restore({
 			fromName: MARKETPLACE_EXTENSION_NAME,
 			toName: OPENVSX_EXTENSION_NAME,
@@ -100,4 +102,7 @@ function main() {
 	}
 }
 
-main()
+main().catch((error) => {
+	console.error(`[openvsx] ${error instanceof Error ? error.message : String(error)}`)
+	process.exitCode = 1
+})

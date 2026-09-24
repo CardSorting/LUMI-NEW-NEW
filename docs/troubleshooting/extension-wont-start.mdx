@@ -10,10 +10,21 @@ If LUMI cannot start, your editor may show an error like:
 
 - `Cannot find module 'better-sqlite3'`
 - `better_sqlite3.node ... incompatible architecture (have 'x86_64', need 'arm64')`
+- `was compiled against a different Node.js version using NODE_MODULE_VERSION 140 ... requires NODE_MODULE_VERSION 146`
 - `Activating extension 'CardSorting.lumi' failed`
 - A LUMI popup that says the database driver is missing or for the wrong processor architecture
 
 This points to the extension's bundled SQLite driver, not your project code or settings. The driver may be missing, incomplete, or built for a different processor than your editor.
+
+## If the error mentions `NODE_MODULE_VERSION`
+
+This is a runtime compatibility mismatch. An older LUMI release included a SQLite binary compiled for a particular Electron/Node ABI; an editor update can move to a newer ABI. Updating the extension installs an ABI-stable Node-API build.
+
+1. Update LUMI from the editor's **Extensions** view.
+2. If no update is offered, install the latest LUMI VSIX from [GitHub Releases](https://github.com/CardSorting/DietCodeMarie/releases), choosing the package for your editor's operating system and processor.
+3. Run **Developer: Reload Window**.
+
+Use the latest release built for your editor's operating system and processor. Your project files and LUMI data remain untouched.
 
 ---
 
@@ -55,6 +66,10 @@ npm run doctor:fix
 
 Then reload your editor window.
 
+The repair command checks the VSIX and the extracted native driver before it replaces the installed extension. If the replacement cannot be completed, it restores the previous folder.
+
+It only repairs a package with the same extension ID. If the report finds a legacy DietCode ID, install the current LUMI extension from **Extensions** or use its matching VSIX; the legacy folder is left untouched.
+
 ---
 
 ## If you installed from Open VSX
@@ -78,6 +93,8 @@ Some Open VSX clients may install a platform build that does not match the edito
 ---
 
 ## For maintainers
+
+The extension ships the reviewed `better-sqlite3` 13.x line, whose [Node-API prebuilds](https://github.com/WiseLibs/better-sqlite3/releases) are independent of Electron's Node module ABI while remaining specific to OS and CPU architecture. Keep the `engines.vscode` floor at 1.101 or newer; the [VS Code 1.101 release notes](https://code.visualstudio.com/updates/v1_101) document its Node 22.15 extension host. The [Node-API support table](https://nodejs.org/api/n-api.html) lists API 10 in Node 22.14+ and 23.6+. BroccoliDB and the separate eval runner declare ranges within those supported versions. Packaging checks validate all manifests and lockfiles, runtime floors, target prebuild contents and architectures, checksums, and the actual VSIX archive. Do not add an Electron-version-specific `electron-rebuild` step for this dependency.
 
 | Task | Command |
 |------|---------|

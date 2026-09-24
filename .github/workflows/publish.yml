@@ -156,7 +156,7 @@ jobs:
         run: |
           PRERELEASE_FLAG=""
           if [[ "${{ needs.resolve-release.outputs.pre-release }}" == "true" ]]; then PRERELEASE_FLAG="--pre-release"; fi
-          npm run package:vsix:openvsx -- --target "${{ matrix.target }}" --skip-prepublish --skip-native-rebuild $PRERELEASE_FLAG
+          npm run package:vsix:openvsx -- --target "${{ matrix.target }}" --skip-prepublish $PRERELEASE_FLAG
       - uses: actions/upload-artifact@v4
         with:
           name: marketplace-vsix-${{ matrix.target }}

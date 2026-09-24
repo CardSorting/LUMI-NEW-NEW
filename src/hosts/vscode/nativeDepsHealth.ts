@@ -3,7 +3,7 @@ import { createRequire } from "node:module"
 import path from "node:path"
 import * as vscode from "vscode"
 
-export const REQUIRED_PACKAGES = ["better-sqlite3", "bindings", "file-uri-to-path"] as const
+export const REQUIRED_PACKAGES = ["better-sqlite3"] as const
 
 export const TROUBLESHOOTING_URL = "https://docs.dietcode.io/troubleshooting/extension-wont-start"
 
@@ -22,8 +22,25 @@ export type InstallationHealthCheck = {
 export type AbiMismatch = {
 	compiledAbi: string
 	requiredAbi: string
-	compiledTarget?: string
-	requiredTarget?: string
+}
+
+export type PackageVersionMismatch = {
+	installedVersion: string
+	supportedMajor: number
+}
+
+export type NodeApiMismatch = {
+	addonApiVersion: string
+	runtimeApiVersion: string
+}
+
+export type NativeRuntimeInfo = {
+	platform: string
+	architecture: string
+	nodeVersion: string
+	electronVersion?: string
+	nodeModuleVersion?: string
+	nodeApiVersion?: string
 }
 
 export type NativeDepsHealthResult = {
@@ -32,9 +49,14 @@ export type NativeDepsHealthResult = {
 	loadError?: string
 	architectureMismatch?: { builtFor: string; required: string }
 	abiMismatch?: AbiMismatch
+	packageVersionMismatch?: PackageVersionMismatch
+	nodeApiMismatch?: NodeApiMismatch
+	runtime: NativeRuntimeInfo
 }
 
 const MIN_NATIVE_BINARY_BYTES = 100_000
+const SUPPORTED_BETTER_SQLITE3_MAJOR = 13
+const REQUIRED_NODE_API_VERSION = 10
 
 const STATUS_LABEL: Record<HealthStatus, string> = {
 	pass: "OK",
@@ -48,41 +70,62 @@ function architectureLabel(arch: string): string {
 	return arch
 }
 
-function abiToElectronVersion(abi: string): string | undefined {
-	const map: Record<string, string> = {
-		"115": "Node 20",
-		"127": "Node 22",
-		"130": "Electron 33",
-		"132": "Electron 34",
-		"133": "Electron 35",
-		"135": "Electron 36",
-		"136": "Electron 37",
-		"139": "Electron 38",
-		"140": "Electron 39",
-		"143": "Electron 40",
-		"145": "Electron 41",
-		"146": "Electron 42",
-		"147": "Node 26",
-		"148": "Electron 43",
-		"149": "Electron 44",
-		"150": "Electron 45/46",
+function getNativeRuntimeInfo(): NativeRuntimeInfo {
+	return {
+		platform: process.platform,
+		architecture: process.arch,
+		nodeVersion: process.versions.node,
+		electronVersion: process.versions.electron,
+		nodeModuleVersion: process.versions.modules,
+		nodeApiVersion: process.versions.napi,
 	}
-	return map[abi]
 }
 
 export function findAbiMismatch(message: string): AbiMismatch | undefined {
 	const match = message.match(
-		/compiled against a different Node\.js version using NODE_MODULE_VERSION (\d+)\. This version of Node\.js requires NODE_MODULE_VERSION (\d+)/i,
+		/compiled\s+against\s+a\s+different\s+Node\.js\s+version\s+using\s+NODE_MODULE_VERSION\s+(\d+)[\s\S]{0,240}?requires\s+NODE_MODULE_VERSION\s+(\d+)/i,
 	)
 	if (!match) return undefined
 	const compiledAbi = match[1]
 	const requiredAbi = match[2]
-	return {
-		compiledAbi,
-		requiredAbi,
-		compiledTarget: abiToElectronVersion(compiledAbi),
-		requiredTarget: abiToElectronVersion(requiredAbi),
+	return { compiledAbi, requiredAbi }
+}
+
+function findPackageManifest(entryPath: string, expectedName: string): { version?: string } | undefined {
+	let directory = path.dirname(entryPath)
+	for (let depth = 0; depth < 8; depth++) {
+		const manifestPath = path.join(directory, "package.json")
+		try {
+			const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { name?: string; version?: string }
+			if (manifest.name === expectedName) return manifest
+		} catch {
+			// Continue walking until the owning package manifest is found.
+		}
+		const parent = path.dirname(directory)
+		if (parent === directory) break
+		directory = parent
 	}
+	return undefined
+}
+
+function formatRuntime(runtime: NativeRuntimeInfo): string {
+	const editorRuntime = runtime.electronVersion ? `Electron ${runtime.electronVersion}, ` : ""
+	const napi = runtime.nodeApiVersion ? `, N-API ${runtime.nodeApiVersion}` : ""
+	return `${editorRuntime}Node.js ${runtime.nodeVersion} (${runtime.platform}-${runtime.architecture}, ABI ${runtime.nodeModuleVersion ?? "unknown"}${napi})`
+}
+
+function nativePrebuildPath(extensionPath: string): string {
+	let isMusl = false
+	if (process.platform === "linux") {
+		try {
+			const report = process.report?.getReport?.() as { header?: { glibcVersionRuntime?: string } } | undefined
+			isMusl = report?.header?.glibcVersionRuntime === undefined
+		} catch {
+			// Keep the glibc prebuild as the standard fallback when runtime metadata is unavailable.
+		}
+	}
+	const packagePlatform = isMusl ? "linuxmusl" : process.platform
+	return path.join(extensionPath, `node_modules/better-sqlite3/prebuilds/${packagePlatform}-${process.arch}.node`)
 }
 
 function findArchitectureMismatch(message: string): NativeDepsHealthResult["architectureMismatch"] {
@@ -117,22 +160,50 @@ export function registerHealthOutputChannel(context: vscode.ExtensionContext): v
 export function checkExtensionNativeDeps(extensionPath: string): NativeDepsHealthResult {
 	const extensionRequire = createRequire(path.join(extensionPath, "package.json"))
 	const missingPackages: string[] = []
+	const runtime = getNativeRuntimeInfo()
+	let betterSqliteEntry: string | undefined
 
 	for (const packageName of REQUIRED_PACKAGES) {
 		try {
-			extensionRequire.resolve(packageName, { paths: [extensionPath] })
+			const entry = extensionRequire.resolve(packageName, { paths: [extensionPath] })
+			if (packageName === "better-sqlite3") betterSqliteEntry = entry
 		} catch {
 			missingPackages.push(packageName)
 		}
 	}
 
 	if (missingPackages.length > 0) {
-		return { ok: false, missingPackages }
+		return { ok: false, missingPackages, runtime }
+	}
+	if (betterSqliteEntry) {
+		const packageManifest = findPackageManifest(betterSqliteEntry, "better-sqlite3")
+		const version = packageManifest?.version ?? "unknown"
+		const installedMajor = /^(\d+)\./.exec(version)?.[1]
+		if (Number(installedMajor) !== SUPPORTED_BETTER_SQLITE3_MAJOR) {
+			return {
+				ok: false,
+				missingPackages: [],
+				packageVersionMismatch: { installedVersion: version, supportedMajor: SUPPORTED_BETTER_SQLITE3_MAJOR },
+				runtime,
+			}
+		}
+		const runtimeApiVersion = Number(runtime.nodeApiVersion ?? 0)
+		if (runtimeApiVersion < REQUIRED_NODE_API_VERSION) {
+			return {
+				ok: false,
+				missingPackages: [],
+				nodeApiMismatch: {
+					addonApiVersion: String(REQUIRED_NODE_API_VERSION),
+					runtimeApiVersion: runtime.nodeApiVersion ?? "unavailable",
+				},
+				runtime,
+			}
+		}
 	}
 
 	try {
-		extensionRequire(extensionRequire.resolve("better-sqlite3", { paths: [extensionPath] }))
-		return { ok: true, missingPackages: [] }
+		extensionRequire(betterSqliteEntry ?? extensionRequire.resolve("better-sqlite3", { paths: [extensionPath] }))
+		return { ok: true, missingPackages: [], runtime }
 	} catch (error) {
 		const loadError = error instanceof Error ? error.message : String(error)
 		return {
@@ -141,8 +212,18 @@ export function checkExtensionNativeDeps(extensionPath: string): NativeDepsHealt
 			loadError,
 			architectureMismatch: findArchitectureMismatch(loadError),
 			abiMismatch: findAbiMismatch(loadError),
+			nodeApiMismatch: findNodeApiMismatch(loadError),
+			runtime,
 		}
 	}
+}
+
+function findNodeApiMismatch(message: string): NodeApiMismatch | undefined {
+	const match = message.match(
+		/compiled\s+against\s+a\s+different\s+Node\.js\s+version\s+using\s+N-API\s+version\s+(\d+)[\s\S]{0,240}?(?:requires|supports)\s+N-API\s+version\s+(\d+)/i,
+	)
+	if (!match) return undefined
+	return { addonApiVersion: match[1], runtimeApiVersion: match[2] }
 }
 
 export function auditCurrentInstallation(extensionPath: string): InstallationHealthCheck[] {
@@ -171,8 +252,7 @@ export function auditCurrentInstallation(extensionPath: string): InstallationHea
 		})
 	}
 
-	const hostArch = `${process.platform}-${process.arch}`
-	const prebuildPath = path.join(extensionPath, `node_modules/better-sqlite3/prebuilds/${hostArch}.node`)
+	const prebuildPath = nativePrebuildPath(extensionPath)
 	const releaseBinaryPath = path.join(extensionPath, "node_modules/better-sqlite3/build/Release/better_sqlite3.node")
 	const binaryPath = fs.existsSync(prebuildPath) ? prebuildPath : releaseBinaryPath
 
@@ -194,13 +274,13 @@ export function auditCurrentInstallation(extensionPath: string): InstallationHea
 		binaryDetail = `Built for ${architectureLabel(loadResult.architectureMismatch.builtFor)}; this editor requires ${architectureLabel(loadResult.architectureMismatch.required)}`
 	} else if (loadResult.abiMismatch) {
 		binaryStatus = "fail"
-		const compiled = loadResult.abiMismatch.compiledTarget
-			? `${loadResult.abiMismatch.compiledTarget} (ABI ${loadResult.abiMismatch.compiledAbi})`
-			: `ABI ${loadResult.abiMismatch.compiledAbi}`
-		const required = loadResult.abiMismatch.requiredTarget
-			? `${loadResult.abiMismatch.requiredTarget} (ABI ${loadResult.abiMismatch.requiredAbi})`
-			: `ABI ${loadResult.abiMismatch.requiredAbi}`
-		binaryDetail = `Compiled for ${compiled}, but this editor requires ${required}`
+		binaryDetail = `Compiled for Node ABI ${loadResult.abiMismatch.compiledAbi}; this editor requires ABI ${loadResult.abiMismatch.requiredAbi} (${formatRuntime(loadResult.runtime)})`
+	} else if (loadResult.packageVersionMismatch) {
+		binaryStatus = "fail"
+		binaryDetail = `better-sqlite3 ${loadResult.packageVersionMismatch.installedVersion} is outside the supported major ${loadResult.packageVersionMismatch.supportedMajor}`
+	} else if (loadResult.nodeApiMismatch) {
+		binaryStatus = "fail"
+		binaryDetail = `SQLite requires Node-API ${loadResult.nodeApiMismatch.addonApiVersion}; this editor provides ${loadResult.nodeApiMismatch.runtimeApiVersion} (${formatRuntime(loadResult.runtime)})`
 	}
 
 	checks.push({
@@ -221,7 +301,7 @@ export function auditCurrentInstallation(extensionPath: string): InstallationHea
 		id: "load",
 		status: loadResult.ok ? "pass" : "fail",
 		title: "Database driver loads successfully",
-		detail: loadResult.ok ? undefined : (loadResult.loadError ?? "Module could not be loaded"),
+		detail: loadResult.ok ? undefined : (loadResult.loadError ?? nativeDepsFailureMessage(loadResult)),
 		fix: loadResult.ok ? undefined : ["Reinstall LUMI using Install from VSIX…", `Guide: ${TROUBLESHOOTING_URL}`],
 	})
 
@@ -264,6 +344,7 @@ export function formatInstallationHealthReport({
 		"",
 		`Editor:     ${hostName} ${hostVersion}`,
 		`Extension:  ${extensionVersion}`,
+		`Runtime:    ${formatRuntime(getNativeRuntimeInfo())}`,
 		`Location:   ${extensionPath}`,
 		"",
 		"Checks",
@@ -337,9 +418,14 @@ export async function runInstallationHealthCheck(context: vscode.ExtensionContex
 		summary.fail > 0
 			? "LUMI found problems with this installation. See the LUMI Health panel for step-by-step fixes."
 			: "LUMI found minor installation warnings. See the LUMI Health panel for details.",
+		"Open Extensions",
 		"How to fix",
 		"Copy report",
 	)
+
+	if (choice === "Open Extensions") {
+		await vscode.commands.executeCommand("workbench.extensions.search", "LUMI")
+	}
 
 	if (choice === "How to fix") {
 		await vscode.env.openExternal(vscode.Uri.parse(TROUBLESHOOTING_URL))
@@ -360,21 +446,35 @@ export async function showNativeDepsFailure(result: NativeDepsHealthResult): Pro
 	const explanation = result.architectureMismatch
 		? `The installed database driver is built for ${architectureLabel(result.architectureMismatch.builtFor)}, but this editor needs ${architectureLabel(result.architectureMismatch.required)}.`
 		: result.abiMismatch
-			? `The installed database driver is compiled for ${result.abiMismatch.compiledTarget || `ABI ${result.abiMismatch.compiledAbi}`}, but this editor requires ${result.abiMismatch.requiredTarget || `ABI ${result.abiMismatch.requiredAbi}`}.`
-			: "The extension may be incomplete or its database driver may not match this editor."
+			? `The installed database driver uses Node ABI ${result.abiMismatch.compiledAbi}; this editor requires ABI ${result.abiMismatch.requiredAbi} (${formatRuntime(result.runtime)}).`
+			: result.packageVersionMismatch
+				? `The installed database driver is version ${result.packageVersionMismatch.installedVersion}; LUMI requires better-sqlite3 major ${result.packageVersionMismatch.supportedMajor}.`
+				: result.nodeApiMismatch
+					? `LUMI requires Node-API ${result.nodeApiMismatch.addonApiVersion}; this editor provides ${result.nodeApiMismatch.runtimeApiVersion} (${formatRuntime(result.runtime)}).`
+					: "The extension may be incomplete or its database driver may not match this editor."
 	const detail = result.loadError ? "\n\nChoose Copy details to include the technical diagnostic." : ""
 
 	const prefix = result.architectureMismatch
 		? "LUMI’s database driver is for the wrong processor architecture."
 		: result.abiMismatch
-			? "LUMI’s database driver was compiled for a different editor/Electron runtime."
-			: `LUMI could not load its database driver (${missingSummary}).`
+			? "LUMI’s database driver was compiled for a different Node.js runtime."
+			: result.packageVersionMismatch
+				? "LUMI’s database driver is from an unsupported release."
+				: result.nodeApiMismatch
+					? "This editor’s runtime is too old for LUMI’s database driver."
+					: `LUMI could not load its database driver (${missingSummary}).`
+	const recovery = result.nodeApiMismatch
+		? "Update this editor to VS Code 1.101 or newer, then choose Developer: Reload Window."
+		: result.abiMismatch || result.packageVersionMismatch
+			? "Update LUMI from Extensions, then choose Developer: Reload Window."
+			: "Reinstall LUMI or install the matching platform VSIX, then reload the editor."
+	const actions = result.nodeApiMismatch ? ["How to fix", "Copy details"] : ["Open Extensions", "How to fix", "Copy details"]
 
-	const choice = await vscode.window.showErrorMessage(
-		`${prefix} ${explanation} Reinstall LUMI or install matching VSIX, then reload the editor.${detail}`,
-		"How to fix",
-		"Copy details",
-	)
+	const choice = await vscode.window.showErrorMessage(`${prefix} ${explanation} ${recovery}${detail}`, ...actions)
+
+	if (choice === "Open Extensions") {
+		await vscode.commands.executeCommand("workbench.extensions.search", "LUMI")
+	}
 
 	if (choice === "How to fix") {
 		await vscode.env.openExternal(vscode.Uri.parse(TROUBLESHOOTING_URL))
@@ -388,8 +488,15 @@ export async function showNativeDepsFailure(result: NativeDepsHealthResult): Pro
 				? `Architecture: built for ${architectureLabel(result.architectureMismatch.builtFor)}, editor requires ${architectureLabel(result.architectureMismatch.required)}`
 				: "",
 			result.abiMismatch
-				? `ABI Mismatch: built for ${result.abiMismatch.compiledTarget || `ABI ${result.abiMismatch.compiledAbi}`}, editor requires ${result.abiMismatch.requiredTarget || `ABI ${result.abiMismatch.requiredAbi}`}`
+				? `ABI Mismatch: compiled for Node ABI ${result.abiMismatch.compiledAbi}, editor requires ABI ${result.abiMismatch.requiredAbi}`
 				: "",
+			result.packageVersionMismatch
+				? `Package Version: installed ${result.packageVersionMismatch.installedVersion}, supported major ${result.packageVersionMismatch.supportedMajor}`
+				: "",
+			result.nodeApiMismatch
+				? `Node-API Mismatch: addon requires ${result.nodeApiMismatch.addonApiVersion}, editor provides ${result.nodeApiMismatch.runtimeApiVersion}`
+				: "",
+			`Runtime: ${formatRuntime(result.runtime)}`,
 			result.loadError ? `Error: ${result.loadError}` : "",
 			`Help: ${TROUBLESHOOTING_URL}`,
 			"Repair a local source checkout: npm run doctor:fix",
@@ -406,9 +513,13 @@ export function nativeDepsFailureMessage(result: NativeDepsHealthResult): string
 		return `LUMI native dependency architecture mismatch (built for ${result.architectureMismatch.builtFor}, editor requires ${result.architectureMismatch.required})`
 	}
 	if (result.abiMismatch) {
-		const compiled = result.abiMismatch.compiledTarget || `ABI ${result.abiMismatch.compiledAbi}`
-		const required = result.abiMismatch.requiredTarget || `ABI ${result.abiMismatch.requiredAbi}`
-		return `LUMI native dependency runtime mismatch (compiled for ${compiled}, editor requires ${required})`
+		return `LUMI native dependency runtime mismatch (compiled for Node ABI ${result.abiMismatch.compiledAbi}, editor requires ABI ${result.abiMismatch.requiredAbi}; ${formatRuntime(result.runtime)})`
+	}
+	if (result.packageVersionMismatch) {
+		return `LUMI native dependency version mismatch (installed better-sqlite3 ${result.packageVersionMismatch.installedVersion}, supported major ${result.packageVersionMismatch.supportedMajor})`
+	}
+	if (result.nodeApiMismatch) {
+		return `LUMI native dependency requires Node-API ${result.nodeApiMismatch.addonApiVersion}, editor provides ${result.nodeApiMismatch.runtimeApiVersion} (${formatRuntime(result.runtime)})`
 	}
 	const missing = result.missingPackages.length > 0 ? result.missingPackages.join(", ") : "better-sqlite3"
 	return `LUMI native dependency check failed (missing: ${missing})`

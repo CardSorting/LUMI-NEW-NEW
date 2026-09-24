@@ -20,6 +20,7 @@ import {
 	auditVsixFiles,
 	buildDoctorReport,
 	DEFAULT_EXTENSION_ROOTS,
+	expectedExtensionIdForFolderName,
 	formatGithubActionsAnnotations,
 	pickRepairVsix,
 	printDoctorSection,
@@ -118,8 +119,8 @@ function printHumanReport(report) {
 	}
 }
 
-function runDoctor() {
-	const report = buildDoctorReport({
+async function runDoctor() {
+	const report = await buildDoctorReport({
 		repoRoot,
 		distDir,
 		extensionRoots: DEFAULT_EXTENSION_ROOTS,
@@ -135,7 +136,7 @@ function runDoctor() {
 	return report
 }
 
-function applyFixes(report) {
+async function applyFixes(report) {
 	const brokenExtensions = report.extensions.filter((ext) => ext.checks.some((check) => check.status === "fail"))
 
 	if (brokenExtensions.length === 0) {
@@ -144,22 +145,37 @@ function applyFixes(report) {
 	}
 
 	for (const ext of brokenExtensions) {
+		const expectedIdentity = expectedExtensionIdForFolderName(ext.name)
+		if (!expectedIdentity) {
+			console.error(
+				`[doctor] skipped ${ext.name}: this is a legacy or unrecognized extension ID. Install current LUMI from Extensions or use a matching VSIX; the folder was not changed.`,
+			)
+			process.exitCode = 1
+			continue
+		}
 		const vsixPath = pickRepairVsix(distDir, ext.name)
 		if (!vsixPath) {
-			console.error(`[doctor] cannot repair ${ext.name}: build a VSIX first (npm run package:vsix:all)`)
+			console.error(
+				`[doctor] cannot safely repair ${ext.name}: no ${expectedIdentity} VSIX matches this platform. Build a platform package with npm run package:vsix:all; the installed folder was not changed.`,
+			)
 			process.exitCode = 1
 			continue
 		}
 
-		repairExtensionFromVsix({ extensionDir: ext.path, vsixPath })
-		console.log(`[doctor] repaired ${ext.ideLabel} → ${ext.name}`)
-		console.log(`           using ${path.basename(vsixPath)}`)
-		console.log("           Reload your editor (Developer: Reload Window).")
+		try {
+			await repairExtensionFromVsix({ extensionDir: ext.path, vsixPath })
+			console.log(`[doctor] repaired ${ext.ideLabel} → ${ext.name}`)
+			console.log(`           using ${path.basename(vsixPath)}`)
+			console.log("           Reload your editor (Developer: Reload Window).")
+		} catch (error) {
+			console.error(`[doctor] could not repair ${ext.name}: ${error instanceof Error ? error.message : String(error)}`)
+			process.exitCode = 1
+		}
 	}
 }
 
-function applyDeletes() {
-	const vsixResults = auditVsixFiles(distDir)
+async function applyDeletes() {
+	const vsixResults = await auditVsixFiles(distDir)
 	const extensionResults = auditInstalledExtensions(DEFAULT_EXTENSION_ROOTS)
 
 	for (const result of vsixResults.filter((r) => !r.ok)) {
@@ -173,8 +189,8 @@ function applyDeletes() {
 	}
 }
 
-function main() {
-	const report = runDoctor()
+async function main() {
+	const report = await runDoctor()
 
 	if (ciMode && !report.ok) {
 		const annotations = formatGithubActionsAnnotations(report.checks)
@@ -187,9 +203,9 @@ function main() {
 	if (fixMode && !jsonMode) {
 		console.log("Repair")
 		console.log("──────")
-		applyFixes(report)
+		await applyFixes(report)
 		if (!ciMode) {
-			const after = runDoctor()
+			const after = await runDoctor()
 			if (!after.ok) {
 				process.exitCode = 1
 			}
@@ -197,8 +213,11 @@ function main() {
 	}
 
 	if (deleteBroken) {
-		applyDeletes()
+		await applyDeletes()
 	}
 }
 
-main()
+main().catch((error) => {
+	console.error(`[doctor] ${error instanceof Error ? error.message : String(error)}`)
+	process.exitCode = 1
+})
