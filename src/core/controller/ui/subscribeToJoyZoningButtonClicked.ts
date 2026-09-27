@@ -22,11 +22,9 @@ export async function subscribeToJoyZoningButtonClicked(
 		const registry = getRequestRegistry()
 		const info = registry.getRequestInfo(requestId)
 		if (info) {
-			const originalCleanup = info.cleanup
 			registry.registerRequest(
 				requestId,
 				() => {
-					originalCleanup()
 					joyZoningButtonClickedCallback = null
 				},
 				info.metadata,

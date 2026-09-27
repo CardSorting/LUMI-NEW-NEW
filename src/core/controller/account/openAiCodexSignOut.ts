@@ -11,9 +11,6 @@ export async function openAiCodexSignOut(controller: Controller, _: EmptyRequest
 		// Clear stored credentials
 		await openAiCodexOAuthManager.clearCredentials()
 
-		// Cancel any pending authorization flow
-		openAiCodexOAuthManager.cancelAuthorizationFlow()
-
 		// Update the state to reflect sign out
 		await controller.postStateToWebview()
 	} catch (error) {

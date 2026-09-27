@@ -20,6 +20,9 @@ export interface RequestInfo {
 	 */
 	timestamp: Date
 
+	/** Event subscriptions live until cancellation or disposal, regardless of age. */
+	persistent: boolean
+
 	/**
 	 * The streaming response handler for this request
 	 */
@@ -48,6 +51,7 @@ export class GrpcRequestRegistry {
 	 * @param cleanup Function to clean up resources when the request is cancelled
 	 * @param metadata Optional metadata about the request
 	 * @param responseStream Optional streaming response handler
+	 * @param options Persistent subscriptions are exempt from age-based purging
 	 */
 	public registerRequest(
 		requestId: string,
@@ -55,12 +59,25 @@ export class GrpcRequestRegistry {
 		metadata?: unknown,
 		// biome-ignore lint/suspicious/noExplicitAny: The registry stores streams of arbitrary type, so any is required.
 		responseStream?: StreamingResponseHandler<any>,
+		options: { persistent?: boolean } = {},
 	): void {
+		const existing = this.activeRequests.get(requestId)
 		this.activeRequests.set(requestId, {
-			cleanup,
-			metadata,
-			timestamp: new Date(),
-			responseStream,
+			// Handlers add their own cleanup after the transport registers a stream.
+			// Retain both so cancellation also closes the transport's response guard.
+			cleanup: existing
+				? () => {
+						try {
+							existing.cleanup()
+						} finally {
+							cleanup()
+						}
+					}
+				: cleanup,
+			metadata: metadata ?? existing?.metadata,
+			timestamp: existing?.timestamp ?? new Date(),
+			persistent: existing?.persistent || options.persistent === true,
+			responseStream: responseStream ?? existing?.responseStream,
 		})
 	}
 
@@ -74,12 +91,12 @@ export class GrpcRequestRegistry {
 		if (!requestInfo) {
 			return false
 		}
+		this.activeRequests.delete(requestId)
 		try {
 			requestInfo.cleanup()
 		} catch (error) {
 			Logger.error(`Error cleaning up request ${requestId}:`, error)
 		}
-		this.activeRequests.delete(requestId)
 		return true
 	}
 
@@ -126,7 +143,7 @@ export class GrpcRequestRegistry {
 		let cleanedCount = 0
 
 		for (const [requestId, info] of this.activeRequests.entries()) {
-			if (now.getTime() - info.timestamp.getTime() > maxAgeMs) {
+			if (!info.persistent && now.getTime() - info.timestamp.getTime() > maxAgeMs) {
 				this.cancelRequest(requestId)
 				cleanedCount++
 			}

@@ -179,7 +179,7 @@ class OpenAiCodexOAuthTokenError extends Error {
 	}
 
 	public isLikelyInvalidGrant(): boolean {
-		if (this.errorCode && /invalid_grant/i.test(this.errorCode)) {
+		if (this.errorCode && /^(invalid_grant|refresh_token_(expired|reused|invalidated))$/i.test(this.errorCode)) {
 			return true
 		}
 		if (this.status === 400 || this.status === 401 || this.status === 403) {
@@ -202,9 +202,13 @@ function parseOAuthErrorDetails(errorText: string): { errorCode?: string } {
 		const errorCode: string | undefined =
 			typeof errorField === "string"
 				? errorField
-				: errorField && typeof errorField === "object" && typeof (errorField as Record<string, unknown>).type === "string"
-					? ((errorField as Record<string, unknown>).type as string)
-					: undefined
+				: errorField && typeof errorField === "object" && typeof (errorField as Record<string, unknown>).code === "string"
+					? ((errorField as Record<string, unknown>).code as string)
+					: errorField &&
+							typeof errorField === "object" &&
+							typeof (errorField as Record<string, unknown>).type === "string"
+						? ((errorField as Record<string, unknown>).type as string)
+						: undefined
 
 		return { errorCode }
 	} catch {
@@ -437,12 +441,27 @@ export function isTokenExpired(credentials: OpenAiCodexCredentials): boolean {
 export class OpenAiCodexOAuthManager {
 	private cachedModels: Record<string, ModelInfo> = {}
 	private cachedModelsAt = 0
+	private modelsPromise: Promise<Record<string, ModelInfo>> | null = null
 	private credentials: OpenAiCodexCredentials | null = null
 	private refreshPromise: Promise<OpenAiCodexCredentials> | null = null
 	private credentialGeneration = 0
 	private authorizationGeneration = 0
 	private credentialWriteQueue: Promise<void> = Promise.resolve()
 	private pendingAuth: PendingCodexAuthorization | null = null
+
+	private invalidateModelCatalog(): void {
+		this.cachedModels = {}
+		this.cachedModelsAt = 0
+		this.modelsPromise = null
+	}
+
+	private async waitForCredentialWrites(): Promise<void> {
+		let pendingWrite: Promise<void>
+		do {
+			pendingWrite = this.credentialWriteQueue
+			await pendingWrite
+		} while (pendingWrite !== this.credentialWriteQueue)
+	}
 
 	private async serializeCredentialWrite<T>(operation: () => Promise<T>): Promise<T> {
 		const previous = this.credentialWriteQueue
@@ -473,6 +492,9 @@ export class OpenAiCodexOAuthManager {
 	}
 
 	private async refreshCredentials(force: boolean): Promise<OpenAiCodexCredentials | null> {
+		// A replacement account must finish saving before any request selects its
+		// credentials, including when the previous account is still in memory.
+		await this.waitForCredentialWrites()
 		if (!this.credentials) await this.loadCredentials()
 		if (!this.credentials) return null
 		if (!force && !isTokenExpired(this.credentials)) return this.credentials
@@ -510,12 +532,16 @@ export class OpenAiCodexOAuthManager {
 	 * Load credentials from storage via StateManager.
 	 */
 	async loadCredentials(): Promise<OpenAiCodexCredentials | null> {
+		// A sign-out clears memory before its queued storage write. Never reload
+		// that old secret while a save/delete (including rollback) is pending.
+		await this.waitForCredentialWrites()
 		const generation = this.credentialGeneration
 		try {
 			const stateManager = StateManager.get()
 			const credentialsJson = stateManager.getSecretKey(OPENAI_CODEX_CREDENTIALS_KEY)
 
 			if (!credentialsJson) {
+				this.credentials = null
 				return null
 			}
 
@@ -524,6 +550,7 @@ export class OpenAiCodexOAuthManager {
 			if (generation === this.credentialGeneration) this.credentials = credentials
 			return this.credentials
 		} catch (error) {
+			if (generation === this.credentialGeneration) this.credentials = null
 			Logger.error("[openai-codex-oauth] Failed to load stored credentials:", error)
 			return null
 		}
@@ -533,8 +560,13 @@ export class OpenAiCodexOAuthManager {
 	 * Save credentials to storage via StateManager
 	 */
 	async saveCredentials(credentials: OpenAiCodexCredentials, expectedGeneration?: number): Promise<void> {
+		const generation = expectedGeneration ?? ++this.credentialGeneration
+		if (expectedGeneration === undefined) {
+			this.refreshPromise = null
+			this.invalidateModelCatalog()
+		}
 		await this.serializeCredentialWrite(async () => {
-			if (expectedGeneration !== undefined && expectedGeneration !== this.credentialGeneration) {
+			if (generation !== this.credentialGeneration) {
 				throw new Error("OpenAI Codex authentication changed before credentials could be saved")
 			}
 			const stateManager = StateManager.get()
@@ -549,7 +581,7 @@ export class OpenAiCodexOAuthManager {
 					.catch((restoreError) => Logger.error("[openai-codex-oauth] Failed to restore credentials:", restoreError))
 				throw error
 			}
-			if (expectedGeneration !== undefined && expectedGeneration !== this.credentialGeneration) {
+			if (generation !== this.credentialGeneration) {
 				stateManager.setSecret(OPENAI_CODEX_CREDENTIALS_KEY, previous)
 				await stateManager
 					.flushPendingState()
@@ -566,11 +598,11 @@ export class OpenAiCodexOAuthManager {
 	 * Clear credentials from storage
 	 */
 	async clearCredentials(): Promise<void> {
+		this.cancelAuthorizationFlow()
 		this.credentialGeneration += 1
 		this.refreshPromise = null
 		this.credentials = null
-		this.cachedModels = {}
-		this.cachedModelsAt = 0
+		this.invalidateModelCatalog()
 		await this.serializeCredentialWrite(async () => {
 			const stateManager = StateManager.get()
 			const previous = stateManager.getSecretKey(OPENAI_CODEX_CREDENTIALS_KEY)
@@ -642,6 +674,7 @@ export class OpenAiCodexOAuthManager {
 	 * create a burst of identical catalog requests.
 	 */
 	async listModels(forceRefresh = false): Promise<Record<string, ModelInfo>> {
+		if (this.modelsPromise) return this.modelsPromise
 		if (
 			!forceRefresh &&
 			this.cachedModelsAt > Date.now() - CODEX_MODELS_CACHE_MS &&
@@ -649,24 +682,52 @@ export class OpenAiCodexOAuthManager {
 		) {
 			return { ...this.cachedModels }
 		}
-		const requestCatalog = async (token: string): Promise<Response> => {
+		const request = this.fetchModels(this.credentialGeneration)
+		this.modelsPromise = request
+		try {
+			return await request
+		} finally {
+			if (this.modelsPromise === request) this.modelsPromise = null
+		}
+	}
+
+	private async fetchModels(generation: number): Promise<Record<string, ModelInfo>> {
+		const assertCurrentAccount = () => {
+			if (generation !== this.credentialGeneration) {
+				throw new Error("OpenAI Codex sign-in changed while loading models. Refresh the account model list again.")
+			}
+		}
+		const requestCatalog = async (
+			credentials: OpenAiCodexCredentials,
+		): Promise<{ status: number; models?: Record<string, ModelInfo> }> => {
 			const controller = new AbortController()
 			const timer = setTimeout(() => controller.abort(), 8_000)
 			try {
-				const accountId = await this.getAccountId()
-				return await fetch(
+				assertCurrentAccount()
+				const response = await fetch(
 					`${CODEX_MODELS_ENDPOINT}?client_version=${encodeURIComponent(ExtensionRegistryInfo.version)}`,
 					{
 						headers: {
 							Accept: "application/json",
-							Authorization: `Bearer ${token}`,
+							Authorization: `Bearer ${credentials.access_token}`,
 							originator: "dietcode",
 							"User-Agent": `dietcode/${ExtensionRegistryInfo.version}`,
-							...(accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+							...(credentials.accountId ? { "ChatGPT-Account-Id": credentials.accountId } : {}),
 						},
 						signal: controller.signal,
 					},
 				)
+				if (!response.ok) {
+					await response.body?.cancel().catch(() => undefined)
+					return { status: response.status }
+				}
+				let payload: unknown
+				try {
+					payload = await response.json()
+				} catch {
+					throw new Error("OpenAI Codex returned an invalid model catalog")
+				}
+				return { status: response.status, models: normalizeOpenAiCodexModels(payload) }
 			} catch (error) {
 				if (controller.signal.aborted) throw new Error("OpenAI Codex model catalog request timed out after 8 seconds")
 				throw error
@@ -675,26 +736,24 @@ export class OpenAiCodexOAuthManager {
 			}
 		}
 
-		let token = await this.getAccessToken()
-		if (!token) throw new Error("Not signed in to OpenAI Codex. Sign in from provider settings and try again.")
-		let response = await requestCatalog(token)
+		// Keep transient refresh failures distinct from missing/revoked credentials.
+		// getAccessToken() intentionally returns null on both for inference callers.
+		let credentials = await this.refreshCredentials(false)
+		assertCurrentAccount()
+		if (!credentials) throw new Error("Not signed in to OpenAI Codex. Sign in from provider settings and try again.")
+		let response = await requestCatalog(credentials)
+		assertCurrentAccount()
 		if (response.status === 401) {
-			await response.body?.cancel().catch(() => undefined)
-			token = (await this.forceRefreshAccessToken()) ?? ""
-			if (!token) throw new Error("OpenAI Codex rejected the session. Sign out, then sign in again.")
-			response = await requestCatalog(token)
+			credentials = await this.refreshCredentials(true)
+			assertCurrentAccount()
+			if (!credentials) throw new Error("OpenAI Codex rejected the session. Sign out, then sign in again.")
+			response = await requestCatalog(credentials)
+			assertCurrentAccount()
 		}
-		if (!response.ok) {
-			await response.body?.cancel().catch(() => undefined)
+		if (!response.models) {
 			throw new Error(`OpenAI Codex model catalog request failed (HTTP ${response.status})`)
 		}
-		let payload: unknown
-		try {
-			payload = await response.json()
-		} catch {
-			throw new Error("OpenAI Codex returned an invalid model catalog")
-		}
-		const models = normalizeOpenAiCodexModels(payload)
+		const models = response.models
 		if (Object.keys(models).length === 0) throw new Error("OpenAI Codex returned no usable models for this account")
 		this.cachedModels = models
 		this.cachedModelsAt = Date.now()
@@ -705,6 +764,8 @@ export class OpenAiCodexOAuthManager {
 	async startAuthorizationFlow(): Promise<string> {
 		this.cancelAuthorizationFlow()
 		this.credentialGeneration += 1
+		this.refreshPromise = null
+		this.invalidateModelCatalog()
 		const codeVerifier = generateCodeVerifier()
 		const codeChallenge = generateCodeChallenge(codeVerifier)
 		const generation = ++this.authorizationGeneration
@@ -872,6 +933,7 @@ export class OpenAiCodexOAuthManager {
 			}
 			this.credentialGeneration += 1
 			this.refreshPromise = null
+			this.invalidateModelCatalog()
 			await this.saveCredentials(credentials, this.credentialGeneration)
 			writeCallbackPage(response, "success")
 			this.finishAuthorization(pending, undefined, credentials)
@@ -910,7 +972,8 @@ export class OpenAiCodexOAuthManager {
 	}
 
 	/** Cancel any pending authorization flow. */
-	cancelAuthorizationFlow(): void {
+	cancelAuthorizationFlow(expectedCallback?: Promise<OpenAiCodexCredentials>): void {
+		if (expectedCallback && this.pendingAuth?.callback !== expectedCallback) return
 		this.authorizationGeneration += 1
 		if (this.pendingAuth) {
 			this.credentialGeneration += 1

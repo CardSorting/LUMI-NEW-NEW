@@ -3,6 +3,7 @@ import { serviceHandlers } from "@generated/hosts/vscode/protobus-services"
 import { GrpcRecorderBuilder } from "@/core/controller/grpc-recorder/grpc-recorder.builder"
 import { GrpcRequestRegistry } from "@/core/controller/grpc-request-registry"
 import { ExtensionMessage } from "@/shared/ExtensionMessage"
+import { isSubscriptionMethod } from "@/shared/protobus"
 import { Logger } from "@/shared/services/Logger"
 import { GrpcCancel, GrpcRequest } from "@/shared/WebviewMessage"
 import type { PostMessageToWebview, StreamingResponseHandler } from "./grpc-handler-types"
@@ -152,6 +153,7 @@ async function handleStreamingRequest(
 			},
 			{ service: request.service, method: request.method },
 			responseStream,
+			{ persistent: isSubscriptionMethod(request.method) },
 		)
 
 		// Get the service handler from the config
@@ -161,7 +163,7 @@ async function handleStreamingRequest(
 		await handler(controller, request.message, responseStream, request.request_id)
 		// clean up finite streams. Subscription streams intentionally remain registered
 		// until the webview sends an explicit cancellation request.
-		if (!completedWithTerminalResponse && !isPersistentStreamingRequest(request)) {
+		if (!completedWithTerminalResponse && !isSubscriptionMethod(request.method)) {
 			isTerminated = true
 			requestRegistry.cancelRequest(request.request_id)
 		}
@@ -218,11 +220,6 @@ const requestRegistry = new GrpcRequestRegistry()
 export function getRequestRegistry(): GrpcRequestRegistry {
 	requestRegistry.startStalePurge(60000)
 	return requestRegistry
-}
-
-function isPersistentStreamingRequest(request: GrpcRequest): boolean {
-	const method = request.method.toLowerCase()
-	return method.startsWith("subscribe") || method.includes("subscription")
 }
 
 export function disposeRequestRegistry(): void {
