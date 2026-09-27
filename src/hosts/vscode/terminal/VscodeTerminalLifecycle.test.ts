@@ -3,7 +3,10 @@ import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, it } from "mocha"
 import sinon from "sinon"
 import * as vscode from "vscode"
-import type { TerminalInfo } from "@/integrations/terminal/types"
+import { CommandExecutor } from "@/integrations/terminal/CommandExecutor"
+import { CommandRuntimeRegistry } from "@/integrations/terminal/CommandRuntime"
+import type { CommandExecutorCallbacks, TerminalInfo } from "@/integrations/terminal/types"
+import { ManagedTerminal } from "./ManagedTerminal"
 import { VscodeTerminalManager } from "./VscodeTerminalManager"
 import { VscodeTerminalProcess } from "./VscodeTerminalProcess"
 import { TerminalRegistry } from "./VscodeTerminalRegistry"
@@ -72,6 +75,56 @@ describe("VS Code command lifecycle", () => {
 		assert.equal(lines.at(-1), "output")
 		assert.equal(completed, true)
 	})
+	it("captures a host completion emitted synchronously inside executeCommand", async () => {
+		const target = terminal(
+			(async function* () {
+				yield "done\n"
+			})(),
+			false,
+		)
+		const execution = {
+			read: async function* () {
+				yield "done\n"
+			},
+		}
+		;(target.shellIntegration!.executeCommand as sinon.SinonStub).callsFake(() => {
+			hostEvents.emit("end", { terminal: target, execution, exitCode: 4 })
+			return execution
+		})
+		const process = manager().runCommand({ id: 1, terminal: target } as unknown as TerminalInfo, "test")
+		await process
+		assert.equal(process.getCompletionDetails!().exitCode, 4)
+	})
+	it("accepts late exit-code confirmation after an unknown host event", async () => {
+		const clock = sinon.useFakeTimers()
+		const target = terminal(
+			(async function* () {
+				yield "output\n"
+			})(),
+			false,
+		)
+		const info = { id: 1, terminal: target, busy: false } as unknown as TerminalInfo
+		const process = manager().runCommand(info, "test")
+		await clock.tickAsync(0)
+		const execution = (target.shellIntegration!.executeCommand as sinon.SinonStub).firstCall.returnValue
+		hostEvents.emit("end", { terminal: target, execution })
+		await process
+		assert.equal(info.busy, true)
+		hostEvents.emit("end", { terminal: target, execution, exitCode: 0 })
+		await clock.tickAsync(1000)
+		assert.equal(info.busy, false)
+		assert.equal(process.getCompletionDetails!().exitCode, 0)
+	})
+	it("does not dispatch unobservable commands without a configured fallback", async () => {
+		const target = terminal()
+		const process = new VscodeTerminalProcess(target)
+		const error = sinon.spy()
+		process.on("error", error)
+		await process.run(target, "must-not-run")
+		sinon.assert.calledOnce(error)
+		sinon.assert.notCalled(target.sendText)
+		assert.match(error.firstCall.args[0].message, /did not start/)
+	})
 	it("keeps observation snapshots independent of streamed and environment output cursors", async () => {
 		const target = terminal(
 			(async function* () {
@@ -108,24 +161,93 @@ describe("VS Code command lifecycle", () => {
 		await assert.rejects(manager().runCommand(info, "test"), /shell unavailable/)
 		assert.equal(info.busy, false)
 	})
-	it("releases unknown completion without declaring success or dropping cancellation ownership", async () => {
-		const clock = sinon.useFakeTimers()
+	it("uses a supervised transport when integration is unavailable and never sends untracked text", async () => {
 		const target = terminal()
-		const info = { id: 1, terminal: target, busy: false } as unknown as TerminalInfo
+		const info = { id: 1, terminal: target, busy: false, cwd: "/tmp", shellPath: "/bin/sh" } as unknown as TerminalInfo
 		const owner = manager()
-		const process = owner.runCommand(info, "server")
+		const process = owner.runCommand(info, "printf 'supervised output'; exit 7")
 		const completed = sinon.spy()
 		process.once("completed", completed)
-		await clock.tickAsync(200)
 		await process
-		assert.equal(info.busy, true)
-		sinon.assert.notCalled(completed)
-		sinon.assert.calledOnceWithExactly(target.sendText, "server", true)
-		assert.equal((owner as any).processes.get(1), process)
-		process.terminate!()
-		sinon.assert.calledOnce(target.dispose)
+		assert.equal(info.busy, false)
 		sinon.assert.calledOnce(completed)
-		assert.deepEqual(process.getCompletionDetails!(), { terminalClosed: true, cancelled: true })
+		sinon.assert.notCalled(target.sendText)
+		assert.match(process.getOutputSnapshot!(), /supervised output/)
+		assert.equal(process.getCompletionDetails!().exitCode, 7)
+		assert.equal((owner as any).processes.get(1), process)
+		sinon.assert.calledOnce(target.dispose)
+		const next = owner.runCommand(info, "printf reused")
+		await next
+		assert.match(next.getOutputSnapshot!(), /fresh shell state/)
+		assert.ok(next.getOutputSnapshot!().endsWith("reused"))
+		info.terminal.dispose()
+	})
+	it("reconnects a real supervised shell with its stdin, output, and exit receipt intact", async () => {
+		const createTerminal = sinon.spy(vscode.window, "createTerminal")
+		const managed = new ManagedTerminal("/tmp", "/bin/sh")
+		const pty = (createTerminal.lastCall.args[0] as vscode.ExtensionTerminalOptions).pty
+		const info = {
+			id: 1,
+			terminal: managed.terminal,
+			managed,
+			busy: false,
+			cwd: "/tmp",
+			shellPath: "/bin/sh",
+		} as unknown as TerminalInfo
+		const owner = new VscodeTerminalManager()
+		sinon.stub(owner, "getOrCreateTerminal").resolves(info)
+		const dispatch = sinon.spy(owner, "runCommand")
+		const registry = new CommandRuntimeRegistry()
+		const callbacks: CommandExecutorCallbacks = {
+			say: async () => undefined,
+			ask: async () => ({ response: "yesButtonClicked" }),
+			getDietCodeMessages: () => [],
+			updateDietCodeMessage: async () => {},
+			updateBackgroundCommandState: () => {},
+			addToUserMessageContent: () => {},
+		}
+		const config = {
+			cwd: "/tmp",
+			taskId: "reconnect",
+			ulid: "reconnect",
+			terminalExecutionMode: "vscodeTerminal" as const,
+			terminalManager: owner,
+		}
+		const first = new CommandExecutor(config, callbacks, registry.get(config.taskId, config.ulid))
+		let reopened: CommandExecutor | undefined
+		try {
+			const result = await first.execute(
+				"printf 'ready\\n'; IFS= read -r input; printf 'late:%s\\n' \"$input\"; exit 7",
+				0.01,
+				{ actionId: "real-reconnect", suppressUserInteraction: true },
+			)
+			assert.equal(result[2]?.status, "background")
+			first.detach()
+			await owner.disposeAll()
+			const newOwner = new VscodeTerminalManager()
+			const newDispatch = sinon.spy(newOwner, "runCommand")
+			reopened = new CommandExecutor(
+				{ ...config, terminalManager: newOwner },
+				callbacks,
+				registry.get(config.taskId, config.ulid),
+			)
+			pty.handleInput!("continued\r")
+			const receipt = await reopened.readCommandOutput("real-reconnect", 5)
+			assert.equal(receipt.status, "failed")
+			assert.equal(receipt.exit_code, 7)
+			assert.match(receipt.output, /ready[\r\n]+late:continued/)
+			sinon.assert.calledOnce(dispatch)
+			sinon.assert.notCalled(newDispatch)
+			assert.equal(info.busy, false)
+		} finally {
+			const current = reopened ?? first
+			if (current.getExecutionInventory().active.length) {
+				current.controlCommand("real-reconnect", "stop")
+				await current.readCommandOutput("real-reconnect", 5)
+			}
+			current.detach()
+			pty.close()
+		}
 	})
 	it("keeps a dispatched command cancellable after its output stream breaks", async () => {
 		const target = terminal(
@@ -154,8 +276,81 @@ describe("VS Code command lifecycle", () => {
 		await process
 		await clock.tickAsync(200)
 		sinon.assert.notCalled(target.sendText)
-		sinon.assert.calledOnce(target.dispose)
+		sinon.assert.notCalled(target.dispose)
 		assert.equal(clock.countTimers(), 0)
+	})
+	it("settles cancellation before a reused supervised terminal is dispatched", async () => {
+		const target = terminal()
+		const managed = { terminal: target, run: sinon.stub() }
+		const info = { id: 1, terminal: target, managed, busy: false } as unknown as TerminalInfo
+		const process = manager().runCommand(info, "must not run")
+		const completed = sinon.spy()
+		process.once("completed", completed)
+		await process.terminate!()
+		await process
+		sinon.assert.notCalled(managed.run)
+		sinon.assert.calledOnce(completed)
+		assert.equal(process.getCompletionDetails!().cancelled, true)
+		assert.equal(info.busy, false)
+	})
+	it("preserves output and completion when individual event observers throw", async () => {
+		const target = terminal(
+			(async function* () {
+				yield "first\nsecond\n"
+			})(),
+		)
+		const process = new VscodeTerminalProcess(target)
+		const completed = sinon.spy()
+		const continued = sinon.spy()
+		const lines: string[] = []
+		process.on("line", () => {
+			throw new Error("broken display")
+		})
+		process.on("line", (line) => lines.push(line))
+		process.once("completed", () => {
+			throw new Error("broken completion display")
+		})
+		process.once("completed", completed)
+		process.once("continue", continued)
+		await process.run(target, "test")
+		assert.deepEqual(lines, ["first", "second"])
+		assert.equal(process.getOutputSnapshot(), "first\nsecond\n")
+		sinon.assert.calledOnce(completed)
+		sinon.assert.calledOnce(continued)
+		assert.equal(process.listenerCount("completed"), 0)
+	})
+	it("keeps real supervised output and exit ownership when the terminal display breaks", async () => {
+		const managed = new ManagedTerminal("/tmp", "/bin/sh")
+		managed.terminal.show()
+		const display = sinon.stub((managed as any).writeEvent, "fire").throws(new Error("display disconnected"))
+		const process = new VscodeTerminalProcess()
+		const done = new Promise<void>((resolve) => process.once("completed", () => resolve()))
+		process.on("line", async () => {
+			throw new Error("async display failed")
+		})
+		await process.runManaged(managed, "printf captured; exit 7")
+		await done
+		assert.ok(process.getOutputSnapshot().endsWith("captured"))
+		assert.equal(process.getCompletionDetails().exitCode, 7)
+		sinon.assert.calledOnce(display)
+		managed.terminal.dispose()
+	})
+	it("cleans up a supervised launch rejection without retaining a hot or busy process", async () => {
+		const target = terminal()
+		const managed = { terminal: target, run: sinon.stub().throws(new Error("closed during startup")) }
+		const info = { id: 1, terminal: target, managed, busy: false } as unknown as TerminalInfo
+		const process = manager().runCommand(info, "test")
+		await assert.rejects(process, /closed during startup/)
+		assert.equal(info.busy, false)
+		assert.equal(process.isHot, false)
+	})
+	it("does not dispatch when a startup notification synchronously cancels the command", async () => {
+		const managed = { terminal: terminal(), run: sinon.stub() }
+		const process = new VscodeTerminalProcess()
+		process.on("line", () => process.terminate())
+		await process.runManaged(managed as unknown as ManagedTerminal, "must not run")
+		sinon.assert.notCalled(managed.run)
+		assert.equal(process.getCompletionDetails().cancelled, true)
 	})
 	it("uses the matching host execution exit code and drains final output", async () => {
 		const clock = sinon.useFakeTimers()
@@ -301,7 +496,11 @@ describe("VS Code command lifecycle", () => {
 		assert.equal(clock.countTimers(), 0)
 	})
 	it("allows a deliberate stop retry after terminal disposal throws", async () => {
-		const target = terminal()
+		const target = terminal(
+			(async function* () {
+				throw new Error("stream lost")
+			})(),
+		)
 		const dispose = sinon.stub().onFirstCall().throws(new Error("host unavailable"))
 		dispose.onSecondCall().callsFake(() => {
 			hostEvents.emit("close", target)
@@ -315,7 +514,11 @@ describe("VS Code command lifecycle", () => {
 		assert.equal(process.getCompletionDetails().cancelled, true)
 	})
 	it("does not stop sibling terminals or replay completed commands on late cancellation", async () => {
-		const first = terminal()
+		const first = terminal(
+			(async function* () {
+				throw new Error("stream lost")
+			})(),
+		)
 		const second = terminal(
 			(async function* () {
 				yield "done\n"
@@ -346,5 +549,16 @@ describe("VS Code command lifecycle", () => {
 		const run = sinon.stub(owner, "runCommand").throws(new Error("Terminal acquisition must not execute a command"))
 		assert.equal(await owner.getOrCreateTerminal("/expected"), fresh)
 		sinon.assert.notCalled(run)
+	})
+	it("does not reuse idle shells owned by another task", async () => {
+		const target = terminal((async function* () {})())
+		Object.assign(target.shellIntegration!, { cwd: { fsPath: "/expected" } })
+		const foreign = { id: 99, terminal: target, busy: false, shellPath: undefined }
+		const fresh = { id: 2, terminal: terminal(), busy: false }
+		sinon.stub(TerminalRegistry, "getAllTerminals").returns([foreign] as never)
+		sinon.stub(TerminalRegistry, "createTerminal").returns(fresh as never)
+		const owner = manager()
+		Object.assign(owner, { terminalReuseEnabled: true, defaultTerminalProfile: "default" })
+		assert.equal(await owner.getOrCreateTerminal("/expected"), fresh)
 	})
 })

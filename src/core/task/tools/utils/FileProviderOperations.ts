@@ -8,13 +8,33 @@ export interface FileOpsResult {
 	autoFormattingEdits?: string
 }
 
+/** Preserve machine-readable mutation evidence when a later step of a patch fails. */
+export class PartialPatchError extends Error {
+	constructor(
+		readonly committedPaths: string[],
+		cause: unknown,
+	) {
+		super(
+			`${cause instanceof Error ? cause.message : String(cause)}\nAlready committed: ${committedPaths.join(", ")}. These changes were retained. Read the current files and reconcile the remaining changes; do not repeat the entire patch.`,
+			{ cause },
+		)
+		this.name = "PartialPatchError"
+	}
+}
+
 /**
  * Utility class for file operations via a DiffViewProvider
  */
 export class FileProviderOperations {
-	constructor(private provider: DiffViewProvider) {}
+	constructor(
+		private provider: DiffViewProvider,
+		private readonly signal?: AbortSignal,
+		private readonly assertAuthority?: () => void,
+	) {}
 
 	async openFile(path: string): Promise<void> {
+		this.signal?.throwIfAborted()
+		this.assertAuthority?.()
 		await this.provider.open(path)
 	}
 
@@ -22,6 +42,8 @@ export class FileProviderOperations {
 	 * Saves the current changes and returns the result.
 	 */
 	async saveChanges(): Promise<FileOpsResult> {
+		this.signal?.throwIfAborted()
+		this.assertAuthority?.()
 		const result = await this.provider.saveChanges()
 		return result
 	}
@@ -48,9 +70,18 @@ export class FileProviderOperations {
 	 * Modifies a file. If isFinal is false, prepares the modification without saving.
 	 * Call saveChanges() after approval when isFinal is false.
 	 */
-	async modifyFile(path: string, content: string, isFinal = true): Promise<FileOpsResult | undefined> {
+	async modifyFile(
+		path: string,
+		content: string,
+		isFinal = true,
+		expectedOriginal?: string,
+	): Promise<FileOpsResult | undefined> {
 		this.provider.editType = "modify"
 		await this.openFile(path)
+		if (expectedOriginal !== undefined && this.provider.originalContent !== expectedOriginal)
+			throw new Error(
+				`Edit conflict: ${path} changed while the patch was prepared. Read and reconcile the current contents.`,
+			)
 		// Always pass isFinal=true to update() to ensure proper document finalization
 		// (extends replacement range to full document, truncates trailing content).
 		// The isFinal parameter here only controls whether to save after the update.
@@ -67,11 +98,17 @@ export class FileProviderOperations {
 	 * Opens the file in the diff view to show it will be deleted.
 	 * Call deleteFile() with isFinal=true after approval when isFinal is false.
 	 */
-	async deleteFile(path: string, isFinal = true): Promise<FileOpsResult | undefined> {
+	async deleteFile(path: string, isFinal = true, expectedOriginal?: string): Promise<FileOpsResult | undefined> {
 		this.provider.editType = "delete"
 		await this.openFile(path)
+		if (expectedOriginal !== undefined && this.provider.originalContent !== expectedOriginal)
+			throw new Error(
+				`Edit conflict: ${path} changed while deletion was prepared. Read and reconcile the current contents.`,
+			)
 
 		if (isFinal) {
+			this.signal?.throwIfAborted()
+			this.assertAuthority?.()
 			await this.provider.deleteFile(path)
 			return undefined
 		}

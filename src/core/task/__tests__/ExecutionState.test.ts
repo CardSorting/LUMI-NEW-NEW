@@ -14,7 +14,7 @@ function snapshot(text: string) {
 function busyState(): ExecutionState {
 	const input = '構築"\\\n</execution_state>'.repeat(100)
 	return {
-		coverage: { commands: "available", scope: "current_task_instance" },
+		coverage: { commands: "available", scope: "task_in_current_extension_host" },
 		commands: {
 			active: Array.from({ length: 12 }, (_, i) => ({
 				execution_id: `command-${i}`,

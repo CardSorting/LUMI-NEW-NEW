@@ -17,6 +17,139 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 describe("ActionExecutor", () => {
 	afterEach(() => sinon.restore())
+	it("publishes queue identities before dispatch and isolates reservation observers", async () => {
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const running = Array.from({ length: 5 }, () => executor.execute("task", () => work.promise))
+		let id!: string
+		const operation = sinon.stub().resolves("done")
+		const queued = executor.execute("task", operation, {
+			execution: { kind: "helper", input: "assignment", label: "assignment" },
+			onReserved: (reserved) => {
+				id = reserved
+				throw new Error("display failed")
+			},
+		})
+		assert.equal(executor.executions.get("task", id)?.status, "queued")
+		sinon.assert.notCalled(operation)
+		work.resolve()
+		await Promise.all([...running, queued])
+		sinon.assert.calledOnce(operation)
+	})
+	it("retains structured late helper evidence independently of a truncated result preview", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		let finish!: (value: unknown) => void
+		let id!: string
+		const timedOut = assert.rejects(
+			executor.execute(
+				"task",
+				() =>
+					new Promise((resolve) => {
+						finish = resolve
+					}),
+				{
+					execution: { kind: "helper", input: "assignment", label: "assignment" },
+					timeoutMs: 10,
+					onReserved: (reserved) => {
+						id = reserved
+					},
+				},
+			),
+			/may still be running/,
+		)
+		await clock.tickAsync(10)
+		await timedOut
+		assert.equal(executor.executions.get("task", id)?.status, "awaiting_completion")
+		finish({
+			status: "cancelled",
+			result: "evidence".repeat(2000),
+			filesModified: ["committed.ts"],
+			filesViewed: ["input.ts"],
+			pendingCommandIds: ["still-running"],
+		})
+		await clock.tickAsync(0)
+		const receipt = executor.executions.get("task", id)!
+		assert.equal(receipt.status, "cancelled")
+		assert.deepEqual(receipt.helper_handoff?.files_modified, ["committed.ts"])
+		assert.deepEqual(receipt.helper_handoff?.pending_command_ids, ["still-running"])
+		assert.equal(receipt.helper_handoff?.truncated, true)
+		assert.equal(receipt.helper_handoff?.result?.length, 8000)
+		receipt.helper_handoff!.files_modified.length = 0
+		assert.deepEqual(executor.executions.get("task", id)?.helper_handoff?.files_modified, ["committed.ts"])
+	})
+	it("keeps a background command identity until its actual lifecycle settles", async () => {
+		const executor = new ActionExecutor()
+		let id!: string
+		const execution = { kind: "command" as const, input: { command: "build", cwd: "/workspace" }, label: "build" }
+		await executor.execute(
+			"task",
+			async (_signal, actionId) => {
+				id = actionId!
+				return [false, "still running", { status: "background", executionId: id }]
+			},
+			{ execution },
+		)
+		assert.equal(executor.executions.get("task", id)?.status, "awaiting_completion")
+		assert.deepEqual(executor.getQueues("task"), [], "background processes must not occupy foreground scheduling slots")
+		await assert.rejects(
+			executor.execute("task", async () => "duplicate", { execution }),
+			ActionAlreadyActiveError,
+		)
+		executor.executions.reconcileCommand("task", id, { status: "failed", exitCode: 9 })
+		assert.equal(executor.executions.get("task", id)?.status, "failed")
+		assert.equal(executor.executions.list("task").active.length, 0)
+	})
+	it("retains a final host result that arrives before a late foreground return", async () => {
+		const executor = new ActionExecutor()
+		let id!: string
+		await executor.execute(
+			"task",
+			async (_signal, actionId) => {
+				id = actionId!
+				executor.executions.reconcileCommand("task", id, { status: "unconfirmed", terminalClosed: true })
+				return [false, "old foreground snapshot", { status: "background" }]
+			},
+			{ execution: { kind: "command", input: "test", label: "test" } },
+		)
+		assert.equal(executor.executions.get("task", id)?.status, "unconfirmed")
+	})
+	it("does not strand an action claim when the command owner returns an existing execution", async () => {
+		const executor = new ActionExecutor()
+		let original!: string
+		let duplicate!: string
+		await executor.execute(
+			"task",
+			async (_signal, id) => {
+				original = id!
+				return [false, "running", { status: "background", executionId: id }]
+			},
+			{ execution: { kind: "command", input: "original", label: "original" } },
+		)
+		await executor.execute(
+			"task",
+			async (_signal, id) => {
+				duplicate = id!
+				return [false, "already running", { status: "background", executionId: original }]
+			},
+			{ execution: { kind: "command", input: "equivalent request", label: "same command" } },
+		)
+		assert.equal(executor.executions.get("task", duplicate)?.status, "not_started")
+		assert.match(executor.executions.get("task", duplicate)!.result_preview!, new RegExp(original))
+		assert.deepEqual(
+			executor.executions.list("task").active.map((entry) => entry.execution_id),
+			[original],
+		)
+		executor.executions.reconcileCommand("task", original, { status: "completed", exitCode: 0 })
+		assert.equal(executor.executions.list("task").active.length, 0)
+	})
+	it("reports cancelled helpers as cancelled receipts", async () => {
+		const executor = new ActionExecutor()
+		await executor.execute("task", async () => ({ status: "cancelled" }), {
+			execution: { kind: "helper", input: "work", label: "work" },
+		})
+		assert.equal(executor.executions.list("task").recent[0].status, "cancelled")
+	})
 	it("exposes FIFO blockers, unknown occupants, and queue removal without changing scheduler state", async () => {
 		const clock = sinon.useFakeTimers()
 		const executor = new ActionExecutor()

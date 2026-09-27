@@ -108,6 +108,7 @@ import {
 	CommandExecutorCallbacks,
 	FullCommandExecutorConfig,
 } from "@/integrations/terminal"
+import { commandRuntimes } from "@/integrations/terminal/CommandRuntime"
 import { DietCodeErrorType, ErrorService } from "@/services/error"
 import { telemetryService } from "@/services/telemetry"
 import { DietCodeClient } from "@/shared/dietcode"
@@ -140,6 +141,7 @@ import { type ExecutionState, type ExecutionStateResult, getExecutionAuthority }
 import { FocusChainManager } from "./focus-chain"
 import { MessageStateHandler } from "./message-state"
 import { reconcileCommandExecutions } from "./reconcileCommandExecutions"
+import { reconcileHelperExecutions } from "./reconcileHelperExecutions"
 import { StreamResponseHandler } from "./StreamResponseHandler"
 import { buildInterruptedAssistantContent, STREAM_RECOVERY_INSTRUCTION } from "./streamRecovery"
 import { TaskState } from "./TaskState"
@@ -360,7 +362,9 @@ export class Task {
 		// DiffViewProvider opens Diff Editor during edits while FileEditProvider performs
 		// edits in the background without stealing user's editor's focus.
 		const backgroundEditEnabled = this.stateManager.getGlobalSettingsKey("backgroundEditEnabled")
-		this.diffViewProvider = backgroundEditEnabled ? new FileEditProvider() : HostProvider.get().createDiffViewProvider()
+		this.diffViewProvider = backgroundEditEnabled
+			? new FileEditProvider(this.cwd, this.taskState.abortSignal, () => this.taskState.recovery?.assertCanExecute())
+			: HostProvider.get().createDiffViewProvider()
 
 		// Set up MCP notification callback for real-time notifications
 		this.mcpHub.setNotificationCallback(async (serverName: string, _level: string, message: string) => {
@@ -501,13 +505,17 @@ export class Task {
 			openAiCompatibleDomain = extractProviderDomainFromUrl(apiConfiguration.openAiBaseUrl)
 		}
 
-		if (historyItem) {
-			// Open task from history
-			telemetryService.captureTaskRestarted(this.ulid, currentProvider, openAiCompatibleDomain)
-		} else {
-			// New task started
-			telemetryService.captureTaskCreated(this.ulid, currentProvider, openAiCompatibleDomain)
-		}
+		void Promise.resolve()
+			.then(() => {
+				if (historyItem) {
+					// Open task from history
+					telemetryService.captureTaskRestarted(this.ulid, currentProvider, openAiCompatibleDomain)
+				} else {
+					// New task started
+					telemetryService.captureTaskCreated(this.ulid, currentProvider, openAiCompatibleDomain)
+				}
+			})
+			.catch((error) => Logger.warn("Task telemetry unavailable:", error))
 
 		// Initialize command executor with config and callbacks
 		const commandExecutorConfig: FullCommandExecutorConfig = {
@@ -547,7 +555,13 @@ export class Task {
 			},
 		}
 
-		this.commandExecutor = new CommandExecutor(commandExecutorConfig, commandExecutorCallbacks)
+		const commandRuntime = commandRuntimes.get(this.taskId, this.ulid)
+		this.taskState.recovery = commandRuntime.enableRecovery(
+			path.join(HostProvider.get().globalStorageFsPath, "tasks", this.taskId, "execution-recovery"),
+			this.cwd,
+		)
+		executor.executions.attachRecovery(this.ulid, this.taskState.recovery)
+		this.commandExecutor = new CommandExecutor(commandExecutorConfig, commandExecutorCallbacks, commandRuntime)
 
 		this.toolExecutor = new ToolExecutor(
 			this.taskState,
@@ -1398,8 +1412,12 @@ export class Task {
 			// Optionally, inform the user or handle the error appropriately
 		}
 
-		const savedDietCodeMessages = reconcileCommandExecutions(
-			stripPartialPlanSummaryMessages(await getSavedDietCodeMessages(this.taskId)),
+		const historyMessages = stripPartialPlanSummaryMessages(await getSavedDietCodeMessages(this.taskId))
+		this.commandExecutor.restoreCommandHistory(historyMessages)
+		const savedDietCodeMessages = reconcileHelperExecutions(
+			reconcileCommandExecutions(historyMessages, (id) => this.commandExecutor.getExecutionSnapshot(id)),
+			this.taskState.recovery,
+			(id) => executor.executions.get(this.ulid, id),
 		)
 
 		// Remove any resume messages that may have been added before
@@ -1427,6 +1445,7 @@ export class Task {
 
 		await this.messageStateHandler.overwriteDietCodeMessages(savedDietCodeMessages)
 		this.messageStateHandler.setDietCodeMessages(savedDietCodeMessages)
+		this.commandExecutor.refreshCommandMessages()
 
 		// Now present the dietcode messages to the user and ask if they want to resume (NOTE: we ran into a bug before where the apiconversationhistory wouldn't be initialized when opening a old task, and it was because we were waiting for resume)
 		// This is important in case the user deletes messages without resuming the task first
@@ -1927,6 +1946,9 @@ export class Task {
 				this.FocusChainManager.dispose()
 			}
 		} finally {
+			// Detach the view even if another cleanup failed. Pending process receipts
+			// remain inspectable when this task is reopened in the same extension host.
+			this.commandExecutor.detach()
 			// Release task folder lock
 			if (this.taskLockAcquired) {
 				try {
@@ -2011,13 +2033,13 @@ export class Task {
 				return {
 					action,
 					command,
-					detail: "action.status describes the foreground request only. command.status describes the terminal execution. Use read_command_output with command.execution_id to inspect that run; a completed foreground request does not prove command completion.",
+					detail: "The action follows the command lifecycle, including background execution. command.status is the host observation. Use read_command_output with command.execution_id to inspect the existing run. A legacy completed foreground receipt does not prove command completion.",
 				}
 			if (command) return command
 			if (action)
 				return {
 					...action,
-					detail: "This receipt describes the foreground request only. A linked terminal snapshot is unavailable; inspect the original command result and terminal before repeating it.",
+					detail: "A linked terminal snapshot is unavailable. This action receipt is the last recorded observation; inspect the original command result and terminal before repeating it.",
 				}
 			throw new Error(
 				"Execution ID is not tracked by this task or has expired. Use get_execution_state without an ID to inspect tracked work. Do not resubmit work just to inspect it.",
@@ -2036,7 +2058,11 @@ export class Task {
 		const actions = executor.executions.list(this.ulid)
 		const linked = new Set([...commands.active, ...commands.recent].map((command) => command.action_id).filter(Boolean))
 		return {
-			coverage: { commands: commandCoverage, scope: "current_task_instance" },
+			coverage: {
+				commands: commandCoverage,
+				scope: this.taskState?.recovery ? "task_with_persisted_evidence" : "task_in_current_extension_host",
+			},
+			recovery: this.taskState?.recovery?.report,
 			authority: getExecutionAuthority(this.stateManager),
 			queues: executor.getQueues(this.ulid),
 			commands,
@@ -3428,7 +3454,10 @@ export class Task {
 							// parse raw assistant message into content blocks
 							const prevLength = this.taskState.assistantMessageContent.length
 
-							this.taskState.assistantMessageContent = parseAssistantMessageV2(assistantMessage)
+							this.taskState.assistantMessageContent = parseAssistantMessageV2(
+								assistantMessage,
+								this.taskState.assistantMessageContent,
+							)
 
 							if (this.taskState.assistantMessageContent.length > prevLength) {
 								this.taskState.userMessageContentReady = false // new content we need to present, reset to false in case previous content set this to true

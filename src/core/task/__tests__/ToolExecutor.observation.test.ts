@@ -39,6 +39,15 @@ describe("tool execution and observation", () => {
 		sinon.assert.calledOnce(instance.coordinator.execute)
 		sinon.assert.calledOnceWithExactly(instance.pushToolResult, "operation succeeded", block)
 	})
+	it("passes repaired command operators to the policy guard and execution without rewriting the source block", async () => {
+		const { instance, config, block } = fixture()
+		block.params.command = "node --version &amp;&amp; npm --version"
+		await instance.handleCompleteBlock(block, config)
+		const expected = { params: { command: "node --version && npm --version" } }
+		sinon.assert.calledOnceWithMatch(instance.guard.guardPreExecution, expected)
+		sinon.assert.calledOnceWithMatch(instance.coordinator.execute, config, expected)
+		assert.equal(block.params.command, "node --version &amp;&amp; npm --version")
+	})
 	it("dispatches one mutation for concurrent and repeated native deliveries, including late previews", async () => {
 		const { instance, config, block } = fixture()
 		instance.asToolConfig = sinon.stub().resolves(config)

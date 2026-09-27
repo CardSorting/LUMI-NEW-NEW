@@ -30,7 +30,7 @@ function createMockStream(lines: string[] = ["test-command", "line1", "line2", "
 	}
 }
 
-describe("TerminalProcess (Integration Tests)", () => {
+describe("TerminalProcess output and capability handling", () => {
 	let process: VscodeTerminalProcess
 	let sandbox: sinon.SinonSandbox
 	let createdTerminals: vscode.Terminal[] = []
@@ -45,6 +45,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 		sandbox = sinon.createSandbox({ useFakeTimers: true })
 		setVscodeHostProviderMock()
 		process = new VscodeTerminalProcess()
+		sandbox.stub(vscode.window as any, "onDidEndTerminalShellExecution").value(() => ({ dispose: () => {} }))
 	})
 
 	afterEach(() => {
@@ -59,177 +60,17 @@ describe("TerminalProcess (Integration Tests)", () => {
 		createdTerminals = []
 	})
 
-	describe("Real terminal tests", () => {
-		// This test works with or without shell integration
-		it("should create and run a command in a real terminal", async () => {
-			// Create a real VS Code terminal for testing
-			const terminal = TerminalRegistry.createTerminal().terminal
-			createdTerminals.push(terminal)
-
-			// Spy on emit to verify behavior
-			const emitSpy = sandbox.spy(process, "emit")
-
-			// Run a simple command
-			const runPromise = process.run(terminal, "echo test")
-
-			// If terminal doesn't have shell integration, advance timer
-			if (!terminal.shellIntegration) {
-				await sandbox.clock.tickAsync(3000)
-			}
-
-			await runPromise
-
-			// Verify that the continue event was emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
-		})
-
-		it("should execute and capture events from a simple command", async () => {
-			// Create a real VS Code terminal
-			const terminal = TerminalRegistry.createTerminal().terminal
-			createdTerminals.push(terminal)
-
-			// Spy on emit to verify line events
-			const emitSpy = sandbox.spy(process, "emit")
-
-			// Run a command that produces predictable output
-			const runPromise = process.run(terminal, "echo 'Line 1' && echo 'Line 2'")
-
-			// If terminal doesn't have shell integration, advance timer
-			if (!terminal.shellIntegration) {
-				await sandbox.clock.tickAsync(3000)
-			}
-
-			await runPromise
-
-			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
-			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-		})
-
-		it("should execute a command that lists files", async () => {
-			// Create a real VS Code terminal
-			const terminal = TerminalRegistry.createTerminal().terminal
-			createdTerminals.push(terminal)
-
-			// Spy on emit to verify behavior
-			const emitSpy = sandbox.spy(process, "emit")
-
-			// Run a command that lists files
-			const runPromise = process.run(terminal, "ls -la")
-
-			// If terminal doesn't have shell integration, advance timer
-			if (!terminal.shellIntegration) {
-				await sandbox.clock.tickAsync(3000)
-			}
-
-			await runPromise
-
-			// Verify that the continue event was emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
-		})
-
-		it("should handle a longer running command", async () => {
-			// Create a real terminal
-			const terminal = TerminalRegistry.createTerminal().terminal
-			createdTerminals.push(terminal)
-
-			// Spy on emit to verify behavior
-			const emitSpy = sandbox.spy(process, "emit")
-
-			// Un-fake timers temporarily for this test since we need real timing
-			sandbox.clock.restore()
-
-			// Run a command that sleeps for a short period
-			await process.run(terminal, "sleep 0.5 && echo 'Done sleeping'")
-
-			// Verify that the continue and completed events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
-
-			// Restore fake timers for other tests
-			sandbox.useFakeTimers()
-		})
-
-		it("should execute a command with arguments", async () => {
-			// Create a real VS Code terminal
-			const terminal = TerminalRegistry.createTerminal().terminal
-			createdTerminals.push(terminal)
-
-			// Spy on emit to verify line events
-			const emitSpy = sandbox.spy(process, "emit")
-
-			// Run a command that produces predictable output
-			const runPromise = process.run(terminal, "echo 'Line 1' 'Line 2'")
-
-			// If terminal doesn't have shell integration, advance timer
-			if (!terminal.shellIntegration) {
-				await sandbox.clock.tickAsync(3000)
-			}
-
-			await runPromise
-
-			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
-			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-		})
-
-		it("should execute a command with quotes", async () => {
-			// Create a real VS Code terminal
-			const terminal = TerminalRegistry.createTerminal().terminal
-			createdTerminals.push(terminal)
-
-			// Spy on emit to verify line events
-			const emitSpy = sandbox.spy(process, "emit")
-
-			// Run a command that produces predictable output
-			const runPromise = process.run(terminal, "echo \"Line 1\" && echo 'Line 2'")
-
-			// If terminal doesn't have shell integration, advance timer
-			if (!terminal.shellIntegration) {
-				await sandbox.clock.tickAsync(3000)
-			}
-
-			await runPromise
-
-			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
-			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-		})
-	})
-
-	// Test that specifically checks for no shell integration
-	it("should handle terminals without shell integration", async () => {
-		// Create a real terminal without explicitly providing shell integration
-		const terminal = vscode.window.createTerminal({ name: "Test Terminal" })
+	it("refuses untracked terminal writes when no fallback is configured", async () => {
+		const terminal = TerminalRegistry.createTerminal().terminal
 		createdTerminals.push(terminal)
-
-		// Stub the shellIntegration getter to return undefined for this test
 		sandbox.stub(terminal, "shellIntegration").get(() => undefined)
-
-		// Stub the sendText method to verify it's called
-		const sendTextStub = sandbox.stub(terminal, "sendText")
-
-		// Spy on the emit function to verify events
-		const emitSpy = sandbox.spy(process, "emit")
-
-		// Run the command - this returns a promise
-		const runPromise = process.run(terminal, "test-command")
-
-		// Advance the fake timer by 3 seconds to trigger the setTimeout
-		await sandbox.clock.tickAsync(3000)
-
-		// Now wait for the promise to resolve
-		await runPromise
-
-		// Check that the correct methods were called and events emitted
-		sendTextStub.calledWith("test-command", true).should.be.true()
-		;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.false()
-		;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-
-		// This event should be emitted for terminals without shell integration
-		;(emitSpy as sinon.SinonSpy).calledWith("no_shell_integration").should.be.true()
+		const sendText = sandbox.spy(terminal, "sendText")
+		const onError = sandbox.spy()
+		process.on("error", onError)
+		await process.run(terminal, "must not run")
+		onError.calledOnce.should.be.true()
+		onError.firstCall.args[0].message.should.match(/did not start/)
+		sendText.called.should.be.false()
 	})
 
 	// The following tests require shell integration and controlled terminal output

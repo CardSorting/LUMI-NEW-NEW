@@ -194,11 +194,7 @@ export class VscodeDiffViewProvider extends DiffViewProvider {
 		if (!this.activeDiffEditor) {
 			return false
 		}
-		if (!this.activeDiffEditor.document.isDirty) {
-			return false
-		}
-		await this.activeDiffEditor.document.save()
-		return true
+		return this.activeDiffEditor.document.save()
 	}
 
 	protected async closeAllDiffViews(): Promise<void> {

@@ -144,6 +144,17 @@ describe("agent progress tracking", () => {
 			assert.equal(tracker.finishTurn(), "continue")
 		}
 	})
+	it("does not renew identical helper work when reconciliation IDs change", () => {
+		const tracker = new ToolProgressTracker()
+		const handoff = (id: number, result = "same evidence") =>
+			`### SWARM EXECUTION SUMMARY\nSuccess: 1\n\n### RECONCILIATION\nexecution_id helper-${id}\nPending command: command-${id}\n\n### AGENT DETAILS\n${result}\n\nRuntime handoff — commands still pending:\n- command-${id}: background. Inspect with read_command_output; do not relaunch.`
+		for (let index = 0; index < 9; index++) {
+			tracker.record("custom_helper", { prompt: "same assignment" }, handoff(index))
+			assert.equal(tracker.finishTurn(), index === 8 ? "handoff" : index === 3 ? "redirect" : "continue")
+		}
+		tracker.record("custom_helper", { prompt: "same assignment" }, handoff(10, "new evidence"))
+		assert.equal(tracker.finishTurn(), "continue")
+	})
 	it("redirects once and hands back an unchanged alternating loop", () => {
 		const tracker = new ToolProgressTracker()
 		for (const path of ["a", "b"]) {

@@ -26,7 +26,7 @@ const examples: { command: string; state: CommandExecutionState; output?: string
 		command: "previous session",
 		state: {
 			status: "unknown",
-			detail: "This task was reopened and the command is no longer tracked. Check View → Terminal before running it again.",
+			detail: "This command is no longer tracked by the current extension host. Check View → Terminal before running it again.",
 		},
 	},
 ]

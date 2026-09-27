@@ -22,11 +22,17 @@ import { AssistantMessageContent, TextStreamContent, ToolParamName, ToolUse, too
  * If the input string ends mid-block, the last open block is added and marked as partial.
  *
  * @param assistantMessage The raw string output from the assistant.
+ * @param previousContent The preceding parse of the same, growing response. Retains tool IDs across streamed updates.
  * @returns An array of `AssistantMessageContent` objects, which can be `TextContent` or `ToolUse`.
  *          Blocks that were not fully closed by the end of the input string will have their `partial` flag set to `true`.
  */
-export function parseAssistantMessageV2(assistantMessage: string): AssistantMessageContent[] {
+export function parseAssistantMessageV2(
+	assistantMessage: string,
+	previousContent: AssistantMessageContent[] = [],
+): AssistantMessageContent[] {
 	const contentBlocks: AssistantMessageContent[] = []
+	const previousTools = previousContent.filter((block): block is ToolUse => block.type === "tool_use")
+	let toolIndex = 0
 	let currentTextContentStart = 0 // Index where the current text block started
 	let currentTextContent: TextStreamContent | undefined
 	let currentToolUseStart = 0 // Index *after* the opening tag of the current tool use
@@ -171,12 +177,16 @@ export function parseAssistantMessageV2(assistantMessage: string): AssistantMess
 					}
 
 					// Start the new tool use
+					const previousTool = previousTools[toolIndex++]
 					currentToolUse = {
 						type: "tool_use",
 						name: toolName as DietCodeDefaultTool,
 						params: {},
 						partial: true, // Assume partial until closing tag is found
-						call_id: nanoid(8),
+						call_id:
+							previousTool?.name === toolName && !previousTool.isNativeToolCall
+								? (previousTool.call_id ?? nanoid(8))
+								: nanoid(8),
 						isNativeToolCall: false,
 					}
 					currentToolUseStart = currentCharIndex + 1 // Tool content starts after the opening tag

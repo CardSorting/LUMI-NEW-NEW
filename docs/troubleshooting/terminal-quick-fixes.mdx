@@ -4,7 +4,7 @@ sidebarTitle: "Terminal Quick Fixes"
 description: "Understand command status, bounded waits, and terminal recovery."
 ---
 
-LUMI executes commands in VS Code's integrated terminal. Use **Open terminal** on an active command to inspect that exact terminal. **Stop command** closes only that command's terminal; the parent and other commands can continue. Do not rerun a command just because the agent stopped waiting for it.
+LUMI executes commands through an observed shell connection. Use **Open terminal** on an active command to inspect that exact terminal. **Stop command** stops that command's terminal or supervised process group; the parent and other commands can continue. Do not rerun a command just because the agent stopped waiting for it.
 
 ## Understand the status
 
@@ -18,6 +18,7 @@ LUMI executes commands in VS Code's integrated terminal. Use **Open terminal** o
 | Completed · exit 0 | The host reported success. | Continue with the result. |
 | Failed · exit N | The host reported a nonzero exit code. | Diagnose the output before trying a corrected command. |
 | Finished · exit unknown / Status unavailable | The host did not provide a reliable exit status or output tracking was lost. | Inspect the existing terminal and verify the result. |
+| Exit unconfirmed | Observation ended without a reliable exit code. This is not a successful completion. | Inspect output and resulting files before repeating any mutation. |
 | Not started | Terminal setup failed, execution capacity was reached, or the same command is already active. | Read the explanation in the command card. |
 
 Approval and waiting are separate. Once approved, commands have a bounded foreground wait: normally 30 seconds, or 300 seconds for recognized builds, tests, and installs. Explicit waits are capped at 300 seconds. Reaching that limit leaves the command running and lets the agent continue; it does not retry or terminate the command.
@@ -30,7 +31,7 @@ An action marked `awaiting_completion` is still unresolved after its caller stop
 
 Automatic snapshots prioritize the observing agent's work and unresolved outcomes. Totals and omission counts show when more records are available, and `details_omitted` indicates that a summary needs explicit inspection. Failed command admission stays visible even when no terminal was created. If terminal observation fails, retained foreground evidence remains available, but it cannot prove the command stopped.
 
-Completed results remain available for the latest 64 executions in the current task session, even after a terminal is reused. Either linked ID can find a retained command beyond the recent summary, even if its separate action receipt has expired. Expired IDs and IDs from a previous session return an explicit error; they never target a newer terminal occupant. Unchanged reads count toward the agent's stall recovery window, even when it changes the wait duration. After repeated unchanged reads, the agent should do independent work, diagnose the blocker, or report what remains unresolved.
+Completed results remain available for the latest 64 executions in a retained task runtime, even after a terminal is reused or the task is reopened. Active commands are never evicted; idle history is retained for up to four closed tasks in the same extension host. Either linked ID can find a retained command beyond the recent summary, even if its separate action receipt has expired. Expired IDs and IDs from a previous extension host return an explicit error; they never target a newer terminal occupant. Unchanged reads count toward the agent's stall recovery window, even when it changes the wait duration. After repeated unchanged reads, the agent should do independent work, diagnose the blocker, or report what remains unresolved.
 
 ## If shell integration is unavailable
 
@@ -43,11 +44,17 @@ VS Code uses shell integration to track commands, working directories, and exit 
 
 ## Recovery limits
 
+If shell integration or its completion events are unavailable before dispatch, LUMI switches to **LUMI · supervised shell**. This uses captured stdout/stderr and the operating system's process completion event. The terminal display is reusable within the task; every command starts a fresh shell with an explicit working directory and the extension host's environment. Shell variables, aliases, and directory changes from a previous command do not carry over in this transport. It uses pipes, so applications requiring a full TTY should use a terminal with working shell integration. A tracking failure after dispatch never triggers a second launch through the fallback.
+
+Command and action inspection use the same execution ID. Background commands remain active in the execution registry until actual completion. Terminals are reused only within their owning task. On POSIX systems a supervised stop signals the owned process group, then escalates to a forced stop after two seconds if necessary; the result remains unconfirmed until the process closes.
+
 Commands are not automatically replayed after a timeout or tracking failure. The same command in the same working directory cannot be launched again while its previous execution remains active. Parent and helper commands retain cancellation ownership after continuing in the terminal.
 
 An output stream ending without a confirmed command exit does not make its terminal available for reuse. A missing exit code can also indicate a nested shell, so LUMI retains the command's controls until an exit or terminal closure is confirmed. This follows the distinctions in the [VS Code terminal execution API](https://code.visualstudio.com/api/references/vscode-api#TerminalShellExecutionEndEvent).
 
-Reopening a task cannot restore ownership of a previous session's command. Its card shows **Status unavailable**, with guidance to inspect **View → Terminal**. Saved controls cannot target a newer command that happens to reuse the same terminal.
+Reopening a task in the same extension host reconnects to its retained commands, including pending stops and late results. Output readers and stop controls continue to target the original execution. Reopening does not launch or cancel a command by itself; explicit task cancellation still requests a stop. Queued launches and controls from the old task view cannot affect the reopened task. Reusing a retained execution ID returns its receipt; changed command text or cwd under that ID is rejected.
+
+After an extension restart, or when idle history has expired, LUMI cannot restore process ownership. An unresolved saved card shows **Status unavailable**, with guidance to inspect **View → Terminal**. Saved controls cannot target a newer command that happens to reuse the same terminal.
 
 Each task allows at most 12 active commands. Terminal acquisition and launch-queue waits each have a 15-second limit. The general action queue waits up to 30 seconds by default and removes expired work without running it later. These limits release the agent to diagnose or continue independent work; they do not declare an unfinished operation complete.
 

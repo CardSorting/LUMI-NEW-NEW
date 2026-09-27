@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import * as path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import type { ApiHandler, buildApiHandler } from "@core/api"
@@ -12,6 +12,7 @@ import { PromptRegistry } from "@core/prompts/system-prompt"
 import type { SystemPromptContext } from "@core/prompts/system-prompt/types"
 import { StreamResponseHandler } from "@core/task/StreamResponseHandler"
 import { buildInterruptedAssistantContent, STREAM_RECOVERY_INSTRUCTION } from "@core/task/streamRecovery"
+import { resolveWorkspacePath } from "@core/workspace"
 import { ModelInfo } from "@shared/api"
 import { resolveCompletionGateOptions } from "@shared/audit/auditGatePolicyLoader"
 import { buildSubagentAuditContext, buildSubagentGateSignals } from "@shared/audit/auditSubagentContext"
@@ -29,6 +30,9 @@ import { ContextManager } from "@/core/context/context-management/ContextManager
 import { checkContextWindowExceededError } from "@/core/context/context-management/context-error-handling"
 import { getContextWindowInfo } from "@/core/context/context-management/context-window-utils"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
+import { FileEditProvider } from "@/integrations/editor/FileEditProvider"
+import { canonicalFilePath } from "@/integrations/editor/FileMutationCoordinator"
+import { normalizeShellCommand } from "@/integrations/terminal/normalizeCommand"
 import { HostRegistryInfo } from "@/registry"
 import { DietCodeError, DietCodeErrorType } from "@/services/error"
 import { ApiFormat } from "@/shared/proto/dietcode/models"
@@ -48,12 +52,13 @@ import {
 import { validateSubagentCompletionGates } from "../subagentCompletionGates"
 import { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
+import { PartialPatchError } from "../utils/FileProviderOperations"
 import { isToolFailure } from "../utils/toolOutcome"
 import { observeHelperOperation } from "./observeHelperOperation"
 import { SubagentBuilder } from "./SubagentBuilder"
 import { SwarmConsensusHandler } from "./SwarmConsensusHandler"
 
-const MAX_EMPTY_ASSISTANT_RETRIES = 3
+const MAX_EMPTY_ASSISTANT_RETRIES = 1
 const MAX_INITIAL_STREAM_ATTEMPTS = 3
 const INITIAL_STREAM_RETRY_BASE_DELAY_MS = 250
 const MAX_STREAM_RECOVERY_ATTEMPTS = 2
@@ -85,6 +90,7 @@ export interface SubagentRunResult {
 	filesViewed?: string[]
 	durationMs?: number
 	isPartial?: boolean
+	pendingCommandIds?: string[]
 }
 
 interface ConfigWithExtensions extends TaskConfig {
@@ -102,6 +108,7 @@ interface SubagentProgressUpdate {
 	filesModified?: string[]
 	filesViewed?: string[]
 	durationMs?: number
+	pendingCommandIds?: string[]
 }
 
 interface SubagentRunStats {
@@ -252,7 +259,7 @@ function resolveToolUseId(call: { id?: string; call_id?: string; name?: string }
 		return callId
 	}
 
-	const fallbackId = `subagent_tool_${Date.now()}_${index + 1}`
+	const fallbackId = `subagent_tool_${randomUUID()}_${index + 1}`
 	Logger.warn(`[SubagentRunner] Missing tool call id for '${call.name || "unknown"}'; using fallback '${fallbackId}'`)
 	return fallbackId
 }
@@ -269,6 +276,11 @@ function toAssistantToolUseBlock(call: SubagentToolCall): DietCodeAssistantToolU
 
 function parseNonNativeToolCalls(assistantText: string): SubagentToolCall[] {
 	const parsedBlocks = parseAssistantMessageV2(assistantText)
+	if (parsedBlocks.some((block) => block.type === "tool_use" && block.partial)) {
+		throw new Error(
+			"Helper response contains an incomplete tool call. No tool from this response was dispatched; reconcile earlier work before continuing.",
+		)
+	}
 
 	return parsedBlocks
 		.filter((block): block is ToolUse => block.type === "tool_use")
@@ -375,6 +387,7 @@ export class SubagentRunner {
 
 	private throwIfAborted(): void {
 		if (this.shouldAbort()) throw new Error("Subagent run cancelled.")
+		this.baseConfig.taskState.recovery?.assertCanExecute(this.executionOwner)
 	}
 
 	private waitForActiveOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -445,6 +458,7 @@ export class SubagentRunner {
 						filesModified: update.filesModified?.slice(),
 						filesViewed: update.filesViewed?.slice(),
 						activeSignals: update.activeSignals?.slice(),
+						pendingCommandIds: update.pendingCommandIds?.slice(),
 					}),
 				).catch((error) => Logger.warn("[SubagentRunner] Progress observer failed:", error))
 			} catch (error) {
@@ -456,6 +470,7 @@ export class SubagentRunner {
 		const filesViewed = new Set<string>()
 		// Keep bounded, actual execution evidence even when there is no final model answer.
 		const completedResults: string[] = []
+		const toolReceipts = new Map<string, { fingerprint: string; result: string; failed: boolean }>()
 		const partialResult = () =>
 			completedResults.length ? `Partial work — helper did not finish.\n\n${completedResults.join("\n\n")}` : undefined
 		const state = new TaskState()
@@ -814,7 +829,7 @@ export class SubagentRunner {
 					input: toolCall.input,
 					isNativeToolCall: true,
 				}))
-				const parsedNonNativeToolCalls = parseNonNativeToolCalls(assistantText)
+				const parsedNonNativeToolCalls = useNativeToolCalls ? [] : parseNonNativeToolCalls(assistantText)
 				const fallbackNonNativeToolCalls = nativeFinalizedToolCalls.map((toolCall) => ({
 					...toolCall,
 					isNativeToolCall: false,
@@ -856,35 +871,9 @@ export class SubagentRunner {
 				if (finalizedToolCalls.length === 0) {
 					emptyAssistantResponseRetries += 1
 					if (emptyAssistantResponseRetries > MAX_EMPTY_ASSISTANT_RETRIES) {
-						const durationMs = Date.now() - startTime
-						// Industry Standard (Claude Code / Swarm): If the model provided a direct substantive answer,
-						// accept it as the completion result instead of discarding it!
-						if (assistantText.trim().length > 0) {
-							const directResult = assistantText.trim()
-							const gateError = await this.waitForActiveOperation(() =>
-								validateSubagentCompletionGates(subagentConfig, directResult),
-							)
-							if (gateError) throw new Error(gateError)
-							this.throwIfAborted()
-							onProgress({
-								status: "completed",
-								result: directResult,
-								stats: { ...stats },
-								filesModified: Array.from(filesModified),
-								filesViewed: Array.from(filesViewed),
-								durationMs,
-							})
-							return {
-								status: "completed",
-								result: directResult,
-								stats,
-								filesModified: Array.from(filesModified),
-								filesViewed: Array.from(filesViewed),
-								durationMs,
-							}
-						}
-
-						throw new Error("Subagent did not call attempt_completion.")
+						throw new Error(
+							"Helper did not provide an executable action or an explicit attempt_completion handoff after one reminder. Completed work is preserved; reconcile it in the parent before assigning more work.",
+						)
 					}
 
 					const decision = progress.finishTurn()
@@ -929,13 +918,39 @@ export class SubagentRunner {
 					this.checkBudget()
 					const toolName = call.name as DietCodeDefaultTool
 					const toolCallParams = toToolUseParams(call.input)
+					if (toolName === DietCodeDefaultTool.BASH && toolCallParams.command)
+						toolCallParams.command = normalizeShellCommand(toolCallParams.command)
+					const receiptId = call.id?.trim() || (call.isNativeToolCall ? call.call_id?.trim() : undefined)
+					const fingerprint = createHash("sha256")
+						.update(JSON.stringify([toolName, Object.entries(toolCallParams).sort(([a], [b]) => a.localeCompare(b))]))
+						.digest("hex")
+					const receipt = receiptId ? toolReceipts.get(receiptId) : undefined
+					if (receipt) {
+						const mismatch = receipt.fingerprint !== fingerprint
+						pushSubagentToolResultBlock(
+							toolResultBlocks,
+							call,
+							toolName,
+							mismatch
+								? formatResponse.toolError(
+										"This tool call ID already belongs to different arguments. No action was repeated. Use a new ID for a new action.",
+									)
+								: receipt.result,
+							mismatch || receipt.failed,
+						)
+						continue
+					}
+					if (toolReceipts.size >= 256 && toolName !== DietCodeDefaultTool.ATTEMPT)
+						throw new Error(
+							"Helper execution receipt capacity reached. Return a handoff with completed work instead of continuing the same assignment.",
+						)
 
 					if (toolName === DietCodeDefaultTool.ATTEMPT) {
 						canonicalizeAttemptCompletionResultParams(toolCallParams)
 						if (toolCallParams?.result) {
 							this.signalCriticalFindingsToSwarm(toolCallParams.result as string)
 						}
-						const completionResult = typeof toolCallParams?.result === "string" ? toolCallParams.result.trim() : ""
+						let completionResult = typeof toolCallParams?.result === "string" ? toolCallParams.result.trim() : ""
 						if (!completionResult) {
 							const missingResultError = formatResponse.missingToolParameterError("result")
 							pushSubagentToolResultBlock(toolResultBlocks, call, toolName, missingResultError)
@@ -967,11 +982,14 @@ export class SubagentRunner {
 						}
 						this.throwIfAborted()
 
+						const handoff = this.executionHandoff(completionResult)
+						completionResult = handoff.result ?? completionResult
 						stats.toolCalls += 1
 						const durationMs = Date.now() - startTime
 						onProgress({ stats: { ...stats } })
 						onProgress({
 							status: "completed",
+							pendingCommandIds: handoff.pendingCommandIds,
 							result: completionResult,
 							stats: { ...stats },
 							filesModified: Array.from(filesModified),
@@ -984,6 +1002,7 @@ export class SubagentRunner {
 						)
 						return {
 							status: "completed",
+							pendingCommandIds: handoff.pendingCommandIds,
 							result: completionResult,
 							stats,
 							filesModified: Array.from(filesModified),
@@ -1014,8 +1033,7 @@ export class SubagentRunner {
 					const latestToolCall = formatToolCallPreview(toolName, toolCallParams)
 					onProgress({ latestToolCall, activity: { phase: "tool" } })
 
-					const handler =
-						subagentConfig.coordinator?.getHandler(toolName) || this.baseConfig.coordinator?.getHandler(toolName)
+					const handler = subagentConfig.coordinator?.getHandler(toolName)
 					let toolResult: unknown
 					let executionResult: unknown
 					let operationReturned = false
@@ -1110,6 +1128,8 @@ export class SubagentRunner {
 								}
 							}
 						} catch (error) {
+							if (error instanceof PartialPatchError)
+								for (const committedPath of error.committedPaths) filesModified.add(committedPath)
 							if (operationReturned) {
 								Logger.warn("[SubagentRunner] Observation failed after tool returned; result retained:", error)
 							} else {
@@ -1119,6 +1139,12 @@ export class SubagentRunner {
 					}
 
 					if (operationReturned && !isToolFailure(executionResult)) {
+						if (toolName === DietCodeDefaultTool.APPLY_PATCH && typeof toolCallParams.input === "string") {
+							for (const match of toolCallParams.input.matchAll(
+								/^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+)$/gm,
+							))
+								filesModified.add(match[1].trim())
+						}
 						// Track file side-effects
 						if (toolCallParams?.path && typeof toolCallParams.path === "string") {
 							if (
@@ -1152,6 +1178,16 @@ export class SubagentRunner {
 					})
 
 					const serializedToolResult = serializeToolResult(toolResult)
+					if (receiptId)
+						toolReceipts.set(receiptId, {
+							fingerprint,
+							result:
+								serializedToolResult.length > 32_000
+									? serializedToolResult.slice(0, 32_000) +
+										"\n[Retained result truncated. Inspect the existing execution or current files; the action was not repeated.]"
+									: serializedToolResult,
+							failed: isToolFailure(toolResult),
+						})
 					let toolDescription = `[${toolName}]`
 					try {
 						toolDescription = handler?.getDescription(toolCallBlock) || toolDescription
@@ -1199,12 +1235,13 @@ export class SubagentRunner {
 			}
 		} catch (error) {
 			const durationMs = Date.now() - startTime
+			const handoff = this.executionHandoff(partialResult())
 			if (this.shouldAbort()) {
 				const cancelledError = "Subagent run cancelled."
 				onProgress({
 					status: "cancelled",
 					error: cancelledError,
-					result: partialResult(),
+					...handoff,
 					stats: { ...stats },
 					filesModified: Array.from(filesModified),
 					filesViewed: Array.from(filesViewed),
@@ -1213,7 +1250,7 @@ export class SubagentRunner {
 				return {
 					status: "cancelled",
 					error: cancelledError,
-					result: partialResult(),
+					...handoff,
 					isPartial: completedResults.length > 0,
 					stats,
 					filesModified: Array.from(filesModified),
@@ -1228,7 +1265,7 @@ export class SubagentRunner {
 			onProgress({
 				status: "failed",
 				error: errorText,
-				result: partialResult(),
+				...handoff,
 				stats: { ...stats },
 				filesModified: Array.from(filesModified),
 				filesViewed: Array.from(filesViewed),
@@ -1237,7 +1274,7 @@ export class SubagentRunner {
 			return {
 				status: "failed",
 				error: errorText,
-				result: partialResult(),
+				...handoff,
 				isPartial: completedResults.length > 0,
 				stats,
 				filesModified: Array.from(filesModified),
@@ -1265,11 +1302,18 @@ export class SubagentRunner {
 		}
 
 		const subagentTaskState = new TaskState()
+		subagentTaskState.recovery = this.baseConfig.taskState.recovery
 		subagentTaskState.recursionDepth = this.recursionDepth
 
 		return {
 			...this.baseConfig,
 			api: this.apiHandler,
+			services: {
+				...this.baseConfig.services,
+				diffViewProvider: new FileEditProvider(this.baseConfig.cwd, subagentTaskState.abortSignal, () =>
+					subagentTaskState.recovery?.assertCanExecute(this.executionOwner),
+				),
+			},
 			coordinator,
 			taskState: subagentTaskState,
 			messageState: this.baseConfig.messageState, // Use parent's message state handler but they will have their own stream
@@ -1280,6 +1324,41 @@ export class SubagentRunner {
 			callbacks: {
 				...baseCallbacks,
 				say: async () => undefined,
+				removeLastPartialMessageIfExistsWithType: async () => {},
+				ask: async (_type, _text, partial) => {
+					if (partial) return { response: "yesButtonClicked" }
+					throw new Error(
+						"This helper action needs authority outside its delegated tools or workspace. Return the exact blocker to the parent; do not open competing approval prompts.",
+					)
+				},
+				shouldAutoApproveToolWithPath: async (toolName, target) => {
+					const resolvedTarget = resolveWorkspacePath(
+						this.baseConfig,
+						target ?? ".",
+						"SubagentRunner.delegatedApproval",
+					)
+					const absoluteTarget = typeof resolvedTarget === "string" ? resolvedTarget : resolvedTarget.absolutePath
+					const relative = path.relative(this.baseConfig.cwd, absoluteTarget)
+					if (
+						this.allowedTools.includes(toolName) &&
+						relative !== ".." &&
+						!relative.startsWith(`..${path.sep}`) &&
+						!path.isAbsolute(relative)
+					) {
+						const [root, resolved] = await Promise.all([
+							canonicalFilePath(this.baseConfig.cwd),
+							canonicalFilePath(absoluteTarget),
+						])
+						const actualRelative = path.relative(root, resolved)
+						if (
+							actualRelative !== ".." &&
+							!actualRelative.startsWith(`..${path.sep}`) &&
+							!path.isAbsolute(actualRelative)
+						)
+							return true
+					}
+					return baseCallbacks.shouldAutoApproveToolWithPath(toolName, target)
+				},
 				sayAndCreateMissingParamError: async (_toolName, paramName) =>
 					formatResponse.toolError(formatResponse.missingToolParameterError(paramName)),
 				executeCommandTool: async (command, timeoutSeconds, options) => {
@@ -1301,6 +1380,24 @@ export class SubagentRunner {
 					)
 				},
 			},
+		}
+	}
+
+	private executionHandoff(result: string | undefined): Pick<SubagentRunResult, "result" | "pendingCommandIds"> {
+		try {
+			const state = this.baseConfig.callbacks.getExecutionState?.()
+			if (!state || !("commands" in state)) return { result }
+			const pending = state.commands.active.filter((command) => command.owner === this.executionOwner)
+			if (!pending.length) return { result }
+			return {
+				pendingCommandIds: pending.map((command) => command.execution_id),
+				result: `${result ? `${result}\n\n` : ""}Runtime handoff — commands still pending:\n${pending.map((command) => `- ${command.execution_id}: ${command.status}. Inspect with read_command_output; do not relaunch.`).join("\n")}`,
+			}
+		} catch (error) {
+			Logger.warn("Helper execution inventory unavailable at handoff:", error)
+			return {
+				result: `${result ? `${result}\n\n` : ""}Runtime handoff: command status could not be inspected. Verify existing executions before repeating work.`,
+			}
 		}
 	}
 

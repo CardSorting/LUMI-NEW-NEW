@@ -78,6 +78,16 @@ Parent and helper requests receive fresh execution state at provider dispatch, i
 
 Identical assignments are merged within a batch, and duplicate active assignments return the existing execution ID. Batches share the same three helper slots; queued work remains visible and is removed on cancellation. A timeout stops waiting, but does not prove that the underlying work stopped or release a slot still occupied by unresolved work. Runtime permissions and helper tool allowlists continue to apply.
 
+Re-delivery of the same batch call ID joins the existing batch or returns its retained result, without another helper run or another status card. Reusing that ID with different arguments is rejected. Inside a helper, replayed native tool call IDs return the retained tool result rather than repeating a mutation. A new action requires a new call ID; receipts are bounded and scoped to the live task or helper run.
+
+Each helper has its own file editor. Its delegated tools can edit files within the task workspace without opening competing approval prompts; ignore rules, tool allowlists, hooks, and policy checks still apply. Additional authority is reported to the parent as a blocker. Saves compare the current file with the version that the helper read. Conflicts are reported for reconciliation before overwriting another helper's changes. Preparing a headless edit leaves the file untouched, and cancellation never restores stale contents over another writer's work.
+
+Cancellation removes a helper's queued file writes and is checked again before committing a file. If a write has already committed, its result is retained for the parent to reconcile. Cancelling a move after its destination is saved preserves the source and reports the saved destination. Optional editor display, diagnostics and file tracking cannot hold a committed result indefinitely. If the final contents cannot be observed, the result directs the agent to read the file before editing it again.
+
+Helpers finish with an explicit `attempt_completion` handoff: changed paths or findings, verification results, and remaining blockers. Runtime handoffs include any commands still active under the helper's ownership. A response without tools gets one reminder to act or hand off, then returns partial work instead of cycling through repeated prompts. The parent should inspect the handoff and existing command IDs before repeating work.
+
+Every queued assignment has an execution ID. Batch results keep these IDs outside result excerpts so long responses cannot hide them. If a batch stops waiting while a helper is still finishing an edit, its reservations remain held until that operation settles. `get_execution_state` with the helper's ID returns its latest receipt and structured `helper_handoff`, including committed paths and pending command IDs even when the final result arrives after cancellation. Receipt IDs and polling alone do not count as new task progress.
+
 <Note>
   Subagent commands run without interactive terminal input and use the task's existing command permissions.
   Subagents also benefit from command pipelines and filters to narrow output quickly before reading files, for example `rg ... | sort | uniq`.

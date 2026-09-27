@@ -1,12 +1,13 @@
 import { readFile } from "node:fs/promises"
 import type { ToolUse } from "@core/assistant-message"
+import { formatResponse } from "@core/prompts/responses"
 import { resolveWorkspacePath } from "@core/workspace"
 import { processFilesIntoText } from "@integrations/misc/extract-text"
 import type { DietCodeSayTool } from "@shared/ExtensionMessage"
 import { fileExistsAtPath } from "@utils/fs"
 import { getReadablePath, isLocatedInWorkspace } from "@utils/path"
-import { telemetryService } from "@/services/telemetry"
 import { BASH_WRAPPERS, DiffError, PATCH_MARKERS, type Patch, PatchActionType, type PatchChunk } from "@/shared/Patch"
+import { Logger } from "@/shared/services/Logger"
 import { preserveEscaping } from "@/shared/string"
 import { DietCodeDefaultTool } from "@/shared/tools"
 import { showNotificationForApproval } from "../../utils"
@@ -14,10 +15,12 @@ import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
-import { type FileOpsResult, FileProviderOperations } from "../utils/FileProviderOperations"
+import { type FileOpsResult, FileProviderOperations, PartialPatchError } from "../utils/FileProviderOperations"
 import { PatchParser } from "../utils/PatchParser"
 import { PathResolver } from "../utils/PathResolver"
+import { ToolDisplay } from "../utils/ToolDisplay"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
+import { reportToolUsage } from "../utils/toolTelemetry"
 
 interface FileChange {
 	type: PatchActionType
@@ -49,9 +52,10 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 	private initializeHelpers(config: TaskConfig): void {
 		if (!this.pathResolver || this.config !== config) {
 			this.pathResolver = new PathResolver(config, this.validator)
-		}
-		if (!this.providerOps) {
-			this.providerOps = new FileProviderOperations(config.services.diffViewProvider)
+			this.providerOps = new FileProviderOperations(config.services.diffViewProvider, config.taskState.abortSignal, () =>
+				config.taskState.recovery?.assertCanExecute(config.executionOwner),
+			)
+			this.config = config
 		}
 	}
 
@@ -205,6 +209,8 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
 		const provider = config.services.diffViewProvider
+		const committedPaths: string[] = []
+		const display = new ToolDisplay(config, "Patch")
 		const rawInput = block.params.input
 
 		if (!rawInput) {
@@ -260,7 +266,7 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 				const { PreToolUseHookCancellationError } = await import("@core/hooks/PreToolUseHookCancellationError")
 				if (error instanceof PreToolUseHookCancellationError) {
 					await provider.reset()
-					return "The user denied this patch operation."
+					return formatResponse.toolDenied()
 				}
 				throw error
 			}
@@ -310,26 +316,28 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 				await this.prepareFileChange(change, operationPath)
 
 				// Get approval
-				const approved = await this.handleApproval(config, block, message, rawInput)
+				const approved = await this.handleApproval(config, block, message, rawInput, display)
 				if (!approved) {
 					this.config = undefined
 					config.taskState.didRejectTool = true
+					if (committedPaths.length) throw new Error(formatResponse.toolDenied())
 					await provider.revertChanges()
-					await provider.reset()
-					return "The user denied this patch operation."
+					return formatResponse.toolDenied()
 				}
 
 				// Save the changes for this file after approval
 				config.taskState.abortSignal.throwIfAborted()
 				const fileResult = await this.saveFileChange(change, operationPath)
 				if (fileResult) {
+					committedPaths.push(operationPath)
 					config.taskState.didEditFile = true
 					config.taskState.workspaceRevision++
 					// For move operations, we need to handle both old and new paths
 					if (change.type === PatchActionType.UPDATE && change.movePath) {
 						applyResults[change.movePath] = fileResult
 						// Delete the old file after saving the new one
-						await this.providerOps?.deleteFile(originalPath)
+						await this.providerOps?.deleteFile(originalPath, true, change.oldContent)
+						committedPaths.push(originalPath)
 						applyResults[originalPath] = { deleted: true }
 					} else {
 						applyResults[originalPath] = fileResult
@@ -347,8 +355,10 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 				const change = commit.changes[changedFilePath]
 				// For move operations, track the new path instead
 				const pathToTrack = change.type === PatchActionType.UPDATE && change.movePath ? change.movePath : changedFilePath
-				config.services.fileContextTracker.markFileAsEditedByDietCode(pathToTrack)
-				await config.services.fileContextTracker.trackFileContext(pathToTrack, "dietcode_edited")
+				await display.observe(async () => {
+					config.services.fileContextTracker.markFileAsEditedByDietCode(pathToTrack)
+					await config.services.fileContextTracker.trackFileContext(pathToTrack, "dietcode_edited")
+				})
 			}
 
 			this.config = undefined
@@ -364,19 +374,21 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 					if (result.userEdits) {
 						// User made edits during approval
 						responseLines.push(`\nThe user made edits to the file:\n${result.userEdits}\n`)
-						await config.callbacks.say(
-							"user_feedback_diff",
-							JSON.stringify({
-								tool: "editedExistingFile",
-								path,
-								diff: result.userEdits,
-							}),
+						await display.observe(() =>
+							config.callbacks.say(
+								"user_feedback_diff",
+								JSON.stringify({
+									tool: "editedExistingFile",
+									path,
+									diff: result.userEdits,
+								}),
+							),
 						)
 					}
 					if (result.autoFormattingEdits) {
 						responseLines.push(`\nAuto-formatting was applied to ${path}:\n${result.autoFormattingEdits}\n`)
 					}
-					if (result.finalContent) {
+					if (result.finalContent !== undefined) {
 						responseLines.push(`\n<final_file_content path="${path}">`)
 						responseLines.push(result.finalContent)
 						responseLines.push(`</final_file_content>`)
@@ -393,10 +405,20 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 
 			return responseLines.join("\n")
 		} catch (error) {
-			await provider.revertChanges()
+			try {
+				await provider.revertChanges()
+			} catch (cleanupError) {
+				Logger.warn("Patch cleanup failed; original outcome retained:", cleanupError)
+			}
+			if (committedPaths.length) throw new PartialPatchError(committedPaths, error)
 			throw error
 		} finally {
-			await provider.reset()
+			this.config = undefined
+			try {
+				await provider.reset()
+			} catch (cleanupError) {
+				Logger.warn("Patch editor reset failed; committed files and original outcome retained:", cleanupError)
+			}
 		}
 	}
 
@@ -621,23 +643,23 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 
 		switch (change.type) {
 			case PatchActionType.DELETE:
-				await ops.deleteFile(path, false)
+				await ops.deleteFile(path, false, change.oldContent)
 				break
 			case PatchActionType.ADD:
-				if (!change.newContent) {
+				if (change.newContent === undefined) {
 					throw new DiffError(`Cannot create ${path} with no content`)
 				}
 				await ops.createFile(path, change.newContent, false)
 				break
 			case PatchActionType.UPDATE:
-				if (!change.newContent) {
+				if (change.newContent === undefined) {
 					throw new DiffError(`UPDATE change for ${path} has no new content`)
 				}
 				if (change.movePath) {
 					// For move operations, prepare the new file (the old file will be handled separately)
 					await ops.createFile(change.movePath, change.newContent, false)
 				} else {
-					await ops.modifyFile(path, change.newContent, false)
+					await ops.modifyFile(path, change.newContent, false, change.oldContent)
 				}
 				break
 		}
@@ -652,15 +674,15 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 		switch (change.type) {
 			case PatchActionType.DELETE:
 				// For delete operations, actually delete the file now (after approval)
-				await ops.deleteFile(path)
+				await this.config!.services.diffViewProvider.deleteFile(path)
 				return { deleted: true }
 			case PatchActionType.ADD:
-				if (!change.newContent) {
+				if (change.newContent === undefined) {
 					throw new DiffError(`Cannot create ${path} with no content`)
 				}
 				return await ops.saveChanges()
 			case PatchActionType.UPDATE:
-				if (!change.newContent) {
+				if (change.newContent === undefined) {
 					throw new DiffError(`UPDATE change for ${path} has no new content`)
 				}
 				// For move operations, we're saving the new file (the old file deletion is handled in the calling code)
@@ -707,6 +729,7 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 		block: ToolUse,
 		message: DietCodeSayTool,
 		rawInput: string,
+		display: ToolDisplay,
 	): Promise<boolean> {
 		const patch = { ...message, content: rawInput }
 		const completeMessage = JSON.stringify(patch)
@@ -719,44 +742,32 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 		const modelId = config.api.getModel().id
 
 		if (shouldAutoApprove) {
-			await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "tool")
-			await config.callbacks.say("tool", completeMessage, undefined, undefined, false)
-			telemetryService.captureToolUsage(
-				config.ulid,
-				this.name,
-				modelId,
-				providerId,
-				true,
-				true,
-				undefined,
-				block.isNativeToolCall,
-			)
+			await display.observe(async () => {
+				await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "tool")
+				await config.callbacks.say("tool", completeMessage, undefined, undefined, false)
+			})
+			reportToolUsage(config.ulid, this.name, modelId, providerId, true, true, undefined, block.isNativeToolCall)
 			return true
 		}
 
-		showNotificationForApproval(`DietCode wants to edit '${message.path}'`, config.autoApprovalSettings.enableNotifications)
-
-		await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
+		await display.observe(async () => {
+			showNotificationForApproval(
+				`DietCode wants to edit '${message.path}'`,
+				config.autoApprovalSettings.enableNotifications,
+			)
+			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
+		})
 		const { response, text, images, files } = await config.callbacks.ask("tool", completeMessage, false)
 
 		if (text || images?.length || files?.length) {
 			const fileContent = files?.length ? await processFilesIntoText(files) : ""
 			ToolResultUtils.pushAdditionalToolFeedback(config.taskState.userMessageContent, text, images, fileContent)
-			await config.callbacks.say("user_feedback", text, images, files)
+			await display.observe(() => config.callbacks.say("user_feedback", text, images, files))
 		}
 
 		const approved = response === "yesButtonClicked"
 		config.taskState.didRejectTool = !approved
-		telemetryService.captureToolUsage(
-			config.ulid,
-			this.name,
-			modelId,
-			providerId,
-			false,
-			approved,
-			undefined,
-			block.isNativeToolCall,
-		)
+		reportToolUsage(config.ulid, this.name, modelId, providerId, false, approved, undefined, block.isNativeToolCall)
 
 		return approved
 	}

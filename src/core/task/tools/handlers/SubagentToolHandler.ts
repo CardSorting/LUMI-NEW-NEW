@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import {
@@ -10,7 +10,9 @@ import {
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
+import { ActionAlreadyActiveError } from "../../ActionExecutionRegistry"
 import { executor } from "../../ActionExecutor"
+import { persistedToolResult, recoveryResult } from "../../ExecutionRecovery"
 import { AgentConfigLoader } from "../subagent/AgentConfigLoader"
 import { observeHelperOperation } from "../subagent/observeHelperOperation"
 import { SUBAGENT_DEFAULT_ALLOWED_TOOLS, SubagentBuilder } from "../subagent/SubagentBuilder"
@@ -57,6 +59,10 @@ function excerpt(text: string | undefined, maxChars = 1200): string {
 
 export class UseSubagentsToolHandler implements IFullyManagedTool {
 	readonly name = DietCodeDefaultTool.USE_SUBAGENTS
+	private readonly batches = new WeakMap<
+		TaskConfig["taskState"],
+		Map<string, { fingerprint: string; result: Promise<ToolResponse> }>
+	>()
 
 	getDescription(_block: ToolUse): string {
 		const configuredSubagentName = resolveConfiguredSubagentName(_block.name)
@@ -95,6 +101,58 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
+		let id = block.call_id || block.tool_use_id
+		if (!id) {
+			if (!config.taskState.recovery) return this.executeBatch(config, block)
+			id = randomUUID()
+			block = { ...block, call_id: id }
+		}
+		let receipts = this.batches.get(config.taskState)
+		if (!receipts) {
+			receipts = new Map()
+			this.batches.set(config.taskState, receipts)
+		}
+		const fingerprint = createHash("sha256")
+			.update(JSON.stringify([block.name, Object.entries(block.params).sort(([a], [b]) => a.localeCompare(b))]))
+			.digest("hex")
+		const existing = receipts.get(id)
+		if (existing) {
+			if (existing.fingerprint !== fingerprint)
+				return formatResponse.toolError(
+					"This helper batch ID already belongs to another assignment. No additional helpers were started. Use a new call ID for a new assignment.",
+				)
+			return existing.result
+		}
+		const recovery = config.taskState.recovery
+		const saved = recovery?.get("batch", id)
+		if (saved)
+			return saved.fingerprint === fingerprint
+				? recoveryResult(saved)
+				: formatResponse.toolError(
+						"This helper batch ID belongs to different persisted arguments. No helpers were started.",
+					)
+		recovery?.assertCanExecute(config.executionOwner)
+		recovery?.put(id, { kind: "batch", fingerprint })
+		// Keep settled receipts for this task; active batches are never evicted or redispatched.
+		if (receipts.size >= 128)
+			return formatResponse.toolError(
+				"Helper batch receipt capacity reached. Reconcile existing results and continue in the parent.",
+			)
+		const entry = {
+			fingerprint,
+			result: Promise.resolve()
+				.then(() => this.executeBatch(config, block))
+				.then((result) => {
+					const saved = recovery?.get("batch", id)
+					if (saved) recovery?.observe(id, { ...saved, result: persistedToolResult(result) })
+					return result
+				}),
+		}
+		receipts.set(id, entry)
+		return entry.result
+	}
+
+	private async executeBatch(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
 		const subagentsEnabled = config.services.stateManager.getGlobalSettingsKey("subagentsEnabled")
 		if (!subagentsEnabled) {
 			return formatResponse.toolError("Subagents are disabled. Enable them in Settings > Features to use this tool.")
@@ -204,7 +262,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		config.taskState.consecutiveMistakeCount = 0
 
 		const entries: SubagentStatusItem[] = prompts.map((prompt, index) => ({
-			id: Math.random().toString(36).substring(2, 9),
+			id: randomUUID(),
 			name: configuredSubagentName || `Subagent ${index + 1}`,
 			index: index + 1,
 			prompt,
@@ -302,6 +360,15 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		let lastStatusWriteAt = Number.NEGATIVE_INFINITY
 		let resumeStatusDelay: (() => void) | undefined
 		const queueStatusUpdate = (status: DietCodeSaySubagentStatus["status"], partial: boolean): Promise<void> => {
+			const batchId = block.call_id || block.tool_use_id
+			const recovery = config.taskState.recovery
+			const saved = batchId ? recovery?.get("batch", batchId) : undefined
+			if (saved && batchId)
+				recovery?.observe(batchId, {
+					...saved,
+					status: JSON.stringify({ batchId, status, items: entries }),
+					messageTs: statusMessageTs,
+				})
 			// Bound progress I/O even when the UI is fast. Terminal updates bypass the delay.
 			pendingStatus = { status, partial }
 			if (!partial) resumeStatusDelay?.()
@@ -409,9 +476,10 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			return merged
 		}
 		const closedStreams = new Set<string>()
+		const runningHelpers = new Set<number>()
 		const closeChildStream = (index: number) => {
 			const id = childStreamIds[index]
-			if (!id || closedStreams.has(id)) return
+			if (!id || closedStreams.has(id) || runningHelpers.has(index)) return
 			const current = entries[index]
 			if (current.status !== "completed" && current.status !== "failed" && current.status !== "cancelled") return
 			closedStreams.add(id)
@@ -455,93 +523,107 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		}
 
 		const runSubagent = async (index: number) => {
-			const current = entries[index]
-			current.status = "running"
-			current.activity = { phase: "preparing" }
-			void queueStatusUpdate("running", true)
-			if (parentStreamId) {
-				await observeHelperOperation("Stream registration", async () => {
-					const child = await orchestrator.spawnChildStream(parentStreamId!, `subagent: ${prompts[index].slice(0, 80)}`)
-					childStreamIds[index] = child.id
-					runners[index].setStreamId(child.id)
-					closeChildStream(index)
-				})
-			}
-			if (stopReason || config.taskState.abort) {
-				throw new Error(stopReason || "Helper batch cancelled before execution.")
-			}
-			const result = await runners[index].run(
-				prompts[index],
-				(update) => {
-					if (finalized) return
-					if (update.stats) recordUsage(index, update.stats)
-
-					if (update.status) current.status = update.status
-					if (update.result !== undefined) {
-						current.result = update.result
-					}
-					if (update.error !== undefined) {
-						current.error = update.error
-					}
-					if (update.latestToolCall !== undefined) {
-						current.latestToolCall = update.latestToolCall
-					}
-					if (update.activity !== undefined) {
-						current.activity = update.activity
-					}
-					if (update.activeSignals !== undefined) {
-						current.criticalSignals = update.activeSignals
-					}
-					if (update.filesModified !== undefined) {
-						current.filesModified = update.filesModified
-					}
-					if (update.filesViewed !== undefined) {
-						current.filesViewed = update.filesViewed
-					}
-					if (update.durationMs !== undefined) {
-						current.durationMs = update.durationMs
-					}
-					if (update.stats) {
-						current.toolCalls = update.stats.toolCalls || 0
-						current.inputTokens = update.stats.inputTokens || 0
-						current.outputTokens = update.stats.outputTokens || 0
-						current.contextTokens = update.stats.contextTokens || 0
-						current.contextWindow = update.stats.contextWindow || 0
-						current.contextUsagePercentage = update.stats.contextUsagePercentage || 0
-					}
-					void queueStatusUpdate("running", true)
-				},
-				childStreamIds[index] || undefined,
-			)
-			if (!finalized) {
-				recordUsage(index, result.stats)
-				results[index] = { status: "fulfilled", value: result }
-				current.status = result.status
-				current.result = result.result ?? current.result
-				current.error = result.error
-				current.filesModified = result.filesModified ?? current.filesModified
-				current.filesViewed = result.filesViewed ?? current.filesViewed
-				current.durationMs = result.durationMs ?? current.durationMs
-				const stats = latestStats[index] ?? result.stats
-				current.toolCalls = stats.toolCalls || 0
-				current.inputTokens = stats.inputTokens || 0
-				current.outputTokens = stats.outputTokens || 0
-				current.totalCost = stats.totalCost || 0
-				current.contextTokens = stats.contextTokens || 0
-				current.contextWindow = stats.contextWindow || 0
-				current.contextUsagePercentage = stats.contextUsagePercentage || 0
-				current.activity = undefined
-				// Release this finished helper's reservations without waiting for slower siblings.
-				closeChildStream(index)
+			runningHelpers.add(index)
+			try {
+				const current = entries[index]
+				current.status = "running"
+				current.activity = { phase: "preparing" }
 				void queueStatusUpdate("running", true)
+				if (parentStreamId) {
+					await observeHelperOperation("Stream registration", async () => {
+						const child = await orchestrator.spawnChildStream(
+							parentStreamId!,
+							`subagent: ${prompts[index].slice(0, 80)}`,
+						)
+						childStreamIds[index] = child.id
+						runners[index].setStreamId(child.id)
+						closeChildStream(index)
+					})
+				}
+				if (stopReason || config.taskState.abort) {
+					throw new Error(stopReason || "Helper batch cancelled before execution.")
+				}
+				const result = await runners[index].run(
+					prompts[index],
+					(update) => {
+						executor.executions.recordHelperEvidence(config.ulid, current.executionId, update)
+						if (finalized) return
+						if (update.stats) recordUsage(index, update.stats)
+
+						if (update.status) current.status = update.status
+						if (update.result !== undefined) {
+							current.result = update.result
+						}
+						if (update.error !== undefined) {
+							current.error = update.error
+						}
+						if (update.latestToolCall !== undefined) {
+							current.latestToolCall = update.latestToolCall
+						}
+						if (update.activity !== undefined) {
+							current.activity = update.activity
+						}
+						if (update.activeSignals !== undefined) {
+							current.criticalSignals = update.activeSignals
+						}
+						if (update.filesModified !== undefined) {
+							current.filesModified = update.filesModified
+						}
+						if (update.filesViewed !== undefined) {
+							current.filesViewed = update.filesViewed
+						}
+						if (update.pendingCommandIds !== undefined) current.pendingCommandIds = update.pendingCommandIds
+						if (update.durationMs !== undefined) {
+							current.durationMs = update.durationMs
+						}
+						if (update.stats) {
+							current.toolCalls = update.stats.toolCalls || 0
+							current.inputTokens = update.stats.inputTokens || 0
+							current.outputTokens = update.stats.outputTokens || 0
+							current.contextTokens = update.stats.contextTokens || 0
+							current.contextWindow = update.stats.contextWindow || 0
+							current.contextUsagePercentage = update.stats.contextUsagePercentage || 0
+						}
+						void queueStatusUpdate("running", true)
+					},
+					childStreamIds[index] || undefined,
+				)
+				if (!finalized) {
+					recordUsage(index, result.stats)
+					results[index] = { status: "fulfilled", value: result }
+					current.status = result.status
+					current.result = result.result ?? current.result
+					current.error = result.error
+					current.filesModified = result.filesModified ?? current.filesModified
+					current.filesViewed = result.filesViewed ?? current.filesViewed
+					current.pendingCommandIds = result.pendingCommandIds ?? current.pendingCommandIds
+					current.durationMs = result.durationMs ?? current.durationMs
+					const stats = latestStats[index] ?? result.stats
+					current.toolCalls = stats.toolCalls || 0
+					current.inputTokens = stats.inputTokens || 0
+					current.outputTokens = stats.outputTokens || 0
+					current.totalCost = stats.totalCost || 0
+					current.contextTokens = stats.contextTokens || 0
+					current.contextWindow = stats.contextWindow || 0
+					current.contextUsagePercentage = stats.contextUsagePercentage || 0
+					current.activity = undefined
+					// Release this finished helper's reservations without waiting for slower siblings.
+					closeChildStream(index)
+					void queueStatusUpdate("running", true)
+				}
+				// The execution receipt still receives a late outcome after the batch stops waiting.
+				return result
+			} finally {
+				// A caller deadline does not release file reservations held by work still settling.
+				runningHelpers.delete(index)
+				closeChildStream(index)
 			}
-			// The execution receipt still receives a late outcome after the batch stops waiting.
-			return result
 		}
 		const failSubagent = (index: number, error: unknown) => {
 			if (finalized || (stopReason && entries[index].status === "completed")) return
 			if (!stopReason) Logger.error(`[SubagentToolHandler] Subagent ${index} crashed:`, error)
 			const current = entries[index]
+			if (error instanceof ActionAlreadyActiveError) current.executionId = error.execution.execution_id
 			current.status = stopReason ? "cancelled" : "failed"
 			current.activity = undefined
 			current.error =
@@ -564,6 +646,9 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		const workers = prompts.map((prompt, index) =>
 			executor
 				.execute(config.ulid, () => runSubagent(index), {
+					onReserved: (id) => {
+						entries[index].executionId = id
+					},
 					concurrencyGroup: `helpers:${currentDepth}`,
 					queueTimeoutMs: SUBAGENT_EXECUTION_TIMEOUT_MS,
 					signal: AbortSignal.any([config.taskState.abortSignal, batchAbort.signal]),
@@ -635,6 +720,24 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			usageCost += stats?.totalCost || 0
 		}
 
+		// Keep reconciliation references outside excerpts: long model prose must never hide live work.
+		try {
+			const inventory = config.callbacks.getExecutionState?.()
+			if (inventory && "commands" in inventory)
+				entries.forEach((entry, index) => {
+					entry.pendingCommandIds = [
+						...new Set([
+							...(entry.pendingCommandIds ?? []),
+							...inventory.commands.active
+								.filter((command) => command.owner === runners[index].getExecutionOwner())
+								.map((command) => command.execution_id),
+						]),
+					]
+				})
+		} catch (error) {
+			Logger.warn("[SubagentToolHandler] Command handoff inventory unavailable:", error)
+		}
+
 		const failures = entries.filter((entry) => entry.status === "failed").length
 		const cancelled = entries.filter((entry) => entry.status === "cancelled").length
 		const finalStatus = queueStatusUpdate(cancelled > 0 ? "cancelled" : failures > 0 ? "failed" : "completed", false)
@@ -655,6 +758,20 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		)
 
 		const successCount = entries.filter((entry) => entry.status === "completed").length
+		const reconciliation = entries.flatMap((entry) => {
+			const execution = entry.executionId ? executor.executions.get(config.ulid, entry.executionId) : undefined
+			const settling = execution && ["queued", "running", "retrying", "awaiting_completion"].includes(execution.status)
+			return [
+				...(entry.executionId
+					? [
+							`- Helper ${entry.index}: execution_id ${entry.executionId}. ${settling ? "Still settling; do not repeat or overlap this assignment." : "Retained execution receipt."} Use get_execution_state with this ID for its latest status and structured helper_handoff.`,
+						]
+					: []),
+				...(entry.pendingCommandIds ?? []).map(
+					(id) => `- Pending command: ${id}. Use read_command_output; do not relaunch.`,
+				),
+			]
+		})
 
 		const blackboard = config.taskState.swarmBlackboard || []
 		const summary = [
@@ -665,6 +782,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 						"Use completed results and partial work below. Continue independent authorized work; resolve a reported blocker before retrying the same assignment.",
 					]
 				: []),
+			...(reconciliation.length ? ["", "### RECONCILIATION", ...reconciliation] : []),
 			"",
 			"### AGENT DETAILS",
 			...entries.map((entry) => {

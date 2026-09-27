@@ -5,6 +5,7 @@ import { getCwd } from "@utils/path"
 import * as diff from "diff"
 import * as fs from "fs/promises"
 import * as iconv from "iconv-lite"
+import pTimeout from "p-timeout"
 import { HostProvider } from "@/hosts/host-provider"
 import { diagnosticsToProblemsString, getNewDiagnostics } from "@/integrations/diagnostics"
 import { DiagnosticSeverity, FileDiagnostics } from "@/shared/proto/index.dietcode"
@@ -12,6 +13,13 @@ import { Logger } from "@/shared/services/Logger"
 import { detectEncoding } from "../misc/extract-text"
 import { sanitizeNotebookForLLM } from "../misc/notebook-utils"
 import { openFile } from "../misc/open-file"
+
+export interface FileSaveResult {
+	newProblemsMessage: string | undefined
+	userEdits: string | undefined
+	autoFormattingEdits: string | undefined
+	finalContent: string | undefined
+}
 
 export abstract class DiffViewProvider {
 	editType?: "create" | "modify" | "delete"
@@ -25,14 +33,20 @@ export abstract class DiffViewProvider {
 	protected fileEncoding = "utf8"
 	private streamedLines: string[] = []
 	private newContent?: string
+	private saved = false
+	private createdFile = false
+	private saveInFlight?: Promise<FileSaveResult>
 
 	public async open(relPath: string, options?: { displayPath?: string }): Promise<void> {
+		await this.waitForSave()
 		this.isEditing = true
+		this.createdFile = false
+		this.saved = false
 		const cwd = await getCwd()
 		const absolutePathResolved = workspaceResolver.resolveWorkspacePath(cwd, relPath, "DiffViewProvider.open.absolutePath")
 		this.absolutePath = typeof absolutePathResolved === "string" ? absolutePathResolved : absolutePathResolved.absolutePath
 		this.relPath = options?.displayPath ?? relPath
-		const fileExists = this.editType === "modify"
+		const fileExists = this.editType === "modify" || this.editType === "delete"
 
 		// if the file is already open, ensure it's not dirty before getting its contents
 		if (fileExists) {
@@ -51,7 +65,8 @@ export abstract class DiffViewProvider {
 		this.createdDirs = await createDirectoriesForFile(this.absolutePath)
 		// make sure the file exists before we open it
 		if (!fileExists) {
-			await fs.writeFile(this.absolutePath, "")
+			await fs.writeFile(this.absolutePath, "", { flag: "wx" })
+			this.createdFile = true
 		}
 		// get diagnostics before editing the file, we'll compare to diagnostics after editing to see if dietcode needs to fix anything
 		this.preDiagnostics = (await HostProvider.workspace.getDiagnostics({})).fileDiagnostics
@@ -140,7 +155,7 @@ export abstract class DiffViewProvider {
 	 * applying a fix, DietCode won't be notified, which is generally fine since the
 	 * initial fix is usually correct and it may just take time for linters to catch up.
 	 */
-	private async getNewDiagnosticProblems(): Promise<string> {
+	protected async getNewDiagnosticProblems(): Promise<string> {
 		// Get the diagnostics after changing the document.
 		const postDiagnostics = (await HostProvider.workspace.getDiagnostics({})).fileDiagnostics
 
@@ -332,46 +347,72 @@ export abstract class DiffViewProvider {
 		return this.isNotebookFile() ? sanitizeNotebookForLLM(this.originalContent, true) : this.originalContent
 	}
 
-	async saveChanges(): Promise<{
-		newProblemsMessage: string | undefined
-		userEdits: string | undefined
-		autoFormattingEdits: string | undefined
-		finalContent: string | undefined
-	}> {
+	saveChanges(): Promise<FileSaveResult> {
+		if (this.saveInFlight) return this.saveInFlight
+		const save = Promise.resolve().then(() => this.performSave())
+		this.saveInFlight = save
+		const release = () => {
+			if (this.saveInFlight === save) this.saveInFlight = undefined
+		}
+		void save.then(release, release)
+		return save
+	}
+
+	private async waitForSave(): Promise<void> {
+		// Cleanup must not reset mutable editor state beneath an OS write or a
+		// pending receipt. The save caller retains responsibility for its error.
+		await this.saveInFlight?.catch(() => {})
+	}
+
+	private async performSave(): Promise<FileSaveResult> {
 		// get the contents before save operation which may do auto-formatting
 		const preSaveContent = await this.getDocumentText()
 
-		if (!this.relPath || !this.absolutePath || !this.newContent || preSaveContent === undefined) {
-			return {
-				newProblemsMessage: undefined,
-				userEdits: undefined,
-				autoFormattingEdits: undefined,
-				finalContent: undefined,
+		if (!this.relPath || !this.absolutePath || this.newContent === undefined || preSaveContent === undefined) {
+			throw new Error("File was not saved: no complete edit is prepared.")
+		}
+		const relPath = this.relPath
+		const absolutePath = this.absolutePath
+		const newContent = this.newContent
+		const notebook = this.isNotebookFile()
+
+		if (!(await this.saveDocument())) throw new Error(`File was not saved: ${relPath}.`)
+		this.saved = true
+		// Each observer gets one bounded wait. Once one fails, skip its successors
+		// so a late UI response cannot start cleanup against a later edit.
+		let observationAvailable = true
+		const observe = async <T>(operation: () => Promise<T>): Promise<T | undefined> => {
+			if (!observationAvailable) return undefined
+			try {
+				return await pTimeout(Promise.resolve().then(operation), { milliseconds: 1000 })
+			} catch (error) {
+				observationAvailable = false
+				Logger.warn("File saved; editor observation unavailable:", error)
+				return undefined
 			}
 		}
-
-		await this.saveDocument()
-		// get text after save in case there is any auto-formatting done by the editor
-		const postSaveContent = (await this.getDocumentText()) || ""
-
-		await this.showFile(this.absolutePath)
-		await this.closeAllDiffViews()
-
-		const newProblems = await this.getNewDiagnosticProblems()
+		// Undefined means observation is unavailable. It must never be presented
+		// as an empty saved file or as a failed mutation that should be repeated.
+		const postSaveContent = await observe(() => this.getDocumentText())
+		await observe(() => this.showFile(absolutePath))
+		await observe(() => this.closeAllDiffViews())
+		const newProblems = (await observe(() => this.getNewDiagnosticProblems())) ?? ""
 		const newProblemsMessage =
-			newProblems.length > 0 ? `\n\nNew problems detected after saving the file:\n${newProblems}` : ""
+			(postSaveContent === undefined
+				? "\n\nThe file was saved, but its final contents are unavailable. Read the file before further edits; do not repeat this write."
+				: "") + (newProblems.length > 0 ? `\n\nNew problems detected after saving the file:\n${newProblems}` : "")
 
 		// If the edited content has different EOL characters, we don't want to show a diff with all the EOL differences.
-		const newContentEOL = this.newContent.includes("\r\n") ? "\r\n" : "\n"
-		const normalizedPreSaveContent = preSaveContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL // trimEnd to fix issue where editor adds in extra new line automatically
-		const normalizedPostSaveContent = postSaveContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL // this is the final content we return to the model to use as the new baseline for future edits
+		const newContentEOL = newContent.includes("\r\n") ? "\r\n" : "\n"
+		const normalizedPreSaveContent = preSaveContent.replace(/\r\n|\n/g, newContentEOL)
+		const normalizedPostSaveContent = postSaveContent?.replace(/\r\n|\n/g, newContentEOL)
 		// just in case the new content has a mix of varying EOL characters
-		const normalizedNewContent = this.newContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL
+		const normalizedNewContent = newContent.replace(/\r\n|\n/g, newContentEOL)
 
 		let userEdits: string | undefined
 		if (normalizedPreSaveContent !== normalizedNewContent) {
 			// user made changes before approving edit. let the model know about user made changes (not including post-save auto-formatting changes)
-			userEdits = formatResponse.createPrettyPatch(this.relPath.toPosix(), normalizedNewContent, normalizedPreSaveContent)
+			userEdits = formatResponse.createPrettyPatch(relPath.toPosix(), normalizedNewContent, normalizedPreSaveContent)
 			// return { newProblemsMessage, userEdits, finalContent: normalizedPostSaveContent }
 		} else {
 			// no changes to dietcode's edits
@@ -379,19 +420,18 @@ export abstract class DiffViewProvider {
 		}
 
 		let autoFormattingEdits: string | undefined
-		if (normalizedPreSaveContent !== normalizedPostSaveContent) {
+		if (normalizedPostSaveContent !== undefined && normalizedPreSaveContent !== normalizedPostSaveContent) {
 			// auto-formatting was done by the editor
 			autoFormattingEdits = formatResponse.createPrettyPatch(
-				this.relPath.toPosix(),
+				relPath.toPosix(),
 				normalizedPreSaveContent,
 				normalizedPostSaveContent,
 			)
 		}
 
 		// Strip notebook outputs to reduce context size (outputs aren't needed for editing)
-		const finalContent = this.isNotebookFile()
-			? sanitizeNotebookForLLM(normalizedPostSaveContent, true)
-			: normalizedPostSaveContent
+		const finalContent =
+			notebook && postSaveContent !== undefined ? sanitizeNotebookForLLM(postSaveContent, true) : postSaveContent
 
 		return {
 			newProblemsMessage,
@@ -402,12 +442,18 @@ export abstract class DiffViewProvider {
 	}
 
 	async revertChanges(): Promise<void> {
+		await this.waitForSave()
+		if (this.saved) return // An observation failure cannot roll back a committed edit.
 		if (!this.absolutePath || !this.isEditing) {
 			return
 		}
-		const fileExists = this.editType === "modify"
+		const fileExists = this.editType === "modify" || this.editType === "delete"
 
 		if (!fileExists) {
+			if (!this.createdFile) {
+				await this.reset()
+				return
+			}
 			// This is a load-bearing save statement- even though the file is saved and then immediately deleted.
 			// In vscode, it will not close the diff editor correctly if the file is not saved.
 			await this.saveDocument()
@@ -478,14 +524,17 @@ export abstract class DiffViewProvider {
 			Logger.log(`File ${fileLocation} has been deleted.`)
 		} catch (error) {
 			Logger.error(`Failed to delete file ${fileLocation}:`, error)
+			throw error
 		}
 
 		this.isEditing = false
 		this.newContent = undefined
+		this.saved = false
 	}
 
 	// close editor if open?
 	async reset() {
+		await this.waitForSave()
 		this.isEditing = false
 		this.editType = undefined
 		this.absolutePath = undefined
@@ -498,7 +547,9 @@ export abstract class DiffViewProvider {
 
 		this.streamedLines = []
 		this.createdDirs = []
+		this.createdFile = false
 		this.newContent = undefined
+		this.saved = false
 		this.lastUpdateContentLength = -1
 		this.lastUpdateTime = 0
 

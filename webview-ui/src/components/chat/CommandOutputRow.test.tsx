@@ -22,10 +22,27 @@ const row = (data: DietCodeMessage) => (
 )
 
 describe("terminal command presentation", () => {
+	it("keeps restored identity and output visible without authorizing stale terminal controls", () => {
+		const data = message({
+			status: "unknown",
+			executionId: "saved-run",
+			taskId: "task",
+			terminalId: 17,
+			recovery: { previousStatus: "background", observedAt: 1, authority: "none" },
+			detail: "The execution handle cannot be reattached.",
+		})
+		data.commandOutput = "saved partial output"
+		render(row(data))
+		expect(screen.getByRole("status")).toHaveTextContent("Status unavailable")
+		expect(screen.queryByRole("button", { name: "Open terminal" })).not.toBeInTheDocument()
+		expect(screen.queryByRole("button", { name: "Stop command" })).not.toBeInTheDocument()
+		expect(screen.getByText("saved partial output")).toBeVisible()
+	})
 	it.each([
 		[{ status: "running" }, "Running"],
 		[{ status: "background" }, "Running in terminal"],
 		[{ status: "unknown" }, "Status unavailable"],
+		[{ status: "unconfirmed" }, "Exit unconfirmed"],
 		[{ status: "stopping" }, "Stop requested"],
 		[{ status: "stop_failed" }, "Could not stop"],
 		[{ status: "cancelled" }, "Stopped"],

@@ -16,6 +16,8 @@ export interface ExecuteOptions {
 	signal?: AbortSignal
 	/** Let an already-started atomic write settle before its caller can revert/reset shared state. */
 	settleOnAbort?: boolean
+	/** Publishes the stable receipt ID before queueing; observers cannot change dispatch. */
+	onReserved?: (executionId: string) => void
 }
 
 interface Waiter {
@@ -68,6 +70,7 @@ export class ActionExecutor {
 		options: ExecuteOptions = {},
 	): Promise<T> {
 		options.signal?.throwIfAborted()
+		this.executions.assertAuthority(taskId, options.execution?.owner)
 		const requestedAttempts = options.maxRetries ?? 3
 		const attempts =
 			options.idempotent && Number.isFinite(requestedAttempts) ? Math.max(1, Math.min(5, Math.floor(requestedAttempts))) : 1
@@ -85,6 +88,17 @@ export class ActionExecutor {
 					queue_timeout_ms: queueTimeout,
 				})
 			: undefined
+		if (entry && options.onReserved) {
+			try {
+				const result: unknown = options.onReserved(entry.snapshot.execution_id)
+				if (result && typeof (result as PromiseLike<unknown>).then === "function")
+					void Promise.resolve(result).catch((error) =>
+						Logger.warn("Action reservation observer failed; execution retained:", error),
+					)
+			} catch (error) {
+				Logger.warn("Action reservation observer failed; execution retained:", error)
+			}
+		}
 		for (let attempt = 1; ; attempt++) {
 			let release: () => void
 			try {
@@ -118,12 +132,29 @@ export class ActionExecutor {
 				.then(() => {
 					options.signal?.throwIfAborted()
 					controller.signal.throwIfAborted()
-					started = true
+					this.executions.assertAuthority(taskId, options.execution?.owner)
+					if (entry?.finished)
+						throw new Error("The action owner ended before dispatch. No queued operation was restored.")
 					this.executions.update(entry, "running", undefined, attempt)
+					started = true
 					return operation(controller.signal, entry?.snapshot.execution_id)
 				})
 				.then(
 					(result) => {
+						if (entry?.snapshot.kind === "command" && Array.isArray(result) && result[2]?.status) {
+							this.executions.reconcileCommand(taskId, entry.snapshot.execution_id, result[2])
+							return result
+						}
+						if (
+							entry?.snapshot.kind === "helper" &&
+							result &&
+							typeof result === "object" &&
+							"status" in result &&
+							result.status === "cancelled"
+						) {
+							this.executions.finish(entry, "cancelled", result)
+							return result
+						}
 						let failed = false
 						try {
 							failed =

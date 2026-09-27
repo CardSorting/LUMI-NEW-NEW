@@ -37,7 +37,7 @@ function StatusIcon({ status }: { status: SubagentExecutionStatus }) {
 				? CheckIcon
 				: status === "failed"
 					? CircleXIcon
-					: status === "cancelled"
+					: status === "cancelled" || status === "interrupted"
 						? CircleSlashIcon
 						: BotIcon
 	const color =
@@ -156,7 +156,7 @@ function Assignment({ prompt, name }: { prompt: string; name: string }) {
 function HelperItem({ entry, interrupted, drafting }: { entry: SubagentStatusItem; interrupted: boolean; drafting: boolean }) {
 	const outputId = useId()
 	const [expanded, setExpanded] = useState(false)
-	const status = interrupted && (entry.status === "running" || entry.status === "pending") ? "cancelled" : entry.status
+	const status = interrupted && (entry.status === "running" || entry.status === "pending") ? "interrupted" : entry.status
 	const hasOutput = Boolean(entry.result?.trim())
 	const activity = status === "running" ? activityLabel(entry.activity) : undefined
 	const stats = [
@@ -186,7 +186,7 @@ function HelperItem({ entry, interrupted, drafting }: { entry: SubagentStatusIte
 							{entry.latestToolCall}
 						</div>
 					)}
-					{(status === "failed" || status === "cancelled") && entry.error && (
+					{(status === "failed" || status === "cancelled" || status === "interrupted") && entry.error && (
 						<div
 							className={`mt-2 text-sm whitespace-pre-wrap wrap-anywhere ${status === "failed" ? "text-error" : "text-description"}`}>
 							{entry.error}
@@ -238,7 +238,7 @@ function HelperItem({ entry, interrupted, drafting }: { entry: SubagentStatusIte
 	)
 }
 
-export default function SubagentStatusRow({ message, lastModifiedMessage }: SubagentStatusRowProps) {
+export default function SubagentStatusRow({ message }: SubagentStatusRowProps) {
 	const headingId = useId()
 	const { text, ask, say } = message
 	const data = useMemo(() => parseSubagentRowData({ text, ask, say }), [text, ask, say])
@@ -248,19 +248,16 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 				Helper status is unavailable. Check the conversation for the latest results.
 			</div>
 		)
-	// Old histories did not record cancellation. A newer explicit resume is evidence of interruption;
-	// another parent API request is normal progress and must never cancel a live helper in the UI.
-	const resumed =
-		data.status === "running" &&
-		(lastModifiedMessage?.ts ?? 0) > message.ts &&
-		(lastModifiedMessage?.ask === "resume_task" || lastModifiedMessage?.ask === "resume_completed_task")
-	const interrupted = resumed || data.status === "cancelled"
+	// The owner reconciles restart evidence. A newer chat message cannot establish
+	// cancellation or interruption of a helper that may still have a live owner.
+	const interrupted = data.status === "interrupted"
 	const completed = data.items.filter((entry) => entry.status === "completed").length
 	const failed = data.items.filter((entry) => entry.status === "failed").length
 	const queued = interrupted ? 0 : data.items.filter((entry) => entry.status === "pending").length
 	const running = interrupted ? 0 : data.items.filter((entry) => entry.status === "running").length
-	const cancelled = data.items.filter(
-		(entry) => entry.status === "cancelled" || (interrupted && (entry.status === "running" || entry.status === "pending")),
+	const cancelled = data.items.filter((entry) => entry.status === "cancelled").length
+	const interruptedCount = data.items.filter(
+		(entry) => entry.status === "interrupted" || (interrupted && (entry.status === "running" || entry.status === "pending")),
 	).length
 	const summary = [
 		`${completed} of ${data.items.length} completed`,
@@ -268,6 +265,7 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 		queued ? `${queued} queued` : "",
 		failed ? `${failed} failed` : "",
 		cancelled ? `${cancelled} cancelled` : "",
+		interruptedCount ? `${interruptedCount} interrupted` : "",
 	]
 		.filter(Boolean)
 		.join(" · ")
@@ -285,7 +283,7 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 			<output aria-atomic="true" aria-live="polite" className="mb-3 block text-xs text-description tabular-nums">
 				{summary}
 			</output>
-			{(failed > 0 || cancelled > 0) && availableWork && (
+			{(failed > 0 || cancelled > 0 || interruptedCount > 0) && availableWork && (
 				<div className="mb-3 text-xs text-description">
 					Available results are preserved below for the main agent to continue.
 				</div>

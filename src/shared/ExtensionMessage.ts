@@ -135,6 +135,7 @@ export const COMMAND_EXECUTION_STATUSES = [
 	"running",
 	"background",
 	"unknown",
+	"unconfirmed",
 	"stopping",
 	"stop_failed",
 	"completed",
@@ -153,6 +154,8 @@ export interface CommandExecutionState {
 	exitCode?: number
 	signal?: string
 	terminalClosed?: boolean
+	/** Historical evidence is inspectable, but does not authorize process controls. */
+	recovery?: { previousStatus: string; observedAt: number; authority: "none" }
 }
 
 export function isActiveCommandExecution(state: CommandExecutionState): boolean {
@@ -331,7 +334,7 @@ export interface DietCodeSayGenerateExplanation {
 	error?: string
 }
 
-export type SubagentExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled"
+export type SubagentExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted"
 
 export interface SubagentActivity {
 	phase: "preparing" | "waiting" | "responding" | "tool" | "retrying" | "recovering"
@@ -343,6 +346,8 @@ export interface SubagentActivity {
 
 export interface SubagentStatusItem {
 	id: string
+	executionId?: string
+	pendingCommandIds?: string[]
 	name: string
 	index: number
 	prompt: string
@@ -367,7 +372,7 @@ export interface SubagentStatusItem {
 export interface DietCodeSaySubagentStatus {
 	/** Correlates a batch with its request without relying on prompt text. */
 	batchId?: string
-	status: "running" | "completed" | "failed" | "cancelled"
+	status: "running" | "completed" | "failed" | "cancelled" | "interrupted"
 	total: number
 	completed: number
 	successes: number

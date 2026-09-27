@@ -6,6 +6,7 @@ import { findLastIndex } from "@shared/array"
 import { COMMAND_CANCEL_TOKEN, type CommandExecutionState } from "@shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
 import { CommandOutputCollector } from "./CommandOutputCollector"
+import { commandOutcome } from "./commandOutcome"
 import { resolveCommandTimeoutSeconds } from "./commandPolicy"
 import { BUFFER_STUCK_TIMEOUT_MS, CHUNK_BYTE_SIZE, CHUNK_DEBOUNCE_MS, CHUNK_LINE_COUNT, COMPLETION_TIMEOUT_MS } from "./constants"
 import type {
@@ -87,7 +88,7 @@ export async function orchestrateCommandExecution(
 				.findIndex((message) => (commandRow!.ts !== undefined ? message.ts === commandRow!.ts : message === commandRow))
 			if (index >= 0)
 				return callbacks.updateDietCodeMessage(index, {
-					commandCompleted: ["completed", "failed", "cancelled", "not_started"].includes(state.status),
+					commandCompleted: ["completed", "failed", "cancelled", "not_started", "unconfirmed"].includes(state.status),
 					commandExecution: state,
 				})
 			return undefined
@@ -213,16 +214,7 @@ export async function orchestrateCommandExecution(
 		if (commandStateCleared) return
 		completed = true
 		completionDetails = details
-		updateCommandState({
-			status: details?.cancelled
-				? "cancelled"
-				: (typeof details?.exitCode === "number" && details.exitCode !== 0) || details?.signal
-					? "failed"
-					: "completed",
-			exitCode: details?.exitCode ?? undefined,
-			signal: details?.signal ?? undefined,
-			terminalClosed: details?.terminalClosed,
-		})
+		updateCommandState(commandOutcome(details))
 		resolveTerminalEvent()
 		clearTimers()
 		clearCommandState()
@@ -231,7 +223,7 @@ export async function orchestrateCommandExecution(
 	}
 	const onError = (error: Error) => {
 		if (commandStateCleared) return
-		updateCommandState({ status: "failed" })
+		updateCommandState({ status: "not_started", detail: error.message })
 		rejectTerminalEvent(error)
 		clearTimers()
 		clearCommandState()

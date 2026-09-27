@@ -14,7 +14,7 @@ export const get_execution_state_variants: DietCodeToolSpec[] = [
 				name: "execution_id",
 				required: false,
 				instruction:
-					"Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Command results include their read_command_output handle. Expired or other-task IDs are rejected.",
+					"Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Helper receipts include structured helper_handoff with committed paths and pending command IDs, including late results after a batch stops waiting. Command results include their read_command_output handle. After a host restart, historical receipts have recovery.authority=none: inspect their evidence without assuming a live owner or replaying unfinished work. Recovery issues are reported explicitly. Expired or other-task IDs are rejected.",
 				usage: "command or action execution ID (optional)",
 			},
 		],

@@ -6,6 +6,7 @@ import { getJoyRideCache } from "@core/joyride"
 import { CommandPermissionController } from "@core/permissions"
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import type { CommandExecutionOptions, CommandExecutionResult, CommandExecutionSnapshot } from "@integrations/terminal"
+import { normalizeShellCommand } from "@integrations/terminal/normalizeCommand"
 import { BrowserSession } from "@services/browser/BrowserSession"
 import { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import { McpHub } from "@services/mcp/McpHub"
@@ -23,6 +24,7 @@ import { formatResponse } from "../prompts/responses"
 import { StateManager } from "../storage/StateManager"
 import { WorkspaceRootManager } from "../workspace"
 import { ToolResponse } from "."
+import { executionFingerprint, persistedToolResult, recoveryResult } from "./ExecutionRecovery"
 import type { ExecutionStateResult } from "./ExecutionState"
 import { MessageStateHandler } from "./message-state"
 import { TaskState } from "./TaskState"
@@ -40,6 +42,15 @@ export { canonicalizeAttemptCompletionParams } from "./tools/attemptCompletionUt
 
 import { ReactivePolicyObserver } from "../policy/ReactivePolicyObserver"
 import { UniversalGuard } from "../policy/UniversalGuard"
+
+const RECOVERY_INSPECTION_TOOLS = new Set<string>([
+	"get_execution_state",
+	"read_command_output",
+	"read_file",
+	"list_files",
+	"search_files",
+	"list_code_definition_names",
+])
 
 export class ToolExecutor {
 	private autoApprover: AutoApprove
@@ -263,9 +274,37 @@ export class ToolExecutor {
 			await existing
 			return
 		}
+		const recovery = this.taskState.recovery
 		if (block.partial) {
+			if (recovery?.get("tool", callId) || recovery?.get("batch", callId)) return
 			await this.execute(block)
 			return
+		}
+		const fingerprint = executionFingerprint([
+			block.name,
+			Object.entries(block.params).sort(([a], [b]) => a.localeCompare(b)),
+		])
+		const saved = recovery?.get("tool", callId)
+		if (saved) {
+			this.pushToolResult(
+				saved.fingerprint === fingerprint
+					? recoveryResult(saved)
+					: formatResponse.toolError(
+							"This call ID belongs to different persisted arguments. No duplicate was executed.",
+						),
+				block,
+				false,
+			)
+			return
+		}
+		const inspection = RECOVERY_INSPECTION_TOOLS.has(block.name)
+		if (!inspection) {
+			try {
+				recovery?.put(callId, { kind: "tool", fingerprint })
+			} catch (error) {
+				this.pushToolResult(formatResponse.toolError(String(error)), block)
+				return
+			}
 		}
 		// Claim the ID before execution can yield or trigger a repeated delivery.
 		// Keep even a rejected dispatch until the next response: its side effects may be unknown.
@@ -323,7 +362,12 @@ export class ToolExecutor {
 	 * @param content The tool response content to add
 	 * @param block The tool use block that generated this result
 	 */
-	private pushToolResult = (content: ToolResponse, block: ToolUse) => {
+	private pushToolResult = (content: ToolResponse, block: ToolUse, persist = true) => {
+		const id = block.tool_use_id || this.taskState.toolUseIdMap.get(block.call_id || "") || block.call_id
+		const recovery = this.taskState.recovery
+		const saved = id ? recovery?.get("tool", id) : undefined
+		if (persist && id && saved && !recovery?.isRestored("tool", id) && saved.result === undefined)
+			recovery?.observe(id, { ...saved, result: persistedToolResult(content) })
 		// Use the ToolResultUtils to properly format and push the tool result
 		ToolResultUtils.pushToolResult(
 			content,
@@ -386,6 +430,7 @@ export class ToolExecutor {
 		// The toolUseIdMap is updated at the point of transformation in index.ts
 
 		try {
+			if (!RECOVERY_INSPECTION_TOOLS.has(block.name)) this.taskState.recovery?.assertCanExecute()
 			if (!this.coordinator.has(block.name)) {
 				if (!block.partial) {
 					this.pushToolResult(
@@ -662,6 +707,10 @@ export class ToolExecutor {
 		// Check abort flag at the very start to prevent execution after cancellation
 		if (this.taskState.abort) {
 			return
+		}
+
+		if (block.name === DietCodeDefaultTool.BASH && block.params.command) {
+			block = { ...block, params: { ...block.params, command: normalizeShellCommand(block.params.command) } }
 		}
 
 		const hooksEnabled = getHooksEnabledSafe()

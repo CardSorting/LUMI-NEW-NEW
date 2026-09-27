@@ -1,6 +1,7 @@
 import path from "node:path"
 import * as vscode from "vscode"
 import { HostProvider } from "@/hosts/host-provider"
+import type { ManagedTerminal } from "./ManagedTerminal"
 
 export interface TerminalInfo {
 	terminal: vscode.Terminal
@@ -8,6 +9,8 @@ export interface TerminalInfo {
 	lastCommand: string
 	id: number
 	shellPath?: string
+	cwd?: string
+	managed?: ManagedTerminal
 	lastActive: number
 	pendingCwdChange?: string
 	cwdResolved?: {
@@ -52,6 +55,7 @@ export const TerminalRegistry = {
 			lastCommand: "",
 			id: nextTerminalId,
 			shellPath,
+			cwd: typeof cwd === "string" ? cwd : cwd?.fsPath,
 			lastActive: Date.now(),
 		}
 		terminals.push(newInfo)

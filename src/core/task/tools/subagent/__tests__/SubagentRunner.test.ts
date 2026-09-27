@@ -18,6 +18,7 @@ import { DietCodeDefaultTool } from "@/shared/tools"
 import { TaskState } from "../../../TaskState"
 import * as completionGates from "../../subagentCompletionGates"
 import { ToolExecutorCoordinator } from "../../ToolExecutorCoordinator"
+import { PartialPatchError } from "../../utils/FileProviderOperations"
 import { SubagentBuilder } from "../SubagentBuilder"
 import { SubagentRunner } from "../SubagentRunner"
 
@@ -207,6 +208,37 @@ describe("SubagentRunner", () => {
 		assert.equal(caller.signal.aborted, false)
 		sinon.assert.notCalled(config.callbacks.executeCommandTool as sinon.SinonStub)
 	})
+	it("isolates helper editors and delegated approval without modifying the parent's UI", async () => {
+		const config = createTaskConfig(true)
+		sinon.stub(coreApi, "buildApiHandler").returns(config.api as never)
+		const firstRunner = new SubagentRunner(config, new SubagentBuilder(config))
+		const secondRunner = new SubagentRunner(config, new SubagentBuilder(config))
+		const first = (firstRunner as any).createSubagentTaskConfig() as TaskConfig
+		const second = (secondRunner as any).createSubagentTaskConfig() as TaskConfig
+		assert.notEqual(first.services.diffViewProvider, second.services.diffViewProvider)
+		assert.notEqual(first.services.diffViewProvider, config.services.diffViewProvider)
+		assert.equal(await first.callbacks.shouldAutoApproveToolWithPath(DietCodeDefaultTool.FILE_EDIT, "assigned.ts"), true)
+		assert.equal(await first.callbacks.shouldAutoApproveToolWithPath(DietCodeDefaultTool.FILE_EDIT, "/outside.ts"), false)
+		await first.callbacks.ask("tool", "preview", true)
+		await first.callbacks.removeLastPartialMessageIfExistsWithType("ask", "tool")
+		await assert.rejects(first.callbacks.ask("tool", "outside approval"), /outside its delegated/)
+		sinon.assert.notCalled(config.callbacks.ask as sinon.SinonStub)
+		sinon.assert.notCalled(config.callbacks.removeLastPartialMessageIfExistsWithType as sinon.SinonStub)
+	})
+
+	it("cancels the helper's file writer without cancelling the parent or another helper", async () => {
+		const config = createTaskConfig(true)
+		sinon.stub(coreApi, "buildApiHandler").returns(config.api as never)
+		const firstRunner = new SubagentRunner(config, new SubagentBuilder(config))
+		const secondRunner = new SubagentRunner(config, new SubagentBuilder(config))
+		const first = (firstRunner as any).createSubagentTaskConfig() as TaskConfig
+		const second = (secondRunner as any).createSubagentTaskConfig() as TaskConfig
+		first.taskState.abort = true
+		first.services.diffViewProvider.editType = "create"
+		await assert.rejects(first.services.diffViewProvider.open("cancelled-helper.txt"), { name: "AbortError" })
+		assert.equal(config.taskState.abortSignal.aborted, false)
+		assert.equal(second.taskState.abortSignal.aborted, false)
+	})
 
 	it("emits native tool_use blocks with matching tool_result tool_use_id across turns", async () => {
 		const createMessage = sinon.stub()
@@ -291,7 +323,7 @@ describe("SubagentRunner", () => {
 		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
-		assert.equal(inventoryReads, 2)
+		assert.equal(inventoryReads, 3) // fresh request context plus the final runtime handoff
 		createMessage.getCalls().forEach((call, index) => {
 			const request = JSON.stringify(call.args[1])
 			assert.equal(request.match(/<execution_state>/g)?.length, 1)
@@ -367,6 +399,120 @@ describe("SubagentRunner", () => {
 	}
 	function callChunk(id: number, name: DietCodeDefaultTool, params: Record<string, unknown>) {
 		return { type: "tool_calls", tool_call: { function: { id: `call-${id}`, name, arguments: JSON.stringify(params) } } }
+	}
+	for (const partial of [false, true]) {
+		it(`retains ${partial ? "partially committed" : "all successful"} patch paths in helper handoffs`, async () => {
+			let turns = 0
+			const createMessage = sinon.stub().callsFake(async function* () {
+				yield ++turns === 1
+					? callChunk(1, DietCodeDefaultTool.APPLY_PATCH, {
+							input: "*** Begin Patch\n*** Update File: old.ts\n*** Move to: new.ts\n*** Add File: added.ts\n+content\n*** Delete File: deleted.ts\n*** End Patch",
+						})
+					: callChunk(2, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			})
+			const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.APPLY_PATCH)
+			if (partial) execute.rejects(new PartialPatchError(["new.ts"], new Error("later conflict")))
+			const result = await runner.run("Apply the assigned patch", () => {})
+			assert.equal(result.status, "completed", result.error)
+			assert.deepEqual(result.filesModified?.sort(), partial ? ["new.ts"] : ["added.ts", "deleted.ts", "new.ts", "old.ts"])
+		})
+	}
+	it("does not reinterpret XML examples in prose when native tool calls are active", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield { type: "text", text: "The broken example starts with <execute_command><command>example" }
+			yield callChunk(1, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { runner } = prepareProgressRun(createMessage)
+		const result = await runner.run("Review XML serialization", () => {})
+		assert.equal(result.status, "completed", result.error)
+		sinon.assert.calledOnce(createMessage)
+	})
+	for (const mismatch of [false, true]) {
+		it(`returns the original tool receipt for a replayed ID${mismatch ? " and refuses changed arguments" : ""}`, async () => {
+			let turns = 0
+			const createMessage = sinon.stub().callsFake(async function* (_prompt, conversation) {
+				turns++
+				if (turns <= 2)
+					yield callChunk(1, DietCodeDefaultTool.FILE_NEW, {
+						path: turns === 2 && mismatch ? "different.ts" : "saved.ts",
+						content: "new",
+					})
+				else {
+					assert.match(JSON.stringify(conversation.at(-1)), mismatch ? /different arguments/ : /observed content/)
+					yield callChunk(3, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+				}
+			})
+			const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+			const result = await runner.run("Create saved.ts", () => {})
+			assert.equal(result.status, "completed", result.error)
+			sinon.assert.calledOnce(execute)
+			assert.deepEqual(result.filesModified, ["saved.ts"])
+		})
+	}
+	it("adds actual pending command IDs to the final handoff", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield callChunk(1, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { config, runner } = prepareProgressRun(createMessage)
+		config.callbacks.getExecutionState = () =>
+			({
+				commands: {
+					active: [{ execution_id: "pending-run", owner: runner.getExecutionOwner(), status: "background" }],
+					recent: [],
+				},
+				actions: { active: [], recent: [] },
+			}) as never
+		const result = await runner.run("Prepare server", () => {})
+		assert.equal(result.status, "completed", result.error)
+		assert.match(result.result!, /pending-run: background/)
+		assert.match(result.result!, /read_command_output; do not relaunch/)
+		assert.deepEqual(result.pendingCommandIds, ["pending-run"])
+	})
+	it("validates and dispatches the same normalized helper command", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield ++turns === 1
+				? callChunk(1, DietCodeDefaultTool.BASH, { command: "echo '&amp;' &amp;&amp; pwd" })
+				: callChunk(2, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { config, runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.BASH)
+		const preflight = sinon.stub().resolves({ success: true })
+		config.universalGuard = { guardPreExecution: preflight, guardPostExecution: async () => {} } as never
+		const result = await runner.run("Run command", () => {})
+		assert.equal(result.status, "completed", result.error)
+		assert.equal(preflight.firstCall.args[0].params.command, "echo '&amp;' && pwd")
+		assert.equal(execute.firstCall.args[1].params.command, "echo '&amp;' && pwd")
+	})
+	for (const cancelled of [false, true]) {
+		it(`includes pending execution IDs in a ${cancelled ? "cancelled" : "failed"} helper handoff`, async () => {
+			const createMessage = sinon.stub().callsFake(async function* () {
+				yield callChunk(1, DietCodeDefaultTool.FILE_EDIT, { path: "saved.ts" })
+			})
+			const { config, runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_EDIT)
+			config.callbacks.getExecutionState = () =>
+				({
+					commands: {
+						active: [
+							{ execution_id: "own-pending", owner: runner.getExecutionOwner(), status: "stopping" },
+							{ execution_id: "sibling-pending", owner: "other-helper", status: "running" },
+						],
+						recent: [],
+					},
+				}) as never
+			execute.callsFake(async () => {
+				if (cancelled) config.taskState.abort = true
+				else
+					createMessage.callsFake(async function* () {
+						yield { type: "text", text: "No final tool" }
+					})
+				return "Saved once"
+			})
+			const result = await runner.run("Complete assignment", () => {})
+			assert.equal(result.status, cancelled ? "cancelled" : "failed")
+			assert.deepEqual(result.pendingCommandIds, ["own-pending"])
+			assert.match(result.result!, /own-pending: stopping/)
+			assert.ok(!result.result!.includes("sibling-pending"))
+		})
 	}
 	it("cancels between calls in a multi-tool response and returns the completed evidence", async () => {
 		const createMessage = sinon.stub().callsFake(async function* () {
@@ -764,7 +910,7 @@ describe("SubagentRunner", () => {
 		const { runner } = prepareProgressRun(createMessage)
 		const result = await runner.run("Inspect the files", () => {})
 		assert.equal(result.status, "failed")
-		assert.equal(createMessage.callCount, 4)
+		assert.equal(createMessage.callCount, 2)
 	})
 
 	it("passes prior request token totals into the next-turn compaction check", async () => {
@@ -994,7 +1140,7 @@ describe("SubagentRunner", () => {
 
 		assert.equal(result.status, "failed")
 		assert.equal(createMessage.callCount, 3)
-		assert.equal(inventoryReads, 3)
+		assert.equal(inventoryReads, 4, "three requests plus the final execution handoff")
 		createMessage.getCalls().forEach((call, index) => {
 			const request = JSON.stringify(call.args[1])
 			assert.equal(request.match(/<execution_state>/g)?.length, 1)

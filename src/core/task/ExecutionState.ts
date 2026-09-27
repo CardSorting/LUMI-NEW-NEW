@@ -7,7 +7,8 @@ export interface ExecutionState {
 	commands: { active: CommandExecutionSummary[]; recent: CommandExecutionSummary[] }
 	actions: { active: ActionExecutionSnapshot[]; recent: ActionExecutionSnapshot[] }
 	queues?: ActionQueueSnapshot[]
-	coverage?: { commands: "available" | "unavailable"; scope: "current_task_instance" }
+	coverage?: { commands: "available" | "unavailable"; scope: "task_in_current_extension_host" | "task_with_persisted_evidence" }
+	recovery?: { status: "available" | "blocked"; restoredRecords: number; issues: string[] }
 	authority?: {
 		mode: "plan" | "act" | "unknown"
 		automatic_approval: boolean
@@ -75,7 +76,9 @@ export function formatExecutionState(state: ExecutionState, observer = "parent",
 		: EXECUTION_CONTEXT_MAX_BYTES
 	const priority = (item: OwnedExecution) =>
 		(item.owner === observer ? 0 : 10) +
-		(["awaiting_completion", "stopping", "stop_failed", "unknown", "failed", "not_started"].includes(item.status)
+		(["awaiting_completion", "stopping", "stop_failed", "unknown", "unconfirmed", "failed", "not_started"].includes(
+			item.status,
+		)
 			? 0
 			: item.status === "queued"
 				? 2
@@ -108,6 +111,7 @@ export function formatExecutionState(state: ExecutionState, observer = "parent",
 		const snapshot = {
 			observer: clip(observer, 80),
 			coverage: state.coverage,
+			recovery: state.recovery,
 			authority: shownAuthority ?? "unavailable",
 			totals,
 			commands,

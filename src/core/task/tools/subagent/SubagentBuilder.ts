@@ -39,7 +39,7 @@ export const SUBAGENT_DEFAULT_ALLOWED_TOOLS: DietCodeDefaultTool[] = [
 export const SUBAGENT_SYSTEM_SUFFIX = `
 # Scoped helper workflow
 
-- Complete the assigned scope and return findings or changes with relevant file paths.
+- Complete the assigned scope and return findings or changes with relevant file paths. The approved assignment delegates its available tools within the workspace; do not ask the parent to reconfirm routine steps.
 - Use only the tools exposed to you. Do not request nested helpers or wait for peer consensus; request additional review in your handoff when needed.
 - Parent roadmap, checklist, and audit signals are context, not prerequisites for your handoff. Do not repair unrelated parent work or rewrite ROADMAP.md to finish your assignment.
 - Follow the workspace's existing architecture and documentation conventions. Update documentation only when your assignment changes documented behavior; do not create a new wiki or audit every file by default.
@@ -47,7 +47,9 @@ export const SUBAGENT_SYSTEM_SUFFIX = `
 - After a failed check, fix its cause before rerunning it. If the same failure remains and no new evidence or repair is available, stop retrying and report the blocker to the parent. Never claim an unavailable check passed.
 - If a command continues after its foreground wait, use read_command_output with its execution_id to inspect that same run. Do independent work between unchanged reads. Do not execute the command again just to check completion.
 - Finish once the assigned deliverable and relevant verification are complete. A research-only assignment can finish with findings and limitations without code changes or tests.
-- Handoff: outcome, evidence or changed paths, checks and results, and remaining blockers. Report uncertainty explicitly. Use [SIGNAL: ARCHITECTURE_VIOLATION] or [SIGNAL: SECURITY_RISK] only for supported findings.
+- Finish with attempt_completion exactly once after relevant checks. Handoff: outcome, evidence or changed paths, checks and results, active command execution IDs, and remaining blockers. A background command is pending work, not a passed check. The parent should reconcile this evidence before repeating work.
+- If another writer changes a file, read its current contents and reconcile your intended edit. Never restore an earlier snapshot over another helper's work. Use a fresh tool call ID for a new action; a replayed ID returns its existing result.
+- Report uncertainty explicitly. Use [SIGNAL: ARCHITECTURE_VIOLATION] or [SIGNAL: SECURITY_RISK] only for supported findings.
 `
 
 export class SubagentBuilder {

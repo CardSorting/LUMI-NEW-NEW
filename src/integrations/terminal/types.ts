@@ -28,6 +28,7 @@ export interface TerminalProcessEvents {
 	line: [line: string]
 	continue: []
 	completed: [details?: TerminalCompletionDetails]
+	/** Known failure before dispatch. Problems after dispatch retain ownership via no_shell_integration. */
 	error: [error: Error]
 	no_shell_integration: []
 }
@@ -162,6 +163,13 @@ export type TerminalProcessResultPromise = Promise<void> &
  * Interface for terminal managers.
  */
 export interface ITerminalManager {
+	/** Descriptive evidence only; terminal numbers and PIDs never authorize reattachment. */
+	getRecoveryMetadata?(terminalId: number): {
+		kind: "vscode_terminal" | "supervised" | "unknown"
+		shell?: string
+		terminalName?: string
+		processId?: number
+	}
 	/**
 	 * Run a command in the specified terminal.
 	 * @param terminalInfo The terminal to run the command in
@@ -295,6 +303,8 @@ export interface CommandExecutorCallbacks {
  */
 export interface CommandExecutionOptions {
 	actionId?: string
+	/** Remains subscribed after the foreground wait yields; receives the actual command lifecycle. */
+	onStateChange?: (state: CommandExecutionState) => void
 	owner?: string
 	/** null means the initiating row was unavailable; never update an older command instead. */
 	commandMessageTs?: number | null
@@ -318,7 +328,7 @@ export interface CommandExecutionSnapshot {
 	execution_id: string
 	action_id?: string
 	owner?: string
-	terminal_id: number
+	terminal_id?: number
 	command: string
 	cwd: string
 	status: CommandExecutionState["status"]
@@ -329,6 +339,7 @@ export interface CommandExecutionSnapshot {
 	output: string
 	log_file_path?: string
 	log_notice?: string
+	recovery?: CommandExecutionState["recovery"]
 }
 
 export type CommandExecutionSummary = Omit<CommandExecutionSnapshot, "output"> & {

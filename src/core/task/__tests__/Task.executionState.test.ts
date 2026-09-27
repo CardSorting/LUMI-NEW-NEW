@@ -53,6 +53,7 @@ describe("shared task execution state", () => {
 			assert.throws(() => foreign.getExecutionState(resource.snapshot.execution_id), /not tracked/)
 			assert.deepEqual(task.getExecutionState("command-id"), commands.active[0])
 			assert.equal(state.coverage?.commands, "available")
+			assert.equal(state.coverage?.scope, "task_in_current_extension_host")
 			executor.executions.finish(resource, "completed", "Read once")
 			assert.equal((task.getExecutionState() as ExecutionState).actions.recent[0].result_preview, "Read once")
 		} finally {
@@ -133,7 +134,7 @@ describe("shared task execution state", () => {
 		}) as Task
 		const result = task.getExecutionState(command.snapshot.execution_id)
 		assert.ok("execution_id" in result)
-		assert.match(result.detail!, /foreground request only/)
+		assert.match(result.detail!, /last recorded observation/)
 		assert.match(result.detail!, /unavailable/)
 		assert.equal((task.getExecutionState() as ExecutionState).actions.recent[0].execution_id, command.snapshot.execution_id)
 		assert.throws(() => task.getExecutionState("native-command-id"), /observation is unavailable/)

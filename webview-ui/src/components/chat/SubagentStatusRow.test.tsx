@@ -30,6 +30,14 @@ function message(status: string): DietCodeMessage {
 }
 
 describe("SubagentStatusRow", () => {
+	it("shows a recovered interruption as distinct from cancellation and preserves partial work", () => {
+		render(<SubagentStatusRow isLast message={message("interrupted")} />)
+		expect(screen.getByRole("status")).toHaveTextContent("1 interrupted")
+		expect(screen.getByText("interrupted")).toBeVisible()
+		expect(screen.queryByText("cancelled")).not.toBeInTheDocument()
+		fireEvent.click(screen.getByRole("button", { name: "Show output for Schema review" }))
+		expect(screen.getByText("No regressions found")).toBeVisible()
+	})
 	it.each(["info", "api_req_started"] as const)("keeps helpers running when %s arrives", (say) => {
 		render(
 			<SubagentStatusRow
@@ -42,7 +50,7 @@ describe("SubagentStatusRow", () => {
 		expect(screen.queryByText("cancelled")).not.toBeInTheDocument()
 	})
 
-	it("marks interrupted helpers cancelled after a newer task resume", () => {
+	it("does not infer interruption or cancellation from a newer resume message", () => {
 		render(
 			<SubagentStatusRow
 				isLast
@@ -50,7 +58,9 @@ describe("SubagentStatusRow", () => {
 				message={message("running")}
 			/>,
 		)
-		expect(screen.getByText("cancelled")).toBeInTheDocument()
+		expect(screen.getByText("running")).toBeInTheDocument()
+		expect(screen.queryByText("interrupted")).not.toBeInTheDocument()
+		expect(screen.queryByText("cancelled")).not.toBeInTheDocument()
 	})
 	it("lazily displays results with a named, keyboard-accessible disclosure", async () => {
 		const user = userEvent.setup()

@@ -2,10 +2,12 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import { AssistantMessageContent } from "@core/assistant-message"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { DietCodeAskResponse } from "@shared/WebviewMessage"
+import type { ExecutionRecoveryStore } from "./ExecutionRecovery"
 import { ToolProgressTracker } from "./ToolProgressTracker"
 import type { HookExecution } from "./types/HookExecution"
 
 export class TaskState {
+	public recovery?: ExecutionRecoveryStore
 	public recursionDepth = 0
 	public maxTokens?: number
 	public maxCost?: number

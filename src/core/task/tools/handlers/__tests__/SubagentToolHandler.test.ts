@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert"
 import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import * as coreApi from "@core/api"
+import { parseAssistantMessageV2 } from "@core/assistant-message"
 import { DietCodeSubagentUsageInfo } from "@shared/ExtensionMessage"
 import { DietCodeDefaultTool } from "@shared/tools"
 import { afterEach, describe, it } from "mocha"
@@ -10,6 +11,7 @@ import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import * as telemetryModule from "@/services/telemetry"
 import { executor } from "../../../ActionExecutor"
 import { TaskState } from "../../../TaskState"
+import { ToolProgressTracker } from "../../../ToolProgressTracker"
 import { AgentConfigLoader } from "../../subagent/AgentConfigLoader"
 import { SubagentBuilder } from "../../subagent/SubagentBuilder"
 import { SubagentRunner } from "../../subagent/SubagentRunner"
@@ -122,6 +124,25 @@ describe("SubagentToolHandler", () => {
 		params: { prompt_1: "one", prompt_2: "two", prompt_3: "three", prompt_4: "four", prompt_5: "five" },
 		partial: false,
 	}
+	it("joins repeated deliveries of the same batch and retains the settled handoff", async () => {
+		const { config, callbacks } = createConfig({ autoApproveSafe: true })
+		const run = sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		const handler = new UseSubagentsToolHandler()
+		const block = { ...batch, params: { prompt_1: "one" }, call_id: "same-batch" }
+		const [first, second] = await Promise.all([handler.execute(config, block), handler.execute(config, block)])
+		const rows = callbacks.say.callCount
+		assert.equal(first, second)
+		assert.equal(await handler.execute(config, block), first)
+		assert.equal(callbacks.say.callCount, rows)
+		sinon.assert.calledOnce(run)
+		assert.match(
+			String(await handler.execute(config, { ...block, params: { prompt_1: "changed assignment" } })),
+			/already belongs to another assignment/,
+		)
+		sinon.assert.calledOnce(run)
+		await handler.execute(config, { ...block, call_id: "intentional-new-batch" })
+		sinon.assert.calledTwice(run)
+	})
 	it("coalesces repeated assignments in one batch and reserves queued helpers across batches", async () => {
 		const { config, taskState } = createConfig({ autoApproveSafe: true })
 		const clock = sinon.useFakeTimers()
@@ -302,7 +323,14 @@ describe("SubagentToolHandler", () => {
 		const handler = new UseSubagentsToolHandler()
 		const first = await handler.execute(config, batch)
 		run.resolves({ ...completed(), durationMs: 900, stats: { ...completed().stats, toolCalls: 50, inputTokens: 1000 } })
-		assert.equal(await handler.execute(config, batch), first)
+		const second = await handler.execute(config, batch)
+		const progress = new ToolProgressTracker()
+		progress.record(batch.name, batch.params, first)
+		assert.equal(progress.finishTurn(), "continue")
+		for (let index = 1; index <= 8; index++) {
+			progress.record(batch.name, batch.params, second)
+			assert.equal(progress.finishTurn(), index === 8 ? "handoff" : index === 3 ? "redirect" : "continue")
+		}
 		run.resolves({ ...completed(), status: "failed", result: undefined, error: "unavailable" })
 		assert.equal(isToolFailure(await handler.execute(config, batch)), true)
 	})
@@ -436,6 +464,47 @@ describe("SubagentToolHandler", () => {
 		assert.equal(taskState.workspaceRevision, 0)
 		const usage = callbacks.say.getCalls().find((call) => call.args[0] === "subagent_usage")!
 		assert.equal(JSON.parse(usage.args[1]).tokensIn, 6)
+	})
+	it("keeps reservations until cancelled work settles and exposes its late receipt", async () => {
+		const { config, taskState } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers()
+		;(config as any).getSessionStreamId = () => "parent"
+		sinon.stub(orchestrator, "spawnChildStream").resolves({ id: "owned-stream" } as never)
+		const close = sinon.stub(orchestrator, "failStream").resolves()
+		let finish!: (value: ReturnType<typeof completed> & { filesModified: string[] }) => void
+		sinon.stub(SubagentRunner.prototype, "run").returns(
+			new Promise((resolve) => {
+				finish = resolve
+			}),
+		)
+		sinon.stub(SubagentRunner.prototype, "abort").resolves()
+		const pending = new UseSubagentsToolHandler().execute(config, { ...batch, params: { prompt_1: "one" } })
+		await clock.tickAsync(0)
+		const id = executor.executions.list(config.ulid).active[0].execution_id
+		taskState.abort = true
+		await clock.tickAsync(0)
+		const handoff = String(await pending)
+		assert.ok(handoff.includes(`execution_id ${id}`))
+		assert.match(handoff, /Still settling; do not repeat or overlap/)
+		sinon.assert.notCalled(close)
+		finish({ ...completed(), filesModified: ["committed-late.ts"] })
+		await clock.tickAsync(0)
+		sinon.assert.calledOnce(close)
+		assert.deepEqual(executor.executions.get(config.ulid, id)?.helper_handoff?.files_modified, ["committed-late.ts"])
+	})
+	it("keeps pending command references outside long helper-result excerpts", async () => {
+		const { config, callbacks } = createConfig({ autoApproveSafe: true })
+		sinon
+			.stub(SubagentRunner.prototype, "run")
+			.resolves({ ...completed(), result: "detail ".repeat(3000), pendingCommandIds: ["pending-run"] })
+		const result = String(await new UseSubagentsToolHandler().execute(config, { ...batch, params: { prompt_1: "one" } }))
+		assert.match(result, /Pending command: pending-run/)
+		assert.ok(result.indexOf("Pending command") < result.indexOf("### AGENT DETAILS"))
+		const final = callbacks.say
+			.getCalls()
+			.filter((call) => call.args[0] === "subagent")
+			.at(-1)!
+		assert.deepEqual(JSON.parse(final.args[1]).items[0].pendingCommandIds, ["pending-run"])
 	})
 
 	it("finalizes every helper on timeout, including helpers that never started", async () => {
@@ -721,6 +790,34 @@ describe("SubagentToolHandler", () => {
 		assert.ok(statusCalls.length > 0)
 		assert.ok(statusCalls.every((call) => JSON.parse(call.args[1]).batchId === "native-call-1"))
 	})
+	for (const status of ["completed", "cancelled"] as const) {
+		it(`correlates a streamed XML helper preview with its ${status} status`, async () => {
+			const { config, callbacks } = createConfig({ autoApproveSafe: true })
+			const handler = new UseSubagentsToolHandler()
+			const xml = "<use_subagents><prompt_1>Implement pure Minesweeper engine"
+			const partial = parseAssistantMessageV2(xml)
+			const full = parseAssistantMessageV2(`${xml} and tests only.</prompt_1></use_subagents>`, partial)
+			assert.equal(partial[0].type, "tool_use")
+			assert.equal(full[0].type, "tool_use")
+			if (partial[0].type !== "tool_use" || full[0].type !== "tool_use") throw new Error("Expected tool calls")
+			sinon.stub(SubagentRunner.prototype, "run").resolves({
+				...completed(),
+				status,
+				...(status === "cancelled" ? { error: "Helper batch cancelled." } : {}),
+			})
+			await handler.handlePartialBlock(partial[0], createUIHelpers(config))
+			await handler.execute(config, full[0])
+			const preview = callbacks.say.getCalls().find((call) => call.args[0] === "use_subagents")!
+			const statuses = callbacks.say.getCalls().filter((call) => call.args[0] === "subagent")
+			const batchId = JSON.parse(preview.args[1]).batchId
+			assert.ok(batchId)
+			assert.ok(statuses.length > 0)
+			assert.ok(statuses.every((call) => JSON.parse(call.args[1]).batchId === batchId))
+			const final = JSON.parse(statuses.at(-1)!.args[1])
+			assert.equal(final.status, status)
+			assert.equal(final.items[0].prompt, "Implement pure Minesweeper engine and tests only.")
+		})
+	}
 
 	it("keeps native auto-approved execution keyed without adding a redundant request row", async () => {
 		const { config, callbacks } = createConfig({ autoApproveSafe: true })

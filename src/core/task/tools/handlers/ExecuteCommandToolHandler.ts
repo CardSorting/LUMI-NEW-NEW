@@ -3,6 +3,7 @@ import { formatResponse } from "@core/prompts/responses"
 import { WorkspacePathAdapter } from "@core/workspace/WorkspacePathAdapter"
 import { showSystemNotification } from "@integrations/notifications"
 import { resolveCommandTimeoutSeconds } from "@integrations/terminal/commandPolicy"
+import { normalizeShellCommand } from "@integrations/terminal/normalizeCommand"
 import type { CommandExecutionResult } from "@integrations/terminal/types"
 import {
 	appendTextToToolResponse,
@@ -23,7 +24,6 @@ import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
 import { recordExecutionEvidence } from "../utils/executionEvidence"
-import { applyModelContentFixes } from "../utils/ModelContentProcessor"
 import { ToolDisplay } from "../utils/ToolDisplay"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
 import { getInitialTaskPreview } from "../utils/taskPreview"
@@ -34,11 +34,11 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 	constructor(private readonly validator: ToolValidator) {}
 
 	getDescription(block: ToolUse): string {
-		return `[${block.name} for '${block.params.command}']`
+		return `[${block.name} for '${normalizeShellCommand(block.params.command ?? "")}']`
 	}
 
 	async handlePartialBlock(block: ToolUse, uiHelpers: StronglyTypedUIHelpers): Promise<void> {
-		const command = block.params.command
+		const command = block.params.command === undefined ? undefined : normalizeShellCommand(block.params.command)
 		if (uiHelpers.getConfig().isSubagentExecution) {
 			return
 		}
@@ -79,10 +79,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 
 		config.taskState.consecutiveMistakeCount = 0
 
-		// Pre-process command for certain models
-		if (config.api.getModel().id.includes("gemini")) {
-			command = applyModelContentFixes(command)
-		}
+		command = normalizeShellCommand(command)
 
 		// Handle multi-workspace command execution
 		let executionDir: string = config.cwd
@@ -116,6 +113,9 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 			}
 			// If no hint, use primary workspace (cwd)
 		}
+
+		// Hooks inspect the same command that validation, approval, and execution receive.
+		block = { ...block, params: { ...block.params, command: actualCommand } }
 
 		// Check command permission validation (CLINE_COMMAND_PERMISSIONS env var)
 		const permissionResult = config.services.commandPermissionController.validateCommand(actualCommand)
@@ -273,6 +273,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 				(signal, actionId) =>
 					config.callbacks.executeCommandTool(actualCommand, timeoutSeconds, {
 						actionId,
+						onStateChange: (state) => executor.executions.reconcileCommand(config.ulid, actionId, state),
 						owner: config.executionOwner ?? "parent",
 						cwd: executionDir,
 						commandMessageTs,

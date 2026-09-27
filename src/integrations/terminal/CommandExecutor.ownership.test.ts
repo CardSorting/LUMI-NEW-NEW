@@ -4,6 +4,7 @@ import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { CommandExecutor } from "./CommandExecutor"
 import { CommandOutputCollector } from "./CommandOutputCollector"
+import { CommandRuntime, CommandRuntimeRegistry } from "./CommandRuntime"
 import type { CommandExecutorCallbacks, ITerminalManager, TerminalCompletionDetails, TerminalProcessResultPromise } from "./types"
 
 function fakeProcess() {
@@ -31,7 +32,7 @@ function fakeProcess() {
 
 describe("terminal command ownership", () => {
 	afterEach(() => sinon.restore())
-	function fixture() {
+	function fixture(runtime?: CommandRuntime) {
 		const processes: ReturnType<typeof fakeProcess>[] = []
 		const terminals: { id: number; busy: boolean; terminal: { show: sinon.SinonSpy } }[] = []
 		const callbacks = {
@@ -72,9 +73,172 @@ describe("terminal command ownership", () => {
 				terminalManager: manager,
 			},
 			callbacks,
+			runtime,
 		)
 		return { executor, processes, terminals, callbacks, manager }
 	}
+	it("reconnects to the same live command across task views without replay or implicit cancellation", async () => {
+		const clock = sinon.useFakeTimers()
+		const registry = new CommandRuntimeRegistry()
+		const first = fixture(registry.get("task", "task"))
+		const pending = first.executor.execute("build", 1, {
+			actionId: "reopen-id",
+			owner: "helper:one",
+			suppressUserInteraction: true,
+		})
+		await clock.tickAsync(1000)
+		await pending
+		first.executor.detach()
+		const reopened = fixture(registry.get("task", "task"))
+		assert.equal(reopened.executor.getExecutionInventory().active[0].execution_id, "reopen-id")
+		assert.equal((await reopened.executor.readCommandOutput("reopen-id", 0)).owner, "helper:one")
+		const duplicate = await reopened.executor.execute("build", 1, { actionId: "new-delivery", suppressUserInteraction: true })
+		assert.equal(duplicate[2]?.executionId, "reopen-id")
+		sinon.assert.notCalled(reopened.manager.runCommand as sinon.SinonStub)
+		sinon.assert.notCalled(first.processes[0].terminate)
+		const read = reopened.executor.readCommandOutput("reopen-id", 30)
+		first.processes[0].getOutputSnapshot.returns("late failure evidence")
+		first.processes[0].complete({ exitCode: 17 })
+		const result = await read
+		assert.equal(result.status, "failed")
+		assert.equal(result.exit_code, 17)
+		assert.equal(result.output, "late failure evidence")
+		assert.equal(reopened.executor.getExecutionInventory().active.length, 0)
+		assert.match(reopened.executor.takeBackgroundCompletions()!, /reopen-id/)
+	})
+	it("routes late completion and output only to the current view, even when old cleanup arrives later", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const first = fixture(runtime)
+		first.callbacks.getDietCodeMessages = () => [{ ts: 12, say: "command" }]
+		const pending = first.executor.execute("build", 1, { actionId: "late-view", commandMessageTs: 12 })
+		await clock.tickAsync(1000)
+		await pending
+		const reopened = fixture(runtime)
+		reopened.callbacks.getDietCodeMessages = () => [{ ts: 12, say: "command" }]
+		;(first.callbacks.updateDietCodeMessage as sinon.SinonStub).resetHistory()
+		first.executor.detach()
+		first.processes[0].getOutputSnapshot.returns("complete output")
+		first.processes[0].complete()
+		await clock.tickAsync(0)
+		sinon.assert.notCalled(first.callbacks.updateDietCodeMessage as sinon.SinonStub)
+		const update = (reopened.callbacks.updateDietCodeMessage as sinon.SinonStub).lastCall.args[1]
+		assert.equal(update.commandExecution.executionId, "late-view")
+		assert.equal(update.commandExecution.status, "completed")
+		assert.equal(update.commandOutput, "complete output")
+		assert.equal((reopened.callbacks.updateBackgroundCommandState as sinon.SinonSpy).lastCall.args[0], false)
+	})
+	it("restores a receipt that completed while the reopened history was loading", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const first = fixture(runtime)
+		const pending = first.executor.execute("build", 1, { actionId: "load-race", commandMessageTs: 12 })
+		await clock.tickAsync(1000)
+		await pending
+		first.executor.detach()
+		const reopened = fixture(runtime)
+		first.processes[0].complete({ exitCode: 3 })
+		sinon.assert.notCalled(reopened.callbacks.updateDietCodeMessage as sinon.SinonStub)
+		reopened.callbacks.getDietCodeMessages = () => [{ ts: 12, say: "command" }]
+		reopened.executor.refreshCommandMessages()
+		const update = (reopened.callbacks.updateDietCodeMessage as sinon.SinonStub).lastCall.args[1]
+		assert.equal(update.commandExecution.status, "failed")
+		assert.equal(update.commandExecution.exitCode, 3)
+		assert.equal(update.commandCompleted, true)
+	})
+	it("fences stale launches, stop controls, and cancellation after a replacement view takes ownership", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const first = fixture(runtime)
+		const reopened = fixture(runtime)
+		first.executor.detach()
+		const pending = reopened.executor.execute("new build", 1, { actionId: "new-run", suppressUserInteraction: true })
+		await clock.tickAsync(1000)
+		await pending
+		await assert.rejects(first.executor.execute("stale build", 1), /replaced/)
+		assert.throws(() => first.executor.controlCommand("new-run", "stop"), /replaced/)
+		assert.equal(await first.executor.cancelBackgroundCommand(), false)
+		first.executor.refreshCommandMessages()
+		sinon.assert.notCalled(reopened.processes[0].terminate)
+		reopened.executor.controlCommand("new-run", "stop")
+		await clock.tickAsync(0)
+		sinon.assert.calledOnce(reopened.processes[0].terminate)
+		sinon.assert.notCalled(first.manager.runCommand as sinon.SinonStub)
+	})
+	it("fences both acquiring and queued launches when the task view changes", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const first = fixture(runtime)
+		let acquired!: (terminal: unknown) => void
+		;(first.manager.getOrCreateTerminal as sinon.SinonStub).returns(
+			new Promise((resolve) => {
+				acquired = resolve
+			}),
+		)
+		const oldResults = Promise.allSettled([
+			first.executor.execute("old acquisition", 1, { suppressUserInteraction: true }),
+			first.executor.execute("old queued", 1, { suppressUserInteraction: true }),
+		])
+		await clock.tickAsync(0)
+		assert.equal(runtime.pendingLaunches, 2)
+		const reopened = fixture(runtime)
+		const newResult = reopened.executor.execute("current intent", 1, { suppressUserInteraction: true })
+		await clock.tickAsync(0)
+		assert.ok((await oldResults).every((result) => result.status === "rejected"))
+		acquired({ id: 9, busy: false, terminal: { show: sinon.spy() } })
+		await clock.tickAsync(0)
+		sinon.assert.notCalled(first.manager.runCommand as sinon.SinonStub)
+		sinon.assert.calledOnce(reopened.manager.runCommand as sinon.SinonStub)
+		assert.equal(runtime.pendingLaunches, 0)
+		reopened.processes[0].complete()
+		await newResult
+	})
+	it("replays a retained identity as a receipt and rejects altered intent without dispatch", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const first = fixture(runtime)
+		const pending = first.executor.execute("mutate once", 1, { actionId: "intent", suppressUserInteraction: true })
+		await clock.tickAsync(0)
+		first.processes[0].complete({ exitCode: 9 })
+		await pending
+		first.executor.detach()
+		const reopened = fixture(runtime)
+		const replay = await reopened.executor.execute("mutate once", 1, { actionId: "intent", suppressUserInteraction: true })
+		assert.equal(replay[2]?.status, "failed")
+		assert.equal(replay[2]?.exitCode, 9)
+		await assert.rejects(reopened.executor.execute("mutate differently", 1, { actionId: "intent" }), /different command/)
+		await assert.rejects(
+			reopened.executor.execute("mutate once", 1, { actionId: "intent", cwd: "/other" }),
+			/different command/,
+		)
+		sinon.assert.notCalled(reopened.manager.runCommand as sinon.SinonStub)
+		const snapshot = reopened.executor.getExecutionSnapshot("intent")!
+		snapshot.output = "tampered"
+		assert.equal(reopened.executor.getExecutionSnapshot("intent")!.output, "captured output")
+	})
+	it("retains detached live ownership under idle cache pressure while isolating task identities", async () => {
+		const clock = sinon.useFakeTimers()
+		const registry = new CommandRuntimeRegistry(1)
+		const runtime = registry.get("task", "task")
+		const first = fixture(runtime)
+		const pending = first.executor.execute("active build", 1, { actionId: "retained", suppressUserInteraction: true })
+		await clock.tickAsync(1000)
+		await pending
+		first.executor.detach()
+		const idle = registry.get("idle", "old")
+		for (let i = 0; i < 6; i++) registry.get("unrelated", String(i))
+		assert.equal(registry.get("task", "task"), runtime)
+		assert.notEqual(registry.get("idle", "old"), idle)
+		assert.notEqual(registry.get("task", "different-identity"), runtime)
+		assert.notEqual(registry.get("different-task", "task"), runtime)
+		const reopened = fixture(runtime)
+		assert.equal(reopened.executor.getExecutionInventory().active[0].execution_id, "retained")
+		assert.throws(() => fixture(registry.get("foreign", "task")), /different task/)
+		first.processes[0].complete()
+		reopened.executor.detach()
+		assert.equal(runtime.retainedWork, false)
+		assert.equal(runtime.activeProcesses.size, 0)
+	})
 	it("exposes foreground, background, and recent owned commands without consuming their output", async () => {
 		const clock = sinon.useFakeTimers()
 		const { executor, processes } = fixture()
@@ -104,6 +268,42 @@ describe("terminal command ownership", () => {
 		assert.equal(executor.getExecutionSummary("action-id")?.execution_id, id)
 		assert.deepEqual(executor.getExecutionSummary(id), executor.getExecutionSummary("action-id"))
 		sinon.assert.notCalled(processes[0].getUnretrievedOutput)
+	})
+	it("publishes late completion under the same action ID and never marks a closed unknown command successful", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes } = fixture()
+		const onStateChange = sinon.spy()
+		const pending = executor.execute("build", 1, { actionId: "single-id", onStateChange, suppressUserInteraction: true })
+		await clock.tickAsync(1000)
+		assert.equal((await pending)[2]?.executionId, "single-id")
+		assert.equal(onStateChange.lastCall.args[0].status, "background")
+		processes[0].complete({ terminalClosed: true })
+		assert.equal(onStateChange.lastCall.args[0].status, "unconfirmed")
+		assert.equal(onStateChange.lastCall.args[0].executionId, "single-id")
+		assert.equal((await executor.readCommandOutput("single-id", 0)).status, "unconfirmed")
+		assert.equal(executor.getExecutionInventory().active.length, 0)
+	})
+	it("isolates rejecting or mutating lifecycle observers from authoritative receipts", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes } = fixture()
+		const states: string[] = []
+		const pending = executor.execute("build", 1, {
+			actionId: "observer-isolation",
+			suppressUserInteraction: true,
+			onStateChange: async (state) => {
+				states.push(state.status)
+				state.status = "completed"
+				throw new Error("observer unavailable")
+			},
+		})
+		await clock.tickAsync(1000)
+		assert.equal((await pending)[2]?.status, "background")
+		processes[0].complete({ exitCode: 2 })
+		await clock.tickAsync(0)
+		const receipt = await executor.readCommandOutput("observer-isolation", 0)
+		assert.equal(receipt.status, "failed")
+		assert.equal(receipt.exit_code, 2)
+		assert.equal(states.filter((state) => state === "failed").length, 1)
 	})
 	it("reads the same helper run after a timeout and retains its receipt after terminal reuse", async () => {
 		const clock = sinon.useFakeTimers()
@@ -205,7 +405,7 @@ describe("terminal command ownership", () => {
 		assert.equal(update.args[1].commandOutput, snapshot.output)
 		assert.equal(update.args[1].commandExecution.executionId, id)
 	})
-	it("releases readers on process failure and retains the failed receipt", async () => {
+	it("releases readers when deferred launch fails and retains the not-started receipt", async () => {
 		const clock = sinon.useFakeTimers()
 		const { executor, processes } = fixture()
 		const pending = executor.execute("broken", 1, { interactive: false })
@@ -214,7 +414,7 @@ describe("terminal command ownership", () => {
 		const read = executor.readCommandOutput(id, 30)
 		processes[0].emit("error", new Error("terminal failed"))
 		const snapshot = await read
-		assert.equal(snapshot.status, "failed")
+		assert.equal(snapshot.status, "not_started")
 		assert.equal(snapshot.detail, "terminal failed")
 		assert.deepEqual(await executor.readCommandOutput(id, 0), snapshot)
 		assert.equal(executor.hasActiveBackgroundCommand(), false)

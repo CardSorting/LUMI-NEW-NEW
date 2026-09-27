@@ -8,6 +8,25 @@ import type { TaskConfig } from "../../types/TaskConfig"
 import { WriteToFileToolHandler } from "../WriteToFileToolHandler"
 
 describe("parent documentation edits", () => {
+	it("accepts an explicit empty file without treating its content as missing", async () => {
+		const handler = new WriteToFileToolHandler({
+			checkDietCodeIgnorePath: sinon.stub().resolves({ ok: true }),
+		} as unknown as ToolValidator)
+		const config = {
+			cwd: "/workspace",
+			taskState: new TaskState(),
+			api: { getModel: () => ({ id: "test" }) },
+			services: { diffViewProvider: { editType: "create" } },
+		} as unknown as TaskConfig
+		const result = await handler.validateAndPrepareFileOperation(
+			config,
+			{ type: "tool_use", name: DietCodeDefaultTool.FILE_NEW, params: { path: "empty.txt", content: "" }, partial: false },
+			"empty.txt",
+			undefined,
+			"",
+		)
+		assert.equal(result?.newContent, "")
+	})
 	it("uses workspace permissions without requiring a forensic helper or completion first", async () => {
 		const checkDietCodeIgnorePath = sinon.stub().resolves({ ok: true })
 		const handler = new WriteToFileToolHandler({ checkDietCodeIgnorePath } as unknown as ToolValidator)

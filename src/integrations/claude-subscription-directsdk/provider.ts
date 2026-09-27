@@ -2,7 +2,6 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import * as path from "node:path"
-import { fileURLToPath } from "node:url"
 import {
 	CLAUDE_SUBSCRIPTION_DIRECTSDK_DEFAULT_MODEL,
 	CLAUDE_SUBSCRIPTION_DIRECTSDK_MODELS,
@@ -171,7 +170,8 @@ function normalizedTimeoutMs(value: number | undefined): number {
 }
 
 function candidateBundledPluginDirectories(): string[] {
-	const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+	// The extension bundle and unit-test runtime both emit CommonJS.
+	const moduleDir = __dirname
 	const integrationPath = path.join("integrations", "claude-subscription-directsdk", "vendor")
 	return [
 		path.join(moduleDir, "vendor"),
@@ -214,7 +214,7 @@ export function resolveClaudeSubscriptionDirectSdkCommand(explicit?: string): st
 }
 
 function bridgeCandidates(): string[] {
-	const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+	const moduleDir = __dirname
 	const relativeBridge = path.join("integrations", "claude-subscription-directsdk", "bridge.py")
 	return [
 		path.join(moduleDir, relativeBridge),

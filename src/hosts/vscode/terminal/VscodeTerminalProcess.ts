@@ -9,8 +9,10 @@ import {
 	PROCESS_HOT_TIMEOUT_NORMAL,
 	TRUNCATE_KEEP_LINES,
 } from "@/integrations/terminal/constants"
+import type { SupervisedShell } from "@/integrations/terminal/SupervisedShell"
 import type { ITerminalProcess, TerminalCompletionDetails, TerminalProcessEvents } from "@/integrations/terminal/types"
 import { Logger } from "@/shared/services/Logger"
+import type { ManagedTerminal } from "./ManagedTerminal"
 import { TerminalOutputDecoder } from "./TerminalOutputDecoder"
 
 const MAX_LINE_LENGTH = 16_384
@@ -36,6 +38,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 	private completionTimer?: NodeJS.Timeout
 	private completion: TerminalCompletionDetails = {}
 	private terminal?: vscode.Terminal
+	private managedExecution?: SupervisedShell
 	private stopped = false
 	private dispatched = false
 	private stopRequested = false
@@ -43,6 +46,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 	private hostEnded = false
 	private lostTracking = false
 	private disposables: vscode.Disposable[] = []
+	private readonly failedObservers = new WeakSet<object>()
 	private iterator?: AsyncIterator<string>
 	private resolveStopped!: () => void
 	private resolveTrackingUnavailable!: () => void
@@ -73,11 +77,53 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		this.isHot = false
 	}
 
+	/** A failed observer must not prevent the owner or other readers from receiving an event. */
+	override emit<K extends keyof TerminalProcessEvents>(event: K, ...args: TerminalProcessEvents[K]): boolean {
+		const listeners = this.rawListeners(event)
+		for (const listener of listeners) {
+			const failed = (error: unknown) => {
+				if (this.failedObservers.has(listener)) return
+				this.failedObservers.add(listener)
+				Logger.warn(`Terminal ${event} observer failed:`, error)
+			}
+			try {
+				const result: unknown = Reflect.apply(listener, this, args)
+				if (result && typeof (result as PromiseLike<unknown>).then === "function")
+					void Promise.resolve(result).catch(failed)
+			} catch (error) {
+				failed(error)
+			}
+		}
+		return listeners.length > 0
+	}
+
+	private disposeObservers(): void {
+		for (const disposable of this.disposables.splice(0)) {
+			try {
+				disposable.dispose()
+			} catch (error) {
+				Logger.warn("Terminal observer cleanup failed:", error)
+			}
+		}
+	}
+
 	/** Disposal requests a stop. The host's close event confirms it; never invent a signal. */
-	terminate() {
+	terminate(): void | Promise<void> {
 		if (this.stopped || this.stopRequested || (this.hostEnded && typeof this.completion.exitCode === "number")) return
 		this.stopRequested = true
 		this.waitForShellIntegration = false
+		if (!this.dispatched) {
+			// No process was started, so cancellation can settle without a host close event.
+			this.finish({ cancelled: true })
+			return
+		}
+		if (this.managedExecution) {
+			this.continue()
+			return this.managedExecution.terminate().catch((error) => {
+				this.stopRequested = false
+				throw error
+			})
+		}
 		try {
 			this.terminal?.dispose()
 		} catch (error) {
@@ -97,7 +143,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		clearTimeout(this.completionTimer)
 		this.emitRemainingBufferIfListening()
 		this.isListening = false
-		this.disposables.splice(0).forEach((disposable) => disposable.dispose())
+		this.disposeObservers()
 		this.resolveStopped()
 		// Iterator cleanup must never prevent completion if the host stream is broken.
 		if (this.iterator?.return)
@@ -108,37 +154,83 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		this.emit("continue")
 	}
 
-	async run(terminal: vscode.Terminal, command: string) {
+	async runManaged(terminal: ManagedTerminal, command: string) {
+		if (this.stopped || this.stopRequested || this.dispatched) return
+		this.disposeObservers()
+		this.terminal = terminal.terminal
+		const decoder = new TerminalOutputDecoder()
+		this.appendOutput(
+			"[Supervised shell: each command starts with fresh shell state. Include environment setup and dependent commands in the same invocation.]\n",
+		)
+		if (this.stopped || this.stopRequested) return
+		try {
+			this.managedExecution = terminal.run(command, {
+				onData: (data) => this.appendOutput(decoder.write(data)),
+				onComplete: (details) => this.finish(details),
+				onError: (error) => this.failBeforeDispatch(error),
+			})
+			this.dispatched = true
+		} catch (error) {
+			this.failBeforeDispatch(error)
+		}
+	}
+
+	private failBeforeDispatch(error: unknown) {
+		if (this.stopped) return
+		this.stopped = true
+		this.waitForShellIntegration = false
+		this.clearHotState()
+		this.disposeObservers()
+		this.resolveStopped()
+		this.emit("error", error instanceof Error ? error : new Error(String(error)))
+	}
+
+	async run(terminal: vscode.Terminal, command: string, fallback?: () => ManagedTerminal) {
 		if (this.stopped || this.stopRequested || this.dispatched) return
 		this.watchTerminal(terminal)
 		try {
-			if (!terminal.shellIntegration?.executeCommand) {
-				terminal.sendText(command, true)
-				this.dispatched = true
-				this.trackingLost("Shell integration is unavailable; completion and exit status are unknown.")
+			if (
+				!terminal.shellIntegration?.executeCommand ||
+				!(vscode.window as typeof vscode.window & ShellEvents).onDidEndTerminalShellExecution
+			) {
+				if (!fallback) throw new Error("Command did not start: no observable shell transport is available.")
+				// Transport selection is only allowed before dispatch. Never replay an uncertain command.
+				this.disposeObservers()
+				await this.runManaged(fallback(), command)
 				return
 			}
-			const execution = terminal.shellIntegration.executeCommand(command)
-			this.dispatched = true
-			const endSubscription = (vscode.window as typeof vscode.window & ShellEvents).onDidEndTerminalShellExecution?.(
-				(event) => {
-					if (event.terminal !== terminal || event.execution !== execution || this.stopped || this.hostEnded) return
-					this.hostEnded = true
-					this.completion = { exitCode: event.exitCode }
-					if (event.exitCode === undefined) {
-						// A sub-shell can end tracking without ending the underlying command.
-						clearTimeout(this.completionTimer)
-						this.trackingLost("The terminal did not report an exit code.")
-						return
-					}
-					if (this.streamEnded) this.finish()
-					else {
-						clearTimeout(this.completionTimer)
-						this.completionTimer = setTimeout(() => this.finish(), COMPLETION_DRAIN_MS)
-					}
-				},
-			)
+			let execution: ShellExecution | undefined
+			const earlyEvents: { terminal: vscode.Terminal; execution: ShellExecution; exitCode?: number }[] = []
+			const onEnd = (event: { terminal: vscode.Terminal; execution: ShellExecution; exitCode?: number }) => {
+				if (
+					event.terminal !== terminal ||
+					this.stopped ||
+					(this.hostEnded && typeof this.completion.exitCode === "number")
+				)
+					return
+				if (!execution) {
+					if (earlyEvents.length < 8) earlyEvents.push(event)
+					return
+				}
+				if (event.execution !== execution) return
+				this.hostEnded = true
+				this.completion = { exitCode: event.exitCode }
+				if (event.exitCode === undefined) {
+					clearTimeout(this.completionTimer)
+					this.trackingLost("The terminal did not report an exit code.")
+					return
+				}
+				if (this.streamEnded) this.finish()
+				else {
+					clearTimeout(this.completionTimer)
+					this.completionTimer = setTimeout(() => this.finish(), COMPLETION_DRAIN_MS)
+				}
+			}
+			const endSubscription = (vscode.window as typeof vscode.window & ShellEvents).onDidEndTerminalShellExecution?.(onEnd)
 			if (endSubscription) this.disposables.push(endSubscription)
+			execution = terminal.shellIntegration.executeCommand(command)
+			this.dispatched = true
+			earlyEvents.forEach(onEnd)
 			// Subscribe before read() can throw, and read before yielding to avoid missing output.
 			this.iterator = execution.read()[Symbol.asyncIterator]()
 			const read = async () => {
@@ -173,11 +265,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 			if (this.stopped) return
 			this.streamEnded = true
 			if (!this.dispatched) {
-				this.stopped = true
-				this.waitForShellIntegration = false
-				this.disposables.splice(0).forEach((disposable) => disposable.dispose())
-				this.resolveStopped()
-				this.emit("error", error instanceof Error ? error : new Error(String(error)))
+				this.failBeforeDispatch(error)
 			} else if (this.hostEnded && typeof this.completion.exitCode === "number") {
 				this.appendOutput("\nTerminal output capture was interrupted: " + String(error) + "\n")
 				this.finish()

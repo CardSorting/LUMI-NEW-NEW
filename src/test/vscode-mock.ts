@@ -1,4 +1,17 @@
 // Mock implementation of VSCode API for unit tests
+export class EventEmitter<T> {
+	private listeners = new Set<(value: T) => void>()
+	readonly event = (listener: (value: T) => void) => {
+		this.listeners.add(listener)
+		return { dispose: () => this.listeners.delete(listener) }
+	}
+	fire(value: T) {
+		for (const listener of this.listeners) listener(value)
+	}
+	dispose() {
+		this.listeners.clear()
+	}
+}
 export const env = {
 	machineId: "test-machine-id",
 	isTelemetryEnabled: true,
@@ -29,6 +42,15 @@ export const workspace = {
 
 // Export other commonly used VSCode API mocks as needed
 export const window = {
+	createTerminal: (options: any) => ({
+		name: options.name ?? "test",
+		processId: Promise.resolve(undefined),
+		shellIntegration: undefined,
+		show: () => options.pty?.open(),
+		hide: () => {},
+		sendText: () => {},
+		dispose: () => options.pty?.close(),
+	}),
 	onDidCloseTerminal: (_listener: (terminal: any) => void) => ({ dispose: () => {} }),
 	onDidEndTerminalShellExecution: undefined as ((listener: (event: any) => void) => { dispose: () => void }) | undefined,
 	showErrorMessage: (_message: string) => Promise.resolve(),

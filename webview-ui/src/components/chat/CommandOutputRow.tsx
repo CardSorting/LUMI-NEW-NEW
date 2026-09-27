@@ -172,7 +172,9 @@ export const CommandOutputRow = memo(
 		const execution = message.commandExecution
 		const status = getCommandStatus(message, isCommandExecuting, isCommandPending, isCommandCompleted)
 		const running = execution ? execution.status === "running" || execution.status === "background" : isCommandExecuting
-		const warning = execution ? ["unknown", "stopping", "not_started"].includes(execution.status) : isCommandPending
+		const warning = execution
+			? ["unknown", "unconfirmed", "stopping", "not_started"].includes(execution.status)
+			: isCommandPending
 		const failed = execution?.status === "failed" || execution?.status === "stop_failed"
 
 		const commandHeader = (
@@ -214,7 +216,7 @@ export const CommandOutputRow = memo(
 						<TerminalText text={command} />
 					</div>
 					{status.detail && <p className="m-0 px-2.5 pb-2.5 text-xs text-description break-words">{status.detail}</p>}
-					{execution?.executionId && execution.taskId && isActiveCommandExecution(execution) && (
+					{execution?.executionId && execution.taskId && !execution.recovery && isActiveCommandExecution(execution) && (
 						<CommandControls
 							executionId={execution.executionId}
 							key={execution.executionId}
@@ -266,6 +268,8 @@ function getCommandStatus(
 					label: "Status unavailable",
 					detail: state.detail ?? "Check the existing terminal before running this command again.",
 				}
+			case "unconfirmed":
+				return { label: "Exit unconfirmed", detail: state.detail ?? "Inspect the result before repeating this command." }
 			case "stop_failed":
 				return {
 					label: "Could not stop",

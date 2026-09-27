@@ -71,6 +71,58 @@ describe("command approval execution", () => {
 			signal: sinon.match.instanceOf(AbortSignal),
 		})
 	})
+	for (const modelId of ["gpt-6-astra", "claude-sonnet", "gemini-3"]) {
+		it(`repairs escaped command operators before approval, validation, hooks, and execution for ${modelId}`, async () => {
+			const { config, callbacks, handler } = fixture(true, true)
+			config.api.getModel = () => ({ id: modelId }) as never
+			const validate = sinon.spy(config.services.commandPermissionController, "validateCommand")
+			const command = "node --version && npm --version && node /tmp/concept-seed.mjs --scope direction --mode operate"
+			await handler.execute(config, { ...block, params: { ...block.params, command: command.replace(/&/g, "&amp;") } })
+			sinon.assert.calledOnceWithExactly(validate, command)
+			sinon.assert.calledWith(callbacks.say, "command", command)
+			sinon.assert.calledOnceWithMatch(ToolHookUtils.runPreToolUseIfEnabled as sinon.SinonStub, config, {
+				params: { command },
+			})
+			sinon.assert.calledOnceWithMatch(callbacks.executeCommandTool, command)
+		})
+		it(`preserves literal HTML and complete flags in commands for ${modelId}`, async () => {
+			const { config, callbacks, handler } = fixture(true, true)
+			config.api.getModel = () => ({ id: modelId }) as never
+			const command = "printf '%s' '&amp;&amp; &lt;div&gt; &quot;text&quot;' && node /tmp/concept-seed.mjs --mode operate"
+			await handler.execute(config, { ...block, params: { ...block.params, command } })
+			sinon.assert.calledOnceWithMatch(callbacks.executeCommandTool, command)
+		})
+	}
+	it("validates the repaired command before it can receive trusted-command approval", async () => {
+		const { config, callbacks, handler } = fixture(false, true)
+		const validate = sinon.spy(config.services.commandPermissionController, "validateCommand")
+		await handler.execute(config, { ...block, params: { command: "npm test &amp;&amp; blocked-command" } })
+		sinon.assert.calledOnceWithExactly(validate, "npm test && blocked-command")
+		sinon.assert.notCalled(callbacks.executeCommandTool)
+		sinon.assert.notCalled(callbacks.ask)
+	})
+	it("shows the repaired command for manual approval and executes that same text", async () => {
+		const { config, callbacks, handler } = fixture()
+		callbacks.ask.resolves({ response: "yesButtonClicked" })
+		const command = "node --version && npm --version"
+		await handler.execute(config, { ...block, params: { ...block.params, command: command.replace(/&/g, "&amp;") } })
+		sinon.assert.calledOnceWithMatch(
+			callbacks.ask,
+			"command",
+			sinon.match((text: string) => text.startsWith(command)),
+		)
+		sinon.assert.calledOnceWithMatch(callbacks.executeCommandTool, command)
+	})
+	it("repairs helper commands through the same validation and execution path", async () => {
+		const { config, callbacks, handler } = fixture()
+		config.isSubagentExecution = true
+		const validate = sinon.spy(config.services.commandPermissionController, "validateCommand")
+		await handler.execute(config, { ...block, params: { command: "node --version &amp;&amp; npm --version" } })
+		sinon.assert.calledOnceWithExactly(validate, "node --version && npm --version")
+		sinon.assert.calledOnceWithMatch(callbacks.executeCommandTool, "node --version && npm --version")
+		sinon.assert.notCalled(callbacks.ask)
+		sinon.assert.notCalled(callbacks.say)
+	})
 	it("marks a suppressed duplicate as not started and points at its existing execution", async () => {
 		const { config, callbacks, handler } = fixture()
 		callbacks.say.resolves(2)

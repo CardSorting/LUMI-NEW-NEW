@@ -1,6 +1,6 @@
 import type { DietCodeSaySubagentStatus, SubagentActivity, SubagentExecutionStatus, SubagentStatusItem } from "./ExtensionMessage"
 
-const STATUSES = new Set<SubagentExecutionStatus>(["pending", "running", "completed", "failed", "cancelled"])
+const STATUSES = new Set<SubagentExecutionStatus>(["pending", "running", "completed", "failed", "cancelled", "interrupted"])
 const PHASES = new Set<SubagentActivity["phase"]>(["preparing", "waiting", "responding", "tool", "retrying", "recovering"])
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
 const amount = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0)
@@ -38,6 +38,8 @@ export function parseSubagentStatusPayload(raw: string | undefined): DietCodeSay
 				: undefined
 		items.push({
 			id,
+			executionId: text(entry.executionId),
+			pendingCommandIds: strings(entry.pendingCommandIds),
 			index: count(entry.index) || index + 1,
 			name: text(entry.name)?.trim() || `Helper ${index + 1}`,
 			prompt: entry.prompt,
@@ -66,12 +68,13 @@ export function parseSubagentStatusPayload(raw: string | undefined): DietCodeSay
 	const successes = items.filter((item) => item.status === "completed").length
 	const failures = items.filter((item) => item.status === "failed").length
 	const cancelled = items.filter((item) => item.status === "cancelled").length
+	const interrupted = items.filter((item) => item.status === "interrupted").length
 	const active = items.some((item) => item.status === "running" || item.status === "pending")
 	return {
 		batchId: text(payload.batchId)?.trim() || undefined,
-		status: active ? "running" : cancelled ? "cancelled" : failures ? "failed" : "completed",
+		status: active ? "running" : interrupted ? "interrupted" : cancelled ? "cancelled" : failures ? "failed" : "completed",
 		total: items.length,
-		completed: successes + failures + cancelled,
+		completed: successes + failures + cancelled + interrupted,
 		successes,
 		failures,
 		cancelled,

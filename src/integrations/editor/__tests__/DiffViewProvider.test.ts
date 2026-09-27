@@ -1,5 +1,12 @@
+import * as fs from "node:fs/promises"
+import { tmpdir } from "node:os"
+import * as path from "node:path"
 import * as assert from "assert"
-import { describe, it } from "mocha"
+import { afterEach, beforeEach, describe, it } from "mocha"
+import sinon from "sinon"
+import { formatResponse } from "@/core/prompts/responses"
+import { HostProvider } from "@/hosts/host-provider"
+import { setVscodeHostProviderMock } from "@/test/host-provider-test-utils"
 import { DiffViewProvider } from "../DiffViewProvider"
 
 class TestBoundaryDiffViewProvider extends DiffViewProvider {
@@ -28,6 +35,9 @@ class TestBoundaryDiffViewProvider extends DiffViewProvider {
 
 	async saveDocument(): Promise<boolean> {
 		return true
+	}
+	override async getNewDiagnosticProblems(): Promise<string> {
+		return ""
 	}
 	async closeAllDiffViews(): Promise<void> {}
 	async resetDiffView(): Promise<void> {}
@@ -63,6 +73,170 @@ class TestBoundaryDiffViewProvider extends DiffViewProvider {
 		this.truncatedAt = undefined
 	}
 }
+
+describe("committed file receipts", () => {
+	afterEach(() => sinon.restore())
+	async function prepare() {
+		const provider = new TestBoundaryDiffViewProvider()
+		provider.setup("old content")
+		Object.assign(provider, { relPath: "file.txt", absolutePath: "/workspace/file.txt" })
+		await provider.update("new content", true)
+		sinon.stub(provider, "showFile").resolves()
+		return provider
+	}
+	for (const outcome of ["throws", "missing", "hangs"] as const) {
+		it(`retains the commit when final-content observation ${outcome}, without inventing file contents`, async () => {
+			const clock = sinon.useFakeTimers()
+			const provider = await prepare()
+			const read = sinon.stub(provider, "getDocumentText")
+			read.onFirstCall().resolves("new content")
+			if (outcome === "throws") read.onSecondCall().rejects(new Error("editor closed"))
+			else if (outcome === "missing") read.onSecondCall().resolves(undefined)
+			else read.onSecondCall().returns(new Promise(() => {}))
+			let result: Awaited<ReturnType<typeof provider.saveChanges>> | undefined
+			let failure: unknown
+			const pending = provider.saveChanges().then(
+				(value) => {
+					result = value
+				},
+				(error) => {
+					failure = error
+				},
+			)
+			await clock.tickAsync(1001)
+			assert.equal(failure, undefined)
+			assert.ok(result, "A committed result must not wait indefinitely for the editor")
+			await pending
+			assert.equal(result.finalContent, undefined)
+			assert.match(result.newProblemsMessage ?? "", /saved.*contents.*unavailable/i)
+			for (const formatted of [
+				formatResponse.fileEditWithoutUserChanges("file.txt", undefined, result.finalContent, result.newProblemsMessage),
+				formatResponse.fileEditWithUserChanges(
+					"file.txt",
+					"user diff",
+					undefined,
+					result.finalContent,
+					result.newProblemsMessage,
+				),
+			]) {
+				assert.doesNotMatch(formatted, /<final_file_content|\bundefined\b|use.*shown above/i)
+				assert.match(formatted, /read.*before.*edit/i)
+			}
+		})
+	}
+	for (const phase of ["showFile", "closeAllDiffViews", "getNewDiagnosticProblems"] as const) {
+		it(`returns a committed result when ${phase} never responds`, async () => {
+			const clock = sinon.useFakeTimers()
+			const provider = await prepare()
+			if (phase === "showFile") (provider.showFile as sinon.SinonStub).returns(new Promise(() => {}))
+			else sinon.stub(provider, phase).returns(new Promise<never>(() => {}))
+			let result: Awaited<ReturnType<typeof provider.saveChanges>> | undefined
+			void provider.saveChanges().then((value) => {
+				result = value
+			})
+			await clock.tickAsync(1001)
+			assert.ok(result, "Optional editor work must not retain the mutation indefinitely")
+			assert.equal(result.finalContent, "new content")
+		})
+	}
+	it("keeps an observed empty file distinct from unavailable contents", async () => {
+		const provider = await prepare()
+		await provider.update("", true)
+		const result = await provider.saveChanges()
+		assert.equal(result.finalContent, "")
+		assert.match(formatResponse.fileEditWithoutUserChanges("file.txt", undefined, "", undefined), /<final_file_content/)
+	})
+	it("shares an in-flight save and holds cleanup until its receipt is complete", async () => {
+		const provider = await prepare()
+		let started!: () => void
+		const saving = new Promise<void>((resolve) => {
+			started = resolve
+		})
+		let commit!: (saved: boolean) => void
+		const save = sinon.stub(provider, "saveDocument").callsFake(() => {
+			started()
+			return new Promise<boolean>((resolve) => {
+				commit = resolve
+			})
+		})
+		const first = provider.saveChanges()
+		const duplicate = provider.saveChanges()
+		assert.equal(first, duplicate)
+		await saving
+		let cleaned = false
+		const cleanup = provider.reset().then(() => {
+			cleaned = true
+		})
+		await Promise.resolve()
+		assert.equal(cleaned, false)
+		assert.equal(provider.isEditing, true)
+		commit(true)
+		assert.equal((await first).finalContent, "new content")
+		await cleanup
+		assert.equal(provider.isEditing, false)
+		sinon.assert.calledOnce(save)
+	})
+	it("does not resume later cleanup after an optional display operation times out", async () => {
+		const clock = sinon.useFakeTimers()
+		const provider = await prepare()
+		let show!: () => void
+		;(provider.showFile as sinon.SinonStub).returns(
+			new Promise<void>((resolve) => {
+				show = resolve
+			}),
+		)
+		const close = sinon.spy(provider, "closeAllDiffViews")
+		const pending = provider.saveChanges()
+		await clock.tickAsync(1001)
+		assert.equal((await pending).finalContent, "new content")
+		await provider.reset()
+		provider.setup("next edit")
+		show()
+		await clock.tickAsync(0)
+		sinon.assert.notCalled(close)
+		assert.equal(provider.isEditing, true)
+	})
+})
+
+describe("visual edit preparation ownership", () => {
+	let cwd: string
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(tmpdir(), "lumi-visual-edit-"))
+		setVscodeHostProviderMock({
+			hostBridgeClient: {
+				workspaceClient: {
+					getWorkspacePaths: async () => ({ paths: [cwd] }),
+					saveOpenDocumentIfDirty: async () => ({}),
+					getDiagnostics: async () => ({ fileDiagnostics: [] }),
+				},
+			} as never,
+		})
+	})
+	afterEach(async () => {
+		HostProvider.reset()
+		await fs.rm(cwd, { recursive: true, force: true })
+	})
+	it("preserves a deletion target while preparing and rejecting its preview", async () => {
+		const target = path.join(cwd, "existing.txt")
+		await fs.writeFile(target, "keep this")
+		const provider = new TestBoundaryDiffViewProvider()
+		provider.editType = "delete"
+		await provider.open(target)
+		assert.equal(provider.originalContent, "keep this")
+		assert.equal(await fs.readFile(target, "utf8"), "keep this")
+		await provider.revertChanges()
+		assert.equal(await fs.readFile(target, "utf8"), "keep this")
+	})
+	it("does not truncate or delete a competing create it never owned", async () => {
+		const target = path.join(cwd, "existing.txt")
+		await fs.writeFile(target, "other writer")
+		const provider = new TestBoundaryDiffViewProvider()
+		provider.editType = "create"
+		await assert.rejects(provider.open(target), { code: "EEXIST" })
+		await provider.revertChanges()
+		assert.equal(await fs.readFile(target, "utf8"), "other writer")
+	})
+})
 
 describe("DiffViewProvider Boundary Validation", () => {
 	it("should replace entire document on final update to prevent concatenation", async () => {

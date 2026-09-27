@@ -8,6 +8,7 @@ import {
 	TerminalProcessResultPromise as ITerminalProcessResultPromise,
 } from "@/integrations/terminal/types"
 import { Logger } from "@/shared/services/Logger"
+import { ManagedTerminal } from "./ManagedTerminal"
 import { mergePromise, VscodeTerminalProcess } from "./VscodeTerminalProcess"
 import { TerminalInfo, TerminalRegistry } from "./VscodeTerminalRegistry"
 
@@ -69,12 +70,9 @@ Resources:
 */
 
 /*
-The new shellIntegration API gives us access to terminal command execution output handling.
-However, we don't update our VSCode type definitions or engine requirements to maintain compatibility
-with older VSCode versions. Users on older versions will automatically fall back to using sendText
-for terminal command execution.
-Interestingly, some environments like Cursor enable these APIs even without the latest VSCode engine.
-This approach allows us to leverage advanced features when available while ensuring broad compatibility.
+The shell integration API supplies command output and completion. Hosts without both capabilities
+use a supervised shell process, selected before dispatch, instead of an unobservable sendText write.
+Keeping capability detection separate from the declared engine version supports compatible IDE forks.
 */
 declare module "vscode" {
 	// https://github.com/microsoft/vscode/blob/f0417069c62e20f3667506f4b7e53ca0004b4e3e/src/vscode-dts/vscode.d.ts#L7442
@@ -105,6 +103,15 @@ export class VscodeTerminalManager implements ITerminalManager {
 	private terminalOutputLineLimit = 500
 	private defaultTerminalProfile = "default"
 
+	getRecoveryMetadata(terminalId: number): ReturnType<NonNullable<ITerminalManager["getRecoveryMetadata"]>> {
+		const info = TerminalRegistry.getTerminal(terminalId)
+		return {
+			kind: info ? (info.managed ? "supervised" : "vscode_terminal") : "unknown",
+			shell: info?.managed?.shell ?? info?.shellPath,
+			terminalName: info?.terminal.name,
+		}
+	}
+
 	runCommand(terminalInfo: ITerminalInfo, command: string): ITerminalProcessResultPromise {
 		// Cast to VSCode-specific TerminalInfo for internal use
 		// Using unknown as intermediate cast due to structural differences between ITerminal and vscode.Terminal
@@ -119,7 +126,7 @@ export class VscodeTerminalManager implements ITerminalManager {
 
 		vscodeTerminalInfo.busy = true
 		vscodeTerminalInfo.lastCommand = command
-		const process = new VscodeTerminalProcess(vscodeTerminalInfo.terminal)
+		const process = new VscodeTerminalProcess(vscodeTerminalInfo.managed ? undefined : vscodeTerminalInfo.terminal)
 		this.processes.set(vscodeTerminalInfo.id, process)
 
 		process.once("completed", (details) => {
@@ -152,17 +159,41 @@ export class VscodeTerminalManager implements ITerminalManager {
 		const start = () => {
 			if (!process.waitForShellIntegration) return
 			process.waitForShellIntegration = false
-			void process.run(vscodeTerminalInfo.terminal, command).catch((error) => {
+			const fallback = () => {
+				if (!vscodeTerminalInfo.managed) {
+					if (!vscodeTerminalInfo.cwd) throw new Error("Command did not start: its working directory is unavailable.")
+					const original = vscodeTerminalInfo.terminal
+					const managed = new ManagedTerminal(vscodeTerminalInfo.cwd, expectedShell())
+					vscodeTerminalInfo.managed = managed
+					vscodeTerminalInfo.terminal = managed.terminal
+					if (vscode.window.activeTerminal === original) managed.terminal.show(true)
+					original.dispose()
+				}
+				return vscodeTerminalInfo.managed
+			}
+			const expectedShell = () =>
+				vscodeTerminalInfo.shellPath ?? getShellForProfile(this.defaultTerminalProfile ?? "default")
+			const run = vscodeTerminalInfo.managed
+				? process.runManaged(vscodeTerminalInfo.managed, command)
+				: process.run(vscodeTerminalInfo.terminal, command, fallback)
+			void run.catch((error) => {
 				process.emit("error", error instanceof Error ? error : new Error(String(error)))
 			})
 		}
 		// Defer dispatch until the caller has attached output and completion listeners.
-		if (vscodeTerminalInfo.terminal.shellIntegration) {
+		if (
+			vscodeTerminalInfo.managed ||
+			vscodeTerminalInfo.terminal.shellIntegration?.executeCommand ||
+			!(vscode.window as typeof vscode.window & { onDidEndTerminalShellExecution?: unknown }).onDidEndTerminalShellExecution
+		) {
 			queueMicrotask(start)
 		} else {
-			void pWaitFor(() => !process.waitForShellIntegration || vscodeTerminalInfo.terminal.shellIntegration !== undefined, {
-				timeout: this.shellIntegrationTimeout,
-			})
+			void pWaitFor(
+				() => !process.waitForShellIntegration || !!vscodeTerminalInfo.terminal.shellIntegration?.executeCommand,
+				{
+					timeout: this.shellIntegrationTimeout,
+				},
+			)
 				.catch(() => {})
 				.then(start)
 		}
@@ -181,6 +212,8 @@ export class VscodeTerminalManager implements ITerminalManager {
 
 		const matchingTerminal = this.terminalReuseEnabled
 			? terminals.find((t) => {
+					// Never inherit another task's shell state or command ownership.
+					if (!this.terminalIds.has(t.id)) return false
 					if (t.busy) {
 						Logger.log(`[TerminalManager] Terminal ${t.id} is busy, skipping`)
 						return false
@@ -189,7 +222,7 @@ export class VscodeTerminalManager implements ITerminalManager {
 					if (t.shellPath !== expectedShellPath) {
 						return false
 					}
-					const terminalCwd = t.terminal.shellIntegration?.cwd // one of dietcode's commands could have changed the cwd of the terminal
+					const terminalCwd = t.managed ? { fsPath: t.managed.cwd } : t.terminal.shellIntegration?.cwd
 					if (!terminalCwd) {
 						Logger.log(`[TerminalManager] Terminal ${t.id} has no cwd, skipping`)
 						return false

@@ -61,6 +61,18 @@ function commandProgressResult(result: unknown): unknown {
 	return result
 }
 
+function helperProgressResult(result: unknown): unknown {
+	if (typeof result !== "string" || !result.startsWith("### SWARM EXECUTION SUMMARY\n")) return result
+	const references = result.indexOf("\n### RECONCILIATION\n")
+	const evidence = result.indexOf("\n### AGENT DETAILS\n")
+	// Receipt identities aid reconciliation; allocating new identities is not new task progress.
+	const substantive = references >= 0 && evidence > references ? result.slice(0, references) + result.slice(evidence) : result
+	return substantive.replace(
+		/^(- )[^:\n]+(: [a-z_]+\. Inspect with read_command_output; do not relaunch\.)$/gm,
+		"$1[execution]$2",
+	)
+}
+
 /** Renew execution when tools produce new evidence, not when a checklist or error counter changes. */
 export class ToolProgressTracker {
 	private readonly results = new Set<string>()
@@ -108,6 +120,7 @@ export class ToolProgressTracker {
 			params = semanticParams
 		}
 		if (name === "execute_command") result = commandProgressResult(result)
+		result = helperProgressResult(result)
 		if (name === "read_command_output" && typeof result === "string") {
 			try {
 				const snapshot = JSON.parse(result) as CommandExecutionSnapshot | null

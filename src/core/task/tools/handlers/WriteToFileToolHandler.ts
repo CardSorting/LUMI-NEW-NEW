@@ -17,15 +17,16 @@ import { StabilityDoctor } from "../../../policy/StabilityDoctor"
 import { StabilityGuard } from "../../../policy/StabilityGuard"
 import { SpiderEngine } from "../../../policy/spider/SpiderEngine"
 import { executor } from "../../ActionExecutor"
-import { RefactorHealer } from "../../tools/RefactorHealer"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
 import { applyModelContentFixes } from "../utils/ModelContentProcessor"
 import { StabilityScribe } from "../utils/StabilityScribe"
+import { ToolDisplay } from "../utils/ToolDisplay"
 import { ToolDisplayUtils } from "../utils/ToolDisplayUtils"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
+import { reportToolUsage } from "../utils/toolTelemetry"
 
 export class WriteToFileToolHandler implements IFullyManagedTool {
 	readonly name = DietCodeDefaultTool.FILE_NEW // This handler supports write_to_file, replace_in_file, and new_rule
@@ -95,6 +96,9 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
+		config.taskState.recovery?.assertCanExecute(config.executionOwner)
+		let savedReceipt: ToolResponse | undefined
+		const observation = new ToolDisplay(config, "File edit")
 		const rawRelPath = block.params.path
 		const rawContent = block.params.content // for write_to_file
 		const rawDiff = block.params.diff // for replace_in_file
@@ -117,7 +121,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 			return await config.callbacks.sayAndCreateMissingParamError(block.name, "diff")
 		}
 
-		if (block.name === "write_to_file" && !rawContent) {
+		if (block.name === "write_to_file" && rawContent === undefined) {
 			config.taskState.consecutiveMistakeCount++
 			await config.services.diffViewProvider.reset()
 
@@ -180,7 +184,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 				await config.services.diffViewProvider.open(absolutePath, { displayPath: relPath })
 			}
 			await config.services.diffViewProvider.update(newContent, true)
-			await setTimeoutPromise(300) // wait for diff view to update
+			if (!config.isSubagentExecution) await setTimeoutPromise(300) // visual editors need time to render
 			await config.services.diffViewProvider.scrollToFirstDiff()
 			// showOmissionWarning(this.diffViewProvider.originalContent || "", newContent)
 
@@ -202,7 +206,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 				await config.callbacks.say("tool", completeMessage, undefined, undefined, false)
 
 				// Capture telemetry
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					block.name,
 					modelId,
@@ -229,7 +233,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 					const fileDeniedNote = fileExists
 						? "The file was not updated, and maintains its original contents."
 						: "The file was not created."
-					telemetryService.captureToolUsage(
+					reportToolUsage(
 						config.ulid,
 						block.name,
 						modelId,
@@ -243,7 +247,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 					return `${formatResponse.toolDenied()} ${fileDeniedNote}`
 				}
 
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					block.name,
 					modelId,
@@ -269,48 +273,66 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 				throw error
 			}
 
-			// Mark the file as edited by DietCode
-			config.services.fileContextTracker.markFileAsEditedByDietCode(relPath)
-
 			// --- JoyZoning Sovereign Integration ---
-			try {
-				const engine = new SpiderEngine(config.cwd)
-				await engine.loadRegistry()
-				const guard = new StabilityGuard(config.cwd)
+			if (config.auditFileWriteAdvisoryEnabled && !config.isSubagentExecution)
+				try {
+					const engine = new SpiderEngine(config.cwd)
+					await engine.loadRegistry()
+					const guard = new StabilityGuard(config.cwd)
 
-				// Audit the proposed content
-				const anomalies = new AnomalyRegistry(config.cwd)
-				const signal = await guard.scrutinize(relPath, newContent, engine, anomalies)
+					// Audit the proposed content
+					const anomalies = new AnomalyRegistry(config.cwd)
+					const signal = await guard.scrutinize(relPath, newContent, engine, anomalies)
 
-				if (!signal.approved) {
-					await config.callbacks.say("error", `Stability Blockade: ${signal.reason}`)
+					if (!signal.approved) {
+						await config.callbacks.say("error", `Stability Blockade: ${signal.reason}`)
+					}
+
+					// Check for drift/optimizations
+					const doctor = new StabilityDoctor(config.cwd)
+					const report = await doctor.diagnose(engine)
+					const optimization = report.optimizations.find((o) => o.file === relPath)
+
+					if (optimization) {
+						// Add to a "Directive" queue to be appended to the return message
+						const state = config.taskState as unknown as { sovereignDirective?: string }
+						state.sovereignDirective = `\n\n[ARCHITECTURAL OPTIMIZATION]: ${optimization.reason}. Recommended Layer: ${optimization.recommendedLayer}.`
+					}
+
+					// Advice must not mutate the file before the approved edit is saved.
+				} catch (e) {
+					Logger.error("[JoyZoning] Integration error:", e)
 				}
-
-				// Check for drift/optimizations
-				const doctor = new StabilityDoctor(config.cwd)
-				const report = await doctor.diagnose(engine)
-				const optimization = report.optimizations.find((o) => o.file === relPath)
-
-				if (optimization) {
-					// Add to a "Directive" queue to be appended to the return message
-					const state = config.taskState as unknown as { sovereignDirective?: string }
-					state.sovereignDirective = `\n\n[ARCHITECTURAL OPTIMIZATION]: ${optimization.reason}. Recommended Layer: ${optimization.recommendedLayer}.`
-				}
-
-				// Auto-Align Tag
-				const healer = new RefactorHealer(config.cwd)
-				await healer.alignTag(absolutePath)
-			} catch (e) {
-				Logger.error("[JoyZoning] Integration error:", e)
-			}
 			// ----------------------------------------
 
 			// Save the changes and get the result with reliability wrapper
 			const { newProblemsMessage, userEdits, autoFormattingEdits, finalContent } = await executor.execute(
 				config.ulid,
-				() => config.services.diffViewProvider.saveChanges(),
-				{ concurrencyGroup: "fs", signal: config.taskState.abortSignal, settleOnAbort: true },
+				() => {
+					config.taskState.recovery?.assertCanExecute(config.executionOwner)
+					return config.services.diffViewProvider.saveChanges()
+				},
+				{
+					concurrencyGroup: "fs",
+					signal: config.taskState.abortSignal,
+					settleOnAbort: true,
+					execution: {
+						kind: "file_write",
+						input: { path: absolutePath, content: newContent },
+						label: relPath,
+						owner: config.executionOwner,
+					},
+				},
 			)
+			savedReceipt = userEdits
+				? formatResponse.fileEditWithUserChanges(
+						relPath,
+						userEdits,
+						autoFormattingEdits,
+						finalContent,
+						newProblemsMessage,
+					)
+				: formatResponse.fileEditWithoutUserChanges(relPath, autoFormattingEdits, finalContent, newProblemsMessage)
 
 			// Reset consecutive mistake counter on successful file operation
 			config.taskState.consecutiveMistakeCount = 0
@@ -318,22 +340,26 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 			config.taskState.didEditFile = true // used to determine if we should wait for busy terminal to update before sending api request
 			config.taskState.workspaceRevision++
 
-			// Track file edit operation
-			await config.services.fileContextTracker.trackFileContext(relPath, "dietcode_edited")
-
-			// Reset the diff view
+			// Finish owned editor cleanup before any optional tracking wait. An
+			// abandoned tracker cannot later reset a subsequent tool's editor.
 			await config.services.diffViewProvider.reset()
+			await observation.observe(async () => {
+				config.services.fileContextTracker.markFileAsEditedByDietCode(relPath)
+				await config.services.fileContextTracker.trackFileContext(relPath, "dietcode_edited")
+			})
 
 			// Handle user edits if any
 			if (userEdits) {
-				await config.services.fileContextTracker.trackFileContext(relPath, "user_edited")
-				await config.callbacks.say(
-					"user_feedback_diff",
-					JSON.stringify({
-						tool: fileExists ? "editedExistingFile" : "newFileCreated",
-						path: relPath,
-						diff: userEdits,
-					}),
+				await observation.observe(() => config.services.fileContextTracker.trackFileContext(relPath, "user_edited"))
+				await observation.observe(() =>
+					config.callbacks.say(
+						"user_feedback_diff",
+						JSON.stringify({
+							tool: fileExists ? "editedExistingFile" : "newFileCreated",
+							path: relPath,
+							diff: userEdits,
+						}),
+					),
 				)
 				return formatResponse.fileEditWithUserChanges(
 					relPath,
@@ -355,11 +381,11 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 			if (relPath.endsWith("scratchpad.md") && finalContent) {
 				const scribe = new StabilityScribe(config.cwd)
 				const isAgile = finalContent.includes("# AGILE_MODE")
-				const audit = await scribe.validate(finalContent, isAgile)
+				const audit = await observation.observe(() => scribe.validate(finalContent, isAgile))
 
-				if (!audit.success) {
+				if (audit && !audit.success) {
 					auditReport = `\n\n⚠️ STABILITY AUDIT FAILED:\n${audit.errors.map((e) => `- ${e}`).join("\n")}`
-				} else {
+				} else if (audit) {
 					auditReport = `\n\n✅ STABILITY AUDIT PASSED: Substrate integrity verified.`
 				}
 			}
@@ -375,9 +401,24 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 
 			return baseResult + directive + auditReport + fileWriteAdvisory
 		} catch (error) {
-			// Reset diff view on error
-			await config.services.diffViewProvider.revertChanges()
-			await config.services.diffViewProvider.reset()
+			if (savedReceipt !== undefined) {
+				Logger.warn("File saved; follow-up observation failed. Returning the committed result:", error)
+				await config.services.diffViewProvider
+					.reset()
+					.catch((resetError) => Logger.warn("Editor reset failed:", resetError))
+				return savedReceipt
+			}
+			// Preserve the actual failure if cleanup also fails.
+			for (const cleanup of [
+				() => config.services.diffViewProvider.revertChanges(),
+				() => config.services.diffViewProvider.reset(),
+			]) {
+				try {
+					await cleanup()
+				} catch (cleanupError) {
+					Logger.warn("File edit cleanup failed:", cleanupError)
+				}
+			}
 			throw error
 		}
 	}
@@ -522,7 +563,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 
 				return
 			}
-		} else if (content) {
+		} else if (content !== undefined) {
 			// Handle write_to_file with direct content
 			newContent = content
 
