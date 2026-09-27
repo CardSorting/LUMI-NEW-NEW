@@ -54,6 +54,9 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 	const [searchTerm, setSearchTerm] = useState("")
 	const [isDropdownVisible, setIsDropdownVisible] = useState(false)
 	const [selectedIndex, setSelectedIndex] = useState(-1)
+	const [providerError, setProviderError] = useState("")
+	const [pendingProvider, setPendingProvider] = useState<string>()
+	const providerChangeInFlight = useRef(false)
 	const dropdownRef = useRef<HTMLDivElement>(null)
 	const itemRefs = useRef<(HTMLDivElement | null)[]>([])
 	const dropdownListRef = useRef<HTMLDivElement>(null)
@@ -71,8 +74,9 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 	}, [remoteConfigSettings])
 
 	const currentProviderLabel = useMemo(() => {
-		return providerOptions.find((option) => option.value === selectedProvider)?.label || selectedProvider
-	}, [providerOptions, selectedProvider])
+		const displayedProvider = pendingProvider || selectedProvider
+		return providerOptions.find((option) => option.value === displayedProvider)?.label || displayedProvider
+	}, [providerOptions, selectedProvider, pendingProvider])
 
 	// Sync search term with current provider when not searching
 	useEffect(() => {
@@ -104,10 +108,25 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 		return searchTerm && searchTerm !== currentProviderLabel ? fuse.search(searchTerm)?.map((r) => r.item) : searchableItems
 	}, [searchableItems, searchTerm, fuse, currentProviderLabel])
 
-	const handleProviderChange = (newProvider: string) => {
-		handleModeFieldChange({ plan: "planModeApiProvider", act: "actModeApiProvider" }, newProvider as ApiProvider, currentMode)
+	const handleProviderChange = async (newProvider: string) => {
+		if (providerChangeInFlight.current) return
+		providerChangeInFlight.current = true
+		setPendingProvider(newProvider)
+		setProviderError("")
 		setIsDropdownVisible(false)
 		setSelectedIndex(-1)
+		try {
+			await handleModeFieldChange(
+				{ plan: "planModeApiProvider", act: "actModeApiProvider" },
+				newProvider as ApiProvider,
+				currentMode,
+			)
+		} catch (error) {
+			setProviderError(error instanceof Error ? error.message : "Could not save the API provider. Try again.")
+		} finally {
+			providerChangeInFlight.current = false
+			setPendingProvider(undefined)
+		}
 	}
 
 	const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -154,12 +173,13 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 	}, [currentProviderLabel])
 
 	// Reset selection when search term changes
+	// biome-ignore lint/correctness/useExhaustiveDependencies: a new query invalidates the previously highlighted result.
 	useEffect(() => {
 		setSelectedIndex(-1)
 		if (dropdownListRef.current) {
 			dropdownListRef.current.scrollTop = 0
 		}
-	}, [])
+	}, [searchTerm])
 
 	// Scroll selected item into view
 	useEffect(() => {
@@ -202,6 +222,7 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 				<ProviderDropdownWrapper ref={dropdownRef}>
 					<VSCodeTextField
 						data-testid="provider-selector-input"
+						disabled={Boolean(pendingProvider)}
 						id="api-provider"
 						onFocus={() => {
 							setIsDropdownVisible(true)
@@ -260,6 +281,11 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 					)}
 				</ProviderDropdownWrapper>
 			</DropdownContainer>
+			{providerError && (
+				<p role="alert" style={{ color: "var(--vscode-errorForeground)", fontSize: 12 }}>
+					{providerError}
+				</p>
+			)}
 
 			{apiConfiguration && selectedProvider === "cloudflare" && (
 				<CloudflareProvider currentMode={currentMode} isPopup={isPopup} showModelOptions={showModelOptions} />

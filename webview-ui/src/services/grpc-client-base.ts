@@ -5,6 +5,7 @@
  * including non-React code. The configuration is compile-time constant, so direct
  * import is safe and ensures the methods work consistently regardless of React context.
  */
+import { isSubscriptionMethod } from "@shared/protobus"
 import { v4 as uuidv4 } from "uuid"
 import { PLATFORM_CONFIG } from "../config/platform.config"
 
@@ -132,6 +133,7 @@ export abstract class ProtoBusClient {
 		callbacks: Callbacks<TResponse>,
 	): () => void {
 		const requestId = uuidv4()
+		const isSubscription = isSubscriptionMethod(methodName)
 		let closed = false
 		let cancelSent = false
 		let idleTimeout: ReturnType<typeof setTimeout> | undefined
@@ -181,7 +183,9 @@ export abstract class ProtoBusClient {
 		}
 
 		const resetIdleTimeout = () => {
-			if (closed) {
+			// Subscriptions have no heartbeat or initial acknowledgement. Silence is
+			// expected, including before the first event, and must not cancel them.
+			if (closed || isSubscription) {
 				return
 			}
 			if (idleTimeout) {

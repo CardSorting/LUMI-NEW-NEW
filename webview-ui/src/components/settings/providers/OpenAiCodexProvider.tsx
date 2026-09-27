@@ -1,7 +1,7 @@
 import { type ModelInfo } from "@shared/api"
 import { Mode } from "@shared/storage/types"
 import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useExtensionState } from "@/context/ExtensionStateContext"
 import { AccountServiceClient } from "@/services/grpc-client"
 import { ModelInfoView } from "../common/ModelInfoView"
@@ -31,6 +31,8 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 	const wasAuthInProgress = useRef(false)
 	const repairedSelection = useRef("")
 	const modelCatalogRequest = useRef(0)
+	const modelCatalogInFlight = useRef(false)
+	const signOutInFlight = useRef(false)
 	const isSigningIn = isStartingSignIn || Boolean(openAiCodexAuthInProgress)
 
 	const normalized = normalizeApiConfiguration(apiConfiguration, currentMode)
@@ -43,9 +45,10 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 	const selectedModelInfo = models[selectedModelId] || normalized.selectedModelInfo
 	const showReasoningEffort = Boolean(models[selectedModelId]?.supportsReasoning)
 
-	const refreshModels = async () => {
-		if (isRefreshingModels) return
+	const refreshModels = useCallback(async () => {
+		if (!openAiCodexIsAuthenticated || modelCatalogInFlight.current || signOutInFlight.current) return
 		const requestId = ++modelCatalogRequest.current
+		modelCatalogInFlight.current = true
 		setIsRefreshingModels(true)
 		setErrorMessage("")
 		try {
@@ -54,40 +57,52 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 			if (!catalog || typeof catalog !== "object" || Array.isArray(catalog) || Object.keys(catalog).length === 0) {
 				throw new Error("The Codex account did not return any available models.")
 			}
-			if (requestId === modelCatalogRequest.current && openAiCodexIsAuthenticated) setModels(catalog)
+			if (requestId === modelCatalogRequest.current) setModels(catalog)
 		} catch (error) {
 			if (requestId === modelCatalogRequest.current) {
 				setModels({})
 				setErrorMessage(error instanceof Error ? error.message : "Could not refresh the Codex model list.")
 			}
 		} finally {
-			if (requestId === modelCatalogRequest.current) setIsRefreshingModels(false)
+			if (requestId === modelCatalogRequest.current) {
+				modelCatalogInFlight.current = false
+				setIsRefreshingModels(false)
+			}
 		}
-	}
+	}, [openAiCodexIsAuthenticated])
 
 	// Refresh only when account authentication changes; refresh state changes must not retrigger the request.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: refreshModels depends on refreshing state and would retrigger this effect.
 	useEffect(() => {
-		modelCatalogRequest.current += 1
+		modelCatalogInFlight.current = false
 		setIsRefreshingModels(false)
+		setErrorMessage("")
 		if (openAiCodexIsAuthenticated) void refreshModels()
 		else setModels({})
-	}, [openAiCodexIsAuthenticated])
+		return () => {
+			// A previous account's response must not populate a new session or an
+			// unmounted provider (including React StrictMode effect replay).
+			modelCatalogRequest.current += 1
+			modelCatalogInFlight.current = false
+		}
+	}, [openAiCodexIsAuthenticated, refreshModels])
 
 	useEffect(() => {
 		if (!openAiCodexIsAuthenticated || !configuredModelId || !firstAvailableModelId || models[configuredModelId]) return
-		const repairKey = `${configuredModelId}->${firstAvailableModelId}`
+		const repairKey = `${currentMode}:${configuredModelId}->${firstAvailableModelId}`
 		if (repairedSelection.current === repairKey) return
 		repairedSelection.current = repairKey
+		const requestId = modelCatalogRequest.current
 		void handleModeFieldChange({ plan: "planModeApiModelId", act: "actModeApiModelId" }, firstAvailableModelId, currentMode)
-			.then(() =>
+			.then(() => {
+				if (requestId !== modelCatalogRequest.current) return
 				setErrorMessage(
 					`The saved model “${configuredModelId}” is no longer available. Switched to “${firstAvailableModelId}”.`,
-				),
-			)
-			.catch(() =>
-				setErrorMessage("The saved Codex model is no longer available. Choose a model from the current account list."),
-			)
+				)
+			})
+			.catch(() => {
+				if (requestId !== modelCatalogRequest.current) return
+				setErrorMessage("The saved Codex model is no longer available. Choose a model from the current account list.")
+			})
 	}, [openAiCodexIsAuthenticated, configuredModelId, firstAvailableModelId, models, currentMode, handleModeFieldChange])
 
 	useEffect(() => {
@@ -113,6 +128,12 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 	}
 
 	const handleSignOut = async () => {
+		if (signOutInFlight.current) return
+		signOutInFlight.current = true
+		modelCatalogRequest.current += 1
+		modelCatalogInFlight.current = false
+		setIsRefreshingModels(false)
+		setModels({})
 		setIsSigningOut(true)
 		setErrorMessage("")
 		try {
@@ -120,6 +141,7 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 		} catch (error) {
 			setErrorMessage(error instanceof Error ? error.message : "Could not sign out of OpenAI Codex.")
 		} finally {
+			signOutInFlight.current = false
 			setIsSigningOut(false)
 		}
 	}
@@ -189,7 +211,10 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 						</output>
 					)}
 					{openAiCodexIsAuthenticated && (
-						<VSCodeButton appearance="secondary" disabled={isRefreshingModels} onClick={() => void refreshModels()}>
+						<VSCodeButton
+							appearance="secondary"
+							disabled={isRefreshingModels || isSigningOut}
+							onClick={() => void refreshModels()}>
 							{isRefreshingModels ? "Refreshing models…" : "Refresh account models"}
 						</VSCodeButton>
 					)}
