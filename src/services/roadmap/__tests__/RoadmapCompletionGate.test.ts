@@ -14,12 +14,23 @@ describe("RoadmapCompletionGate", () => {
 
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-completion-"))
-		setRoadmapConfigOverride({ ...DEFAULT_ROADMAP_CONFIG, enabled: true })
+		setRoadmapConfigOverride({
+			...DEFAULT_ROADMAP_CONFIG,
+			enabled: true,
+			block_kanban_on_invalid_schema: true,
+			block_kanban_on_validation_pending: true,
+		})
 	})
 
 	afterEach(async () => {
 		setRoadmapConfigOverride(null)
 		if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true })
+	})
+
+	it("honors disabled validation blocking even when pending state is supplied", async () => {
+		setRoadmapConfigOverride({ block_kanban_on_validation_pending: false })
+		const result = await evaluateRoadmapCompletionBlock(tmpDir, { validation_pending: true, kanban_complete_allowed: true })
+		assert.strictEqual(result.blocked, false)
 	})
 
 	it("allows completion when roadmap disabled", async () => {

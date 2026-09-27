@@ -4,7 +4,6 @@ import type { ToolUse } from "@core/assistant-message"
 import { constructNewFileContent, getLineNumberFromCharIndex } from "@core/assistant-message/diff"
 import { formatResponse } from "@core/prompts/responses"
 import { getWorkspaceBasename, resolveWorkspacePath } from "@core/workspace"
-import { processFilesIntoText } from "@integrations/misc/extract-text"
 import { buildFileWriteContentAdvisory } from "@shared/audit/auditFileWrite"
 import { DietCodeSayTool } from "@shared/ExtensionMessage"
 import { getLastApiReqTotalTokens } from "@shared/getApiMetrics"
@@ -19,7 +18,6 @@ import { StabilityGuard } from "../../../policy/StabilityGuard"
 import { SpiderEngine } from "../../../policy/spider/SpiderEngine"
 import { executor } from "../../ActionExecutor"
 import { RefactorHealer } from "../../tools/RefactorHealer"
-import { showNotificationForApproval } from "../../utils"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
@@ -215,49 +213,22 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 					block.isNativeToolCall,
 				)
 
-				// we need an artificial delay to let the diagnostics catch up to the changes
-				await setTimeoutPromise(3_500)
+				// saveChanges awaits the save and captures current diagnostics; no fixed pre-save delay is needed.
 			} else {
 				// Manual approval flow with detailed feedback handling
 				const notificationMessage = `DietCode wants to ${fileExists ? "edit" : "create"} ${getWorkspaceBasename(relPath, "WriteToFile.notification")}`
 
-				// Show notification
-				showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
-
 				await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
-
-				// Need a more customized tool response for file edits to highlight the fact that the file was not updated (particularly important for deepseek)
-
-				const { response, text, images, files } = await config.callbacks.ask("tool", completeMessage, false)
-
-				if (response !== "yesButtonClicked") {
-					// Handle rejection with detailed messages
+				const approved = await ToolResultUtils.askApprovalAndPushFeedback(
+					"tool",
+					completeMessage,
+					config,
+					notificationMessage,
+				)
+				if (!approved) {
 					const fileDeniedNote = fileExists
 						? "The file was not updated, and maintains its original contents."
 						: "The file was not created."
-
-					// Process user feedback if provided (with file content processing)
-					if (text || (images && images.length > 0) || (files && files.length > 0)) {
-						let fileContentString = ""
-						if (files && files.length > 0) {
-							fileContentString = await processFilesIntoText(files)
-						}
-
-						// Push additional tool feedback using existing utilities
-						ToolResultUtils.pushAdditionalToolFeedback(
-							config.taskState.userMessageContent,
-							text,
-							images,
-							fileContentString,
-						)
-						await config.callbacks.say("user_feedback", text, images, files)
-					}
-
-					// // Clean up the diff view when operation is rejected
-					// await config.services.diffViewProvider.revertChanges()
-					// await config.services.diffViewProvider.reset()
-
-					config.taskState.didRejectTool = true
 					telemetryService.captureToolUsage(
 						config.ulid,
 						block.name,
@@ -268,25 +239,8 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 						workspaceContext,
 						block.isNativeToolCall,
 					)
-
 					await config.services.diffViewProvider.revertChanges()
-					return `The user denied this operation. ${fileDeniedNote}`
-				}
-				// User hit the approve button, and may have provided feedback
-				if (text || (images && images.length > 0) || (files && files.length > 0)) {
-					let fileContentString = ""
-					if (files && files.length > 0) {
-						fileContentString = await processFilesIntoText(files)
-					}
-
-					// Push additional tool feedback using existing utilities
-					ToolResultUtils.pushAdditionalToolFeedback(
-						config.taskState.userMessageContent,
-						text,
-						images,
-						fileContentString,
-					)
-					await config.callbacks.say("user_feedback", text, images, files)
+					return `${formatResponse.toolDenied()} ${fileDeniedNote}`
 				}
 
 				telemetryService.captureToolUsage(
@@ -355,13 +309,14 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 			const { newProblemsMessage, userEdits, autoFormattingEdits, finalContent } = await executor.execute(
 				config.ulid,
 				() => config.services.diffViewProvider.saveChanges(),
-				{ concurrencyGroup: "fs" },
+				{ concurrencyGroup: "fs", signal: config.taskState.abortSignal, settleOnAbort: true },
 			)
 
 			// Reset consecutive mistake counter on successful file operation
 			config.taskState.consecutiveMistakeCount = 0
 
 			config.taskState.didEditFile = true // used to determine if we should wait for busy terminal to update before sending api request
+			config.taskState.workspaceRevision++
 
 			// Track file edit operation
 			await config.services.fileContextTracker.trackFileContext(relPath, "dietcode_edited")
@@ -482,26 +437,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 			return
 		}
 
-		// V226: Knowledge Ledger (Wiki) Protection Gate
-		// Prevents main agents from manual wiki documentation to avoid context-poor updates.
-		if ((resolvedPath.startsWith(".wiki/") || resolvedPath.includes("/.wiki/")) && !config.isSubagentExecution) {
-			const wikiError =
-				"🛑 **ACCESS DENIED**: Direct modifications to the Knowledge Ledger (.wiki/) are reserved for specialized Forensic Sub-Agents. Please use 'attempt_completion' to trigger the autonomous documentation phase."
-			const errorResponse = formatResponse.toolError(wikiError)
-
-			ToolResultUtils.pushToolResult(
-				errorResponse,
-				block,
-				config.taskState.userMessageContent,
-				ToolDisplayUtils.getToolDescription,
-				config.coordinator,
-				config.taskState.toolUseIdMap,
-			)
-			if (!config.enableParallelToolCalling) {
-				config.taskState.didAlreadyUseTool = true
-			}
-			return
-		}
+		// Documentation uses the same workspace permissions as other requested edits.
 
 		// Check if file exists to determine the correct UI message
 		let fileExists: boolean

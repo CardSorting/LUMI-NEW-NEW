@@ -4,7 +4,7 @@ sidebarTitle: "Roadmap Steering"
 description: "Auto-rolling ROADMAP.md gates, tools, and VS Code settings in LUMI."
 ---
 
-LUMI can steer long-running work through a project **`ROADMAP.md`** file — with validation gates that block task completion when the roadmap is out of sync.
+LUMI can steer long-running work through a project **`ROADMAP.md`** file — with advisory checks by default and optional required checks for teams that need them.
 
 Implementation: `src/services/roadmap/` (26 files). Completion integration: `RoadmapCompletionGate.ts` + `completionGatePipeline.ts`.
 
@@ -17,8 +17,22 @@ All settings use the `lumi.roadmap.*` prefix in root `package.json`:
 | `lumi.roadmap.enabled` | `true` | Master switch for roadmap steering |
 | `lumi.roadmap.autoBootstrap` | `true` | Create `ROADMAP.md` from workspace evidence when missing |
 | `lumi.roadmap.autoBootstrapFill` | `true` | Apply evidence autofill after bootstrap |
-| `lumi.roadmap.blockKanbanOnValidationPending` | `true` | Block `attempt_completion` when ROADMAP changed since last validate |
-| `lumi.roadmap.failClosedCompletionGates` | `true` | Block completion when roadmap gate evaluation fails |
+| `lumi.roadmap.blockKanbanOnInvalidSchema` | `false` | Require schema errors to be repaired before completion |
+| `lumi.roadmap.blockKanbanOnBootstrapIncomplete` | `false` | Require bootstrap placeholders to be filled before completion |
+| `lumi.roadmap.blockKanbanOnValidationPending` | `false` | Block `attempt_completion` when ROADMAP changed since last validate |
+| `lumi.roadmap.failClosedCompletionGates` | `false` | Block completion when roadmap gate evaluation fails |
+
+## Completion and recovery
+
+Missing non-goals, template suggestions, and checkpoint age do not block completion by default. Existing explicit settings still apply. Workspace write guards remain enforced.
+
+After editing the roadmap, validate once. Fix an actual error before rerunning validation; unchanged content produces the same result. Diagnostic and checkpoint tools remain available while required checks are blocked. If a repair needs unavailable access or a user decision, report the blocker.
+
+Test only the affected behavior and any checks required by the workspace. Passing checks for unchanged code do not need another run. A roadmap prose update or research-only assignment does not require the full test suite.
+
+Subagents own a scoped assignment and independent retry state. Their handoff includes findings or changes, verification results, and limitations. The parent owns final workspace roadmap and audit checks.
+
+The status display distinguishes required blockers from advisory warnings and provides separate links to each. This follows [GitHub's check statuses](https://docs.github.com/en/pull-requests/reference/status-checks) and [bounded agent stopping conditions](https://www.anthropic.com/engineering/building-effective-agents).
 
 ## Agent tools
 
@@ -45,6 +59,72 @@ When completion is blocked, the agent receives guidance to run `roadmap(action='
 ## File watcher
 
 `extension.ts` registers `RoadmapFileWatcher` so changes to `ROADMAP.md` update operational status without restarting the extension.
+
+## Execution and approvals
+
+Successful tool results let the parent continue authorized work without an extra confirmation message. Independent reads can be grouped when multiple tool calls are enabled; dependent operations remain sequential. Saved command approvals are reused after command policy checks. An unchanged denied request is not shown again until new user feedback arrives, and denial does not prevent independent authorized work.
+
+Helpers fill up to three execution slots immediately. Cancellation, a budget stop, or timeout prevents queued helpers from starting, preserves reported usage, and produces a final handoff for every helper. Late progress cannot reopen a finished batch. Optional completion double-checks do not consume the failure budget or start retry cooldowns.
+
+These choices follow the scoped approval patterns in [VS Code](https://code.visualstudio.com/docs/agents/run/approvals) and bounded delegation described by [Anthropic](https://www.anthropic.com/engineering/multi-agent-research-system).
+
+New configurations start in **Act** mode with **Autonomous execution** enabled. The setting is in **Settings → Features → Agent execution**. It allows tool use, edits, and commands without individual approval prompts; Stop, workspace restrictions, command policy, and organization-managed settings still apply. Existing saved preferences are retained. Completion audits, advisory escalation, and planning-score gates are opt-in under **Optional reviews**. Their dependent controls appear next to the enabled review.
+
+Action scheduling is FIFO within each task and resource group. Mutating actions run once. Automatic retries require an explicit idempotency guarantee, have a bounded attempt budget, and never replay timeouts or cancellations. Tools own their timeouts, so a legitimate long command is not cut off by an unrelated one-minute wrapper. Cancellation removes queued work; an operation that cannot be cancelled retains its execution slot until it actually settles. This follows [AWS guidance on retries and idempotency](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html).
+
+Completion retry limits prevent unchanged resubmissions, then reopen after edits, command results, helper handoffs, or a changed checkpoint supply new evidence. This works with checkpoints disabled. Recovery stays in the current task, preserves audit history, and does not require scratchpad files. Summary wording such as “removed the TODO” or an honest limitation does not count as evidence of unfinished work.
+
+Provider retries run only before the first output and share their exhausted budget with parent and helper recovery. Authentication, billing, invalid requests, and cancellation require a changed condition rather than repeated requests. Backoff accepts fractional seconds, HTTP dates, and reset timestamps; a server delay beyond the automatic budget stops recovery instead of overflowing a timer or retrying early. Stop cancels pending waits, including after a mode or provider change.
+
+If a response breaks after output, the parent saves completed tool results as interruption evidence and continues the same task with a bounded recovery budget. It never programmatically approves a resume prompt or finalizes unfinished tool arguments. Empty native responses consume the same bounded empty-response budget as text responses. Recovery checkpoints are optional; a failed snapshot does not prevent further work.
+
+Planning hands off directly to Act without requiring scratchpad or architectural-review artifacts. A plan audit runs only when the configured extension or workspace policy enables both completion and plan-regression review. Autonomous questions use context, targeted checks, and stated assumptions for routine decisions. Helpers return essential missing information in their handoff rather than opening a parent approval prompt.
+
+Autonomous execution applies to every exposed tool, including roadmap and maintenance tools. Saved MCP server trust is used consistently for the streaming preview and execution. Completion demonstration commands use the normal command handler, so saved trust, command policy, cancellation, and timeouts work the same way throughout a task. An omitted approval hint uses configured authority instead of forcing the model to resubmit its command. **Strict Plan mode** blocks commands and edits only when explicitly enabled.
+
+Tool observations preserve the original operation's outcome. A failed index update, post-tool hook, progress indicator, or completion snapshot does not turn a successful operation into a failure and invite replay. Post-tool hooks run once for returned outcomes; an explicit cancellation still stops the task. Passive file observation never runs a compiler or rewrites source. Architectural coaching on reads and preflight runs only when advisory reviews are enabled; repairs and validation remain explicit agent actions.
+
+Helpers continue while tools produce new evidence, without the former fixed 25-turn or 50-call cutoff. After three turns without new evidence, the helper receives one recovery prompt; after eight, it returns a failed handoff with its recorded changes and usage. Identical reads, alternating unchanged checks, and changing checklist text do not renew this window. Progress uses the underlying result before optional audit enrichment. Configured cost, token, timeout, and cancellation limits still apply. A failed or denied write is not reported as a modified file.
+
+The parent dispatches one request at a time through an iterative loop. Each turn returns the next input and releases its request scope before another starts; steering and stream recovery use the same path. Tool results retain their native call IDs, and later failures are handled once without unwinding old requests. Per-turn read counters reset for each request, while retry budgets, denied approvals, and progress evidence remain task-scoped. This applies the separation of task history and execution described in [Anthropic's agent harness architecture](https://www.anthropic.com/engineering/managed-agents) to the existing task lifecycle.
+
+The parent uses the same progress tracking. Productive work continues without a fixed turn limit. With the default recovery setting, three turns without new evidence trigger one instruction to change approach; eight stop the repeated loop with an explanation and saved tool results. Increasing the configured mistake threshold extends this recovery window. New user input renews it. Bookkeeping, compaction, alternating previously seen results, and resetting a tool's mistake counter cannot conceal a loop. This applies the [environmental feedback and stopping conditions described by Anthropic](https://www.anthropic.com/engineering/building-effective-agents) to execution results rather than productive task length.
+
+The parent waits for MCP startup once per task, for at most ten seconds, and then uses whichever tools are available. Subsequent requests do not repeat the startup delay, and Stop releases the wait. Unavailable checkpoints and usage observations do not prevent the next action. Unexpected continuation errors are shown explicitly rather than silently ending the loop.
+
+MCP tool calls, resource reads, and prompt fetches use the server's configured request timeout and propagate task cancellation. Each request owns its SDK cancellation signal and releases its listener on settlement. Tool and resource scheduling isolates servers, so one saturated server cannot occupy another server's slots. A cancelled or disconnected action is not automatically replayed: the remote outcome may be unknown, consistent with [MCP's cooperative cancellation semantics](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
+
+MCP execution displays wait at most one second per update; the first unavailable display disables further observation waits for that invocation. Notifications are grouped and consumed only for the requested server. Display and telemetry failures preserve the operation's result. Structured data, resource links, and binary resource metadata remain available in the handoff, following the [MCP tool result format](https://modelcontextprotocol.io/specification/2025-11-25/server/tools). Tool errors, including errors accompanied by images, carry native error status and do not renew parent or helper progress windows. Invalid non-object arguments are rejected before approval or dispatch.
+
+Steering between requests is appended to the pending results. It does not discard completed actions or send the next provider request before tool results are ready, preserving native tool/result pairing through a change of direction.
+
+Each native call has one execution owner within a response. Concurrent delivery, a late preview, or another presentation of that call waits for or reuses the existing outcome; it cannot dispatch the operation again. A distinct call in a later response remains available for intentional follow-up. Provider tool-use IDs travel with the call, including when a provider omits a separate transport ID. Unavailable tools and setup failures return a paired error so the agent can choose another action, following the [tool-result contract documented by Anthropic](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).
+
+End-of-stream processing awaits the presentation work directly, including native calls first discovered at the end, instead of polling a readiness flag. Session statistics and tool descriptions cannot invalidate completed work. Failed previews do not create premature tool results. Stop releases checkpoint and environment prerequisite waits immediately while their eventual outcomes remain observed.
+
+Each helper owns its provider connection, retry cancellation, and command cancellation signal. Terminal acquisition is serialized briefly so concurrent commands cannot claim the same idle terminal; the commands then run independently. Stopping one helper leaves sibling commands running. Task Stop cancels the task's owned commands. Helper commands do not steal editor focus or mark an unrelated parent command as complete.
+
+Progress display does not gate helper startup or hold a scheduler slot after a failure. Status updates coalesce into a row owned by that batch, so a late update cannot replace newer parent work. Optional stream registration and final display get a one-second wait; late registrations still receive one terminal outcome. Stop uses the task's cancellation signal directly. Progress observers receive snapshots, and their exceptions or rejected promises cannot turn completed work into failure. Finding storage does not delay a handoff or repeat the same write. Optional parent context and workspace metadata each get at most a one-second wait. If unavailable, helpers start from their assignment and known working directory; late context cannot rewrite an active assignment.
+
+Helper results sent to the parent contain outcomes, paths, evidence, and blockers. Timing and usage counters stay in the UI, keeping identical handoffs stable for progress detection. Fully failed batches return a failed tool outcome; reported edits, partial findings, and cumulative usage remain available even if verification fails. Independent queued work continues after an individual failure. This supports the clear assignments and structured handoffs described in [Anthropic's orchestrator-worker implementation](https://www.anthropic.com/engineering/multi-agent-research-system).
+
+Autonomous command output streams without a “continue” approval prompt. When a command outlives its initial wait, its result says it is **still running** and instructs the agent to inspect the existing terminal instead of launching a duplicate. The process remains tracked and cancellable until it settles. Unchanged command results and identical helper handoffs do not repeatedly reopen completion retries; new evidence or actual edits can.
+
+Conversation compaction runs without confirmation when autonomous execution or automatic compaction is enabled, using the existing summary view. Manual mode preserves the approval choice, including rejection. Both compaction tools keep the previous context range if saving fails, and retain the continuation summary if optional notices or telemetry fail. The summary carries the ongoing objective, steering, permissions, completed work, and verification forward. This follows the familiar [automatic context compaction flow in VS Code](https://code.visualstudio.com/docs/agents/run/sessions/manage-sessions).
+
+Stop releases an outstanding approval wait without requiring another message. Skipped native tool calls still receive their matching results, and repeated delivery of a result cannot produce duplicate provider messages. This lets the next request continue without a protocol-repair loop.
+
+Browser sessions remain open across reads, edits, commands, and rejected completion attempts. Launch once, then use **navigate**, **refresh**, or **inspect** to continue with the existing page. A successful completion, explicit close, or task Stop cleans up the task-owned browser. This supports the edit–run–inspect workflow described in [VS Code browser tools](https://code.visualstudio.com/docs/agents/run/browser-tools).
+
+Browser action failures retain the session and report an error with the current URL. A screenshot or display failure preserves a completed action's result; use inspect before another interaction instead of replaying the click or typing. Console and request listeners are released even on failure. Web search and fetch previews honor the same configured authority as execution, Stop cancels their requests, and network errors remain failed outcomes for progress tracking.
+
+Command output is captured in order before any display work. Live output has one pending presentation at a time; a finished command never opens a new output approval. A lost output prompt releases the already authorized command into the background, and late replies cannot change a completed result. Output listeners and timers are cleaned up on every exit. Optional display and telemetry failures are isolated from execution, following [Node's event-listener and rejection semantics](https://nodejs.org/api/events.html#capture-rejections-of-promises).
+
+Large output moves to a log with a bounded first-and-last summary. Disk failure, backpressure, or the 16 MB log limit truncates capture without stopping the command; the returned result explains the limitation. Log flushing has a bounded wait. Parent environment snapshots collect current terminal output immediately, without waiting for development servers or watchers to become quiet.
+
+Saved command trust, automatic approval, and helpers use a managed foreground wait and stream output without additional confirmation. Every command variant accepts an explicit positive wait, including fractional seconds; expiration releases the agent and retains the existing command. The model's approval hint is optional; configured authority and command policy decide whether approval is needed. This follows the separate execution and output-inspection pattern in [VS Code's terminal tools](https://code.visualstudio.com/docs/agents/reference/tools-reference).
+
+The VS Code adapter retains ownership when shell integration or output tracking is unavailable. It reports unknown completion, keeps the terminal out of the reuse pool, and lets Stop terminate that command's terminal. Cancellation during shell startup prevents dispatch. A quiet completed command does not trigger clipboard capture from another terminal, and terminal reuse requires a known matching working directory. Otherwise a terminal is created directly in the requested directory, without a hidden `cd` command or another wait.
 
 ## Related
 

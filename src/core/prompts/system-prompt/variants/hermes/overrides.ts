@@ -173,7 +173,7 @@ const HERMES_RULES_TEMPLATE = (context: SystemPromptContext) => `RULES
 - For replace_in_file, SEARCH blocks must contain complete, exact lines (no partial matches).
 - With multiple SEARCH/REPLACE blocks, order them as they appear in the file (earlier lines first).
 - For replace_in_file markers, do not alter the format; include the closing +++++++ REPLACE.
-- After each tool use, wait for the user's response to confirm success before proceeding.{{BROWSER_WAIT_RULES}}
+- Inspect tool results before dependent work, then continue within the user's authorized scope. A successful tool result is sufficient confirmation; do not ask the user to reconfirm routine actions. Honor approval prompts, denials, and stop requests.{{BROWSER_WAIT_RULES}}
 `
 
 export const hermesComponentOverrides = {

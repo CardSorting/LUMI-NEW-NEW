@@ -107,6 +107,7 @@ export type McpResourceResponse = {
 }
 
 export type McpToolCallResponse = {
+	structuredContent?: Record<string, unknown>
 	_meta?: Record<string, any>
 	content: Array<
 		| {

@@ -1,8 +1,9 @@
 import { BrowserAction, BrowserActionResult, browserActions, DietCodeSayBrowserAction } from "@shared/ExtensionMessage"
+import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
 import { ToolUse } from "../../../assistant-message"
 import { formatResponse } from "../../../prompts/responses"
-import { showNotificationForApproval } from "../../utils"
+import { isToolAutoApproved } from "../autoApprove"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
@@ -28,7 +29,7 @@ export class BrowserToolHandler implements IFullyManagedTool {
 
 		// Handle partial block streaming - exact original logic
 		if (action === "launch") {
-			if (uiHelpers.shouldAutoApproveTool(block.name)) {
+			if (isToolAutoApproved(uiHelpers.shouldAutoApproveTool(block.name))) {
 				await uiHelpers.removeLastPartialMessageIfExistsWithType("ask", "browser_action_launch")
 				await uiHelpers.say(
 					"browser_action_launch",
@@ -48,6 +49,7 @@ export class BrowserToolHandler implements IFullyManagedTool {
 				this.name,
 				JSON.stringify({
 					action: action as BrowserAction,
+					url: uiHelpers.removeClosingTag(block, "url", url),
 					coordinate: uiHelpers.removeClosingTag(block, "coordinate", coordinate),
 					text: uiHelpers.removeClosingTag(block, "text", text),
 				} satisfies DietCodeSayBrowserAction),
@@ -59,151 +61,140 @@ export class BrowserToolHandler implements IFullyManagedTool {
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
-		const action: BrowserAction | undefined = block.params.action as BrowserAction
-		const url: string | undefined = block.params.url
-		const coordinate: string | undefined = block.params.coordinate
-		const text: string | undefined = block.params.text
+		const action = block.params.action as BrowserAction | undefined
+		const { url, coordinate, text } = block.params
+		const signal = config.taskState.abortSignal
+		if (signal.aborted) return formatResponse.toolError("Browser action cancelled.")
 
-		// Validate action parameter - following original pattern
-		if (!action || !browserActions.includes(action)) {
-			// if the block is complete and we don't have a valid action this is a mistake
+		const missing =
+			!action || !browserActions.includes(action)
+				? "action"
+				: (action === "launch" || action === "navigate") && !url
+					? "url"
+					: action === "click" && !coordinate
+						? "coordinate"
+						: action === "type" && text === undefined
+							? "text"
+							: undefined
+		if (missing) {
 			config.taskState.consecutiveMistakeCount++
-			const errorResult = await config.callbacks.sayAndCreateMissingParamError(this.name, "action")
-			await config.services.browserSession.closeBrowser()
-			return errorResult
+			return config.callbacks.sayAndCreateMissingParamError(this.name, missing)
+		}
+		if (
+			action === "click" &&
+			(!/^\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?$/.test(coordinate!) ||
+				!coordinate!.split(",").every((part) => Number.isFinite(Number(part))))
+		) {
+			return formatResponse.toolError(
+				"Use finite, non-negative x,y coordinates from the latest screenshot. The browser remains open.",
+			)
+		}
+		config.taskState.consecutiveMistakeCount = 0
+
+		// Presentation must not turn a completed browser interaction into a failed tool and trigger replay.
+		const say: TaskConfig["callbacks"]["say"] = async (...args) => {
+			try {
+				return await config.callbacks.say(...args)
+			} catch (error) {
+				Logger.warn("[BrowserToolHandler] Browser display unavailable; result retained:", error)
+				return undefined
+			}
 		}
 
 		try {
-			// Handle complete block execution
-			let browserActionResult: BrowserActionResult
-
 			if (action === "launch") {
-				if (!url) {
-					config.taskState.consecutiveMistakeCount++
-					const errorResult = await config.callbacks.sayAndCreateMissingParamError(this.name, "url")
-					await config.services.browserSession.closeBrowser()
-					return errorResult
-				}
-				config.taskState.consecutiveMistakeCount = 0
-
-				// Handle approval flow for launch using callbacks
-				const autoApprover = config.autoApprover || { shouldAutoApproveTool: () => false }
-				if (autoApprover.shouldAutoApproveTool(block.name)) {
+				if (isToolAutoApproved(config.callbacks.shouldAutoApproveTool(block.name))) {
 					await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "browser_action_launch")
-					await config.callbacks.say("browser_action_launch", url, undefined, undefined, false)
+					await say("browser_action_launch", url, undefined, undefined, false)
 				} else {
-					// Show notification for approval if enabled
-					showNotificationForApproval(
-						`DietCode wants to use a browser and launch ${url}`,
-						config.autoApprovalSettings.enableNotifications,
-					)
 					await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "browser_action_launch")
-					const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("browser_action_launch", url, config)
-					if (!didApprove) {
-						return formatResponse.toolDenied()
-					}
+					const approved = await ToolResultUtils.askApprovalAndPushFeedback(
+						"browser_action_launch",
+						url!,
+						config,
+						`DietCode wants to use a browser and launch ${url}`,
+					)
+					if (!approved) return formatResponse.toolDenied()
 				}
+			}
 
-				// Run PreToolUse hook after approval but before execution
-				try {
-					const { ToolHookUtils } = await import("../utils/ToolHookUtils")
-					await ToolHookUtils.runPreToolUseIfEnabled(config, block)
-				} catch (error) {
-					const { PreToolUseHookCancellationError } = await import("@core/hooks/PreToolUseHookCancellationError")
-					if (error instanceof PreToolUseHookCancellationError) {
-						return formatResponse.toolDenied()
-					}
-					throw error
-				}
+			try {
+				const { ToolHookUtils } = await import("../utils/ToolHookUtils")
+				await ToolHookUtils.runPreToolUseIfEnabled(config, block)
+			} catch (error) {
+				const { PreToolUseHookCancellationError } = await import("@core/hooks/PreToolUseHookCancellationError")
+				if (error instanceof PreToolUseHookCancellationError) return formatResponse.toolDenied()
+				throw error
+			}
+			signal.throwIfAborted()
 
-				// Start loading spinner
-				await config.callbacks.say("browser_action_result", "")
-
-				// Re-make browserSession to make sure latest settings apply
-				// This updates the ToolExecutor browserSession and returns it, for us to modify the local config object accordingly. (Previously we would set config.services.browserSession = new BrowserSession... but this would not update the ToolExecutor.browserSession which is used in subsequent browser tool calls)
+			let result: BrowserActionResult
+			if (action === "launch") {
+				await say("browser_action_result", "")
 				config.services.browserSession = await config.callbacks.applyLatestBrowserSettings()
+				signal.throwIfAborted()
 				await config.services.browserSession.launchBrowser()
-				browserActionResult = await config.services.browserSession.navigateToUrl(url)
+				// Stop may have happened while the browser process was being created.
+				signal.throwIfAborted()
+				result = await config.services.browserSession.navigateToUrl(url!)
 			} else {
-				// Handle other actions (click, type, scroll, close)
-				if (action === "click") {
-					if (!coordinate) {
-						config.taskState.consecutiveMistakeCount++
-						const errorResult = await config.callbacks.sayAndCreateMissingParamError(this.name, "coordinate")
-						await config.services.browserSession.closeBrowser()
-						return errorResult
-					}
-				}
-				if (action === "type") {
-					if (!text) {
-						config.taskState.consecutiveMistakeCount++
-						const errorResult = await config.callbacks.sayAndCreateMissingParamError(this.name, "text")
-						await config.services.browserSession.closeBrowser()
-						return errorResult
-					}
-				}
-				config.taskState.consecutiveMistakeCount = 0
-
-				// Send browser action message
-				await config.callbacks.say(
+				await say(
 					this.name,
-					JSON.stringify({
-						action: action as BrowserAction,
-						coordinate,
-						text,
-					} satisfies DietCodeSayBrowserAction),
+					JSON.stringify({ action: action!, url, coordinate, text } satisfies DietCodeSayBrowserAction),
 					undefined,
 					undefined,
 					false,
 				)
-
-				// Execute the action
-				const browserSession = config.services.browserSession
+				signal.throwIfAborted()
+				const session = config.services.browserSession
 				switch (action) {
+					case "navigate":
+						result = await session.navigateToUrl(url!)
+						break
+					case "refresh":
+						result = await session.refresh()
+						break
+					case "inspect":
+						result = await session.inspect()
+						break
 					case "click":
-						browserActionResult = await browserSession.click(coordinate!)
+						result = await session.click(coordinate!)
 						break
 					case "type":
-						browserActionResult = await browserSession.type(text!)
+						result = await session.type(text!)
 						break
 					case "scroll_down":
-						browserActionResult = await browserSession.scrollDown()
+						result = await session.scrollDown()
 						break
 					case "scroll_up":
-						browserActionResult = await browserSession.scrollUp()
+						result = await session.scrollUp()
 						break
 					case "close":
-						browserActionResult = await browserSession.closeBrowser()
-						break
+						await session.closeBrowser()
+						return formatResponse.toolResult("The browser has been closed.")
+					default:
+						return formatResponse.toolError("Unknown browser action.")
 				}
 			}
-
-			// Handle results based on action type
-			switch (action) {
-				case "launch":
-				case "click":
-				case "type":
-				case "scroll_down":
-				case "scroll_up":
-					await config.callbacks.say("browser_action_result", JSON.stringify(browserActionResult))
-					const result = formatResponse.toolResult(
-						`The browser action has been executed. The console logs and screenshot have been captured for your analysis.\n\nConsole logs:\n${
-							browserActionResult.logs || "(No new logs)"
-						}\n\n(REMEMBER: if you need to proceed to using non-\`browser_action\` tools or launch a new browser, you MUST first close this browser. For example, if after analyzing the logs and screenshot you need to edit a file, you must first close the browser before you can use the write_to_file tool.)`,
-						browserActionResult.screenshot ? [browserActionResult.screenshot] : [],
-					)
-
-					return result
-
-				case "close":
-					const closeResult = formatResponse.toolResult(
-						`The browser has been closed. You may now proceed to using other tools.`,
-					)
-					return closeResult
+			signal.throwIfAborted()
+			await say("browser_action_result", JSON.stringify(result))
+			if (result.error) {
+				return formatResponse.toolError(
+					`Browser action failed: ${result.error}\nCurrent URL: ${result.currentUrl || "unknown"}\n${result.logs || ""}\nUse inspect to check the current page before retrying an interaction. The session is retained.`,
+				)
 			}
+			return formatResponse.toolResult(
+				`Browser action completed. Current URL: ${result.currentUrl || "unknown"}\n\nConsole logs:\n${result.logs || "(No new logs)"}\n\nThe browser stays open while you use other tools. Use inspect to observe the current page, refresh after edits, navigate for another URL, or close when finished.`,
+				result.screenshot ? [result.screenshot] : [],
+			)
 		} catch (error) {
-			await config.services.browserSession.closeBrowser() // if any error occurs, the browser session is terminated
-			throw error
+			if (signal.aborted) {
+				await config.services.browserSession.closeBrowser()
+				return formatResponse.toolError("Browser action cancelled.")
+			}
+			return formatResponse.toolError(
+				`Browser action failed: ${error instanceof Error ? error.message : String(error)}. Use inspect to check an existing session before retrying.`,
+			)
 		}
 	}
 }

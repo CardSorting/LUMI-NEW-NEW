@@ -1,4 +1,3 @@
-import { buildApiHandler } from "@core/api"
 import type { IController as Controller } from "@core/controller/types"
 import { Empty } from "@shared/proto/dietcode/common"
 import { PlanActMode, McpDisplayMode as ProtoMcpDisplayMode, UpdateSettingsRequest } from "@shared/proto/dietcode/state"
@@ -56,7 +55,7 @@ export async function updateSettings(controller: Controller, request: UpdateSett
 					...convertedApiConfigurationFromProto,
 					ulid: controller.task.ulid,
 				}
-				controller.task.api = buildApiHandler(apiConfigForHandler, currentMode)
+				controller.task.updateApiHandler(apiConfigForHandler, currentMode)
 			}
 		}
 

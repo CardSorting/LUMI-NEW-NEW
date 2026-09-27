@@ -1181,7 +1181,44 @@ export class McpHub {
 		}
 	}
 
-	async readResource(serverName: string, uri: string): Promise<McpResourceResponse> {
+	/** Each SDK request owns its signal; settled requests cannot retain the task's abort listeners. */
+	private async withRequestSignal<T>(
+		signal: AbortSignal | undefined,
+		request: (signal: AbortSignal) => Promise<T>,
+	): Promise<T> {
+		signal?.throwIfAborted()
+		const controller = new AbortController()
+		const onAbort = () => controller.abort(signal?.reason)
+		signal?.addEventListener("abort", onAbort, { once: true })
+		try {
+			return await request(controller.signal)
+		} finally {
+			signal?.removeEventListener("abort", onAbort)
+		}
+	}
+
+	private getRequestTimeout(connection: McpConnection): number {
+		try {
+			const config = ServerConfigSchema.parse(JSON.parse(connection.server.config))
+			// Node overflows larger timer values to 1ms, causing immediate failures and repeated requests.
+			return Math.min(2 ** 31 - 1, secondsToMs(config.timeout))
+		} catch (error) {
+			Logger.warn(`Invalid timeout configuration for MCP server ${connection.server.name}; using the default:`, error)
+			return secondsToMs(DEFAULT_MCP_TIMEOUT_SECONDS)
+		}
+	}
+
+	private reportToolCall(...args: Parameters<TelemetryService["captureMcpToolCall"]>): void {
+		try {
+			void Promise.resolve(this.telemetryService.captureMcpToolCall(...args)).catch((error) =>
+				Logger.warn("MCP telemetry unavailable; preserving request outcome:", error),
+			)
+		} catch (error) {
+			Logger.warn("MCP telemetry unavailable; preserving request outcome:", error)
+		}
+	}
+
+	async readResource(serverName: string, uri: string, signal?: AbortSignal): Promise<McpResourceResponse> {
 		const connection = this.connections.find((conn) => conn.server.name === serverName)
 		if (!connection) {
 			throw new Error(`No connection found for server: ${serverName}`)
@@ -1190,14 +1227,11 @@ export class McpHub {
 			throw new Error(`Server "${serverName}" is disabled`)
 		}
 
-		return await connection.client.request(
-			{
-				method: "resources/read",
-				params: {
-					uri,
-				},
-			},
-			ReadResourceResultSchema,
+		return this.withRequestSignal(signal, (requestSignal) =>
+			connection.client.request({ method: "resources/read", params: { uri } }, ReadResourceResultSchema, {
+				timeout: this.getRequestTimeout(connection),
+				signal: requestSignal,
+			}),
 		)
 	}
 
@@ -1205,6 +1239,7 @@ export class McpHub {
 		serverName: string,
 		promptName: string,
 		promptArguments?: Record<string, string>,
+		signal?: AbortSignal,
 	): Promise<McpPromptResponse> {
 		const connection = this.connections.find((conn) => conn.server.name === serverName)
 		if (!connection) {
@@ -1217,18 +1252,18 @@ export class McpHub {
 			throw new Error(`No client available for server: ${serverName}`)
 		}
 
-		const response = await connection.client.request(
-			{
-				method: "prompts/get",
-				params: {
-					name: promptName,
-					arguments: promptArguments,
+		const response = await this.withRequestSignal(signal, (requestSignal) =>
+			connection.client.request(
+				{
+					method: "prompts/get",
+					params: {
+						name: promptName,
+						arguments: promptArguments,
+					},
 				},
-			},
-			GetPromptResultSchema,
-			{
-				timeout: DEFAULT_REQUEST_TIMEOUT_MS,
-			},
+				GetPromptResultSchema,
+				{ timeout: this.getRequestTimeout(connection), signal: requestSignal },
+			),
 		)
 
 		return {
@@ -1245,6 +1280,7 @@ export class McpHub {
 		toolName: string,
 		toolArguments: Record<string, unknown> | undefined,
 		ulid: string,
+		signal?: AbortSignal,
 	): Promise<McpToolCallResponse> {
 		const connection = this.connections.find((conn) => conn.server.name === serverName)
 		if (!connection) {
@@ -1257,17 +1293,9 @@ export class McpHub {
 			throw new Error(`Server "${serverName}" is disabled and cannot be used`)
 		}
 
-		let timeout = secondsToMs(DEFAULT_MCP_TIMEOUT_SECONDS) // sdk expects ms
+		signal?.throwIfAborted()
 
-		try {
-			const config = JSON.parse(connection.server.config)
-			const parsedConfig = ServerConfigSchema.parse(config)
-			timeout = secondsToMs(parsedConfig.timeout)
-		} catch (error) {
-			Logger.error(`Failed to parse timeout configuration for server ${serverName}: ${error}`)
-		}
-
-		this.telemetryService.captureMcpToolCall(
+		this.reportToolCall(
 			ulid,
 			serverName,
 			toolName,
@@ -1277,26 +1305,26 @@ export class McpHub {
 		)
 
 		try {
-			const result = await connection.client.request(
-				{
-					method: "tools/call",
-					params: {
-						name: toolName,
-						arguments: toolArguments,
+			const result = await this.withRequestSignal(signal, (requestSignal) =>
+				connection.client.request(
+					{
+						method: "tools/call",
+						params: {
+							name: toolName,
+							arguments: toolArguments,
+						},
 					},
-				},
-				CallToolResultSchema,
-				{
-					timeout,
-				},
+					CallToolResultSchema,
+					{ timeout: this.getRequestTimeout(connection), signal: requestSignal },
+				),
 			)
 
-			this.telemetryService.captureMcpToolCall(
+			this.reportToolCall(
 				ulid,
 				serverName,
 				toolName,
-				"success",
-				undefined,
+				result.isError ? "error" : "success",
+				result.isError ? "MCP tool returned an error result" : undefined,
 				toolArguments ? Object.keys(toolArguments) : undefined,
 			)
 
@@ -1305,7 +1333,7 @@ export class McpHub {
 				content: result.content ?? [],
 			}
 		} catch (error) {
-			this.telemetryService.captureMcpToolCall(
+			this.reportToolCall(
 				ulid,
 				serverName,
 				toolName,
@@ -1574,14 +1602,14 @@ export class McpHub {
 	 * Get and clear pending notifications
 	 * @returns Array of pending notifications
 	 */
-	getPendingNotifications(): Array<{
+	getPendingNotifications(serverName?: string): Array<{
 		serverName: string
 		level: string
 		message: string
 		timestamp: number
 	}> {
-		const notifications = [...this.pendingNotifications]
-		this.pendingNotifications = []
+		const notifications = this.pendingNotifications.filter((item) => !serverName || item.serverName === serverName)
+		this.pendingNotifications = serverName ? this.pendingNotifications.filter((item) => item.serverName !== serverName) : []
 		return notifications
 	}
 

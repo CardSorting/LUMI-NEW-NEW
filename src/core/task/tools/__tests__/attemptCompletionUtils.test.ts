@@ -233,7 +233,7 @@ describe("attemptCompletionUtils", () => {
 			playbook.should.containEql("Recovery playbook")
 			playbook.should.containEql("1.")
 			playbook.should.containEql("task_progress")
-			buildCompletionGatePlaybook("circuit_breaker").should.containEql("Stop calling attempt_completion")
+			buildCompletionGatePlaybook("circuit_breaker").should.containEql("Retry in this task")
 		})
 	})
 
@@ -632,6 +632,12 @@ describe("attemptCompletionUtils", () => {
 			;(taskState.completionGateBlockCount ?? 0).should.equal(0)
 			should.equal(taskState.lastCompletionBlockReason, "retry_cooldown")
 		})
+		it("does not treat a requested double-check as a failed attempt or start a retry cooldown", () => {
+			recordCompletionGateBlockEvent(configWithState(taskState), "double_check", { result: "Work complete" })
+			;(taskState.completionGateBlockCount ?? 0).should.equal(0)
+			should.equal(taskState.lastCompletionAttemptAt, undefined)
+			should.equal(taskState.lastBlockedCompletionResultFingerprint, undefined)
+		})
 	})
 
 	describe("buildCompletionGateEscalationBrief", () => {
@@ -738,9 +744,12 @@ describe("attemptCompletionUtils", () => {
 	})
 
 	describe("validateCompletionResultQuality", () => {
-		it("rejects empty and placeholder-marked results", () => {
+		it("rejects empty results without treating summary words as proof of unfinished work", () => {
 			should.equal((validateCompletionResultQuality("   ") ?? "").includes("empty"), true)
-			should.equal((validateCompletionResultQuality("Done but TODO: fix tests") ?? "").includes("unfinished markers"), true)
+			should.not.exist(validateCompletionResultQuality("Removed the TODO and replaced the placeholder."))
+			should.not.exist(
+				validateCompletionResultQuality("Live integration is not implemented; the requested local changes are complete."),
+			)
 			should.not.exist(validateCompletionResultQuality("All tests pass and feature is complete."))
 		})
 	})

@@ -14,6 +14,7 @@ import {
 import { createOcaHeaders } from "@/services/auth/oca/utils/utils"
 import { getAxiosSettings } from "@/shared/net"
 import { ShowMessageType } from "@/shared/proto/index.host"
+import { fromProtobufOcaModelInfo } from "@/shared/proto-conversions/models/typeConversion"
 import { Logger } from "@/shared/services/Logger"
 import { GlobalStateAndSettings } from "@/shared/storage/state-keys"
 
@@ -41,7 +42,7 @@ export async function refreshOcaModels(controller: Controller, request: StringRe
 		})
 		return OcaCompatibleModelInfo.create({ error: "Not authenticated with OCA" })
 	}
-	const apiConfig = controller.stateManager.getApiConfiguration() as { ocaMode?: string }
+	const apiConfig = controller.stateManager.getApiConfiguration()
 	const ocaMode = apiConfig.ocaMode || "internal"
 	const baseUrl = request.value || (ocaMode === "internal" ? DEFAULT_INTERNAL_OCA_BASE_URL : DEFAULT_EXTERNAL_OCA_BASE_URL)
 	const modelsUrl = `${baseUrl}/v1/model/info`
@@ -49,13 +50,7 @@ export async function refreshOcaModels(controller: Controller, request: StringRe
 	try {
 		Logger.log(`Making refresh oca model request with customer opc-request-id: ${headers["opc-request-id"]}`)
 		const response = await axios.get(modelsUrl, { headers, ...getAxiosSettings() })
-		if (response.data?.data) {
-			if (response.data.data.length === 0) {
-				HostProvider.window.showMessage({
-					type: ShowMessageType.ERROR,
-					message: "No models found. Did you set up your OCA access (possibly through entitlements)?",
-				})
-			}
+		if (Array.isArray(response.data?.data)) {
 			for (const model of response.data.data) {
 				const modelId = model.litellm_params?.model
 				if (typeof modelId !== "string" || !modelId) {
@@ -64,7 +59,7 @@ export async function refreshOcaModels(controller: Controller, request: StringRe
 				if (!defaultModelId) {
 					defaultModelId = modelId
 				}
-				const modelInfo = model.model_info
+				const modelInfo = model.model_info ?? {}
 				const supportedApiList = modelInfo.supported_api_list ?? [CHAT_COMPLETIONS_API]
 
 				let apiFormat: ApiFormat = ApiFormat.OPENAI_CHAT
@@ -98,6 +93,11 @@ export async function refreshOcaModels(controller: Controller, request: StringRe
 				})
 			}
 			Logger.log("OCA models fetched", models)
+			if (!defaultModelId) {
+				const error = "No usable OCA models found. Check your account's model access."
+				HostProvider.window.showMessage({ type: ShowMessageType.ERROR, message: error })
+				return OcaCompatibleModelInfo.create({ error })
+			}
 
 			// Fetch current config to determine existing model selections
 			const apiConfiguration = controller.stateManager.getApiConfiguration()
@@ -119,17 +119,21 @@ export async function refreshOcaModels(controller: Controller, request: StringRe
 				models[planModeSelectedModelId].supportsReasoning &&
 				models[planModeSelectedModelId].reasoningEffortOptions.length > 0
 			) {
-				planModeOcaReasoningEffort = apiConfiguration.planModeOcaReasoningEffort
-					? apiConfiguration.planModeOcaReasoningEffort
-					: models[planModeSelectedModelId].reasoningEffortOptions[0]
+				planModeOcaReasoningEffort =
+					apiConfiguration.planModeOcaReasoningEffort &&
+					models[planModeSelectedModelId].reasoningEffortOptions.includes(apiConfiguration.planModeOcaReasoningEffort)
+						? apiConfiguration.planModeOcaReasoningEffort
+						: models[planModeSelectedModelId].reasoningEffortOptions[0]
 			}
 			if (
 				models[actModeSelectedModelId].supportsReasoning &&
 				models[actModeSelectedModelId].reasoningEffortOptions.length > 0
 			) {
-				actModeOcaReasoningEffort = apiConfiguration.actModeOcaReasoningEffort
-					? apiConfiguration.actModeOcaReasoningEffort
-					: models[actModeSelectedModelId].reasoningEffortOptions[0]
+				actModeOcaReasoningEffort =
+					apiConfiguration.actModeOcaReasoningEffort &&
+					models[actModeSelectedModelId].reasoningEffortOptions.includes(apiConfiguration.actModeOcaReasoningEffort)
+						? apiConfiguration.actModeOcaReasoningEffort
+						: models[actModeSelectedModelId].reasoningEffortOptions[0]
 			}
 
 			// Build updates object based on plan/act mode setting
@@ -138,19 +142,19 @@ export async function refreshOcaModels(controller: Controller, request: StringRe
 			if (planActSeparateModelsSetting) {
 				if (currentMode === "plan") {
 					updates.planModeOcaModelId = planModeSelectedModelId
-					updates.planModeOcaModelInfo = models[planModeSelectedModelId]
+					updates.planModeOcaModelInfo = fromProtobufOcaModelInfo(models[planModeSelectedModelId])
 					updates.planModeOcaReasoningEffort = planModeOcaReasoningEffort
 				} else {
 					updates.actModeOcaModelId = actModeSelectedModelId
-					updates.actModeOcaModelInfo = models[actModeSelectedModelId]
+					updates.actModeOcaModelInfo = fromProtobufOcaModelInfo(models[actModeSelectedModelId])
 					updates.actModeOcaReasoningEffort = actModeOcaReasoningEffort
 				}
 			} else {
 				updates.planModeOcaModelId = planModeSelectedModelId
-				updates.planModeOcaModelInfo = models[planModeSelectedModelId]
+				updates.planModeOcaModelInfo = fromProtobufOcaModelInfo(models[planModeSelectedModelId])
 				updates.planModeOcaReasoningEffort = planModeOcaReasoningEffort
 				updates.actModeOcaModelId = actModeSelectedModelId
-				updates.actModeOcaModelInfo = models[actModeSelectedModelId]
+				updates.actModeOcaModelInfo = fromProtobufOcaModelInfo(models[actModeSelectedModelId])
 				updates.actModeOcaReasoningEffort = actModeOcaReasoningEffort
 			}
 

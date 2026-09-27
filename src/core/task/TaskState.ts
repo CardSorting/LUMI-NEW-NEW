@@ -2,6 +2,7 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import { AssistantMessageContent } from "@core/assistant-message"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { DietCodeAskResponse } from "@shared/WebviewMessage"
+import { ToolProgressTracker } from "./ToolProgressTracker"
 import type { HookExecution } from "./types/HookExecution"
 
 export class TaskState {
@@ -25,6 +26,8 @@ export class TaskState {
 	userMessageContentReady = false
 	// Map of tool names to their tool_use_id for creating proper ToolResultBlockParam
 	toolUseIdMap: Map<string, string> = new Map()
+	/** One dispatch owns each native call in the current response, including in-flight deliveries. */
+	nativeToolExecutions = new Map<string, Promise<void>>()
 
 	// Presentation locks
 	presentAssistantMessageLocked = false
@@ -62,12 +65,15 @@ export class TaskState {
 
 	// Tool execution flags
 	didRejectTool = false
+	// Avoid repeated approval prompts for an unchanged request until new user feedback arrives.
+	deniedToolApprovals = new Map<string, number>()
 	didAlreadyUseTool = false
 	didEditFile = false
 	lastToolName = "" // Track last tool used for consecutive call detection
 
 	// Error tracking
 	consecutiveMistakeCount = 0
+	readonly executionProgress = new ToolProgressTracker()
 	doubleCheckCompletionPending = false
 	didAutomaticallyRetryFailedApiRequest = false
 	checkpointManagerErrorMessage?: string
@@ -85,7 +91,23 @@ export class TaskState {
 	todoListWasUpdatedByUser = false
 
 	// Task Abort / Cancellation
-	abort = false
+	private aborted = false
+	private executionAbortController = new AbortController()
+	get abort(): boolean {
+		return this.aborted
+	}
+	set abort(value: boolean) {
+		this.aborted = value
+		if (value) this.executionAbortController.abort()
+		else if (this.executionAbortController.signal.aborted) this.executionAbortController = new AbortController()
+	}
+	get abortSignal(): AbortSignal {
+		return this.executionAbortController.signal
+	}
+	/** Edits, command results, and helper handoffs invalidate retry state even without checkpoints. */
+	workspaceRevision = 0
+	executionEvidenceDigests = new Map<string, string>()
+	lastGateBlockWorkspaceRevision?: number
 	didFinishAbortingStream = false
 	abandoned = false
 

@@ -16,6 +16,7 @@ export type ApiProvider =
 	| "openai-native"
 	| "ollama"
 	| "lmstudio"
+	| "vscode-lm"
 	| "requesty"
 	| "together"
 	| "deepseek"
@@ -49,6 +50,8 @@ export const DEFAULT_API_PROVIDER = "openrouter" as ApiProvider
 export interface ApiHandlerOptions extends Partial<ApiHandlerSettings> {
 	ulid?: string // Used to identify the task in API requests
 	onRetryAttempt?: (attempt: number, maxRetries: number, delay: number, error: unknown) => void // Callback function
+	/** Runtime-only cancellation; never persisted as provider configuration. */
+	getRetrySignal?: () => AbortSignal
 	vertexApiKey?: string
 }
 

@@ -1,8 +1,6 @@
-import { TerminalOutputFailureReason, telemetryService } from "@services/telemetry"
 import { EventEmitter } from "events"
 import * as vscode from "vscode"
 import { stripAnsi } from "@/hosts/vscode/terminal/ansiUtils"
-import { getLatestTerminalOutput } from "@/hosts/vscode/terminal/get-latest-output"
 import {
 	isCompilingOutput,
 	MAX_FULL_OUTPUT_SIZE,
@@ -12,7 +10,6 @@ import {
 	TRUNCATE_KEEP_LINES,
 } from "@/integrations/terminal/constants"
 import type { ITerminalProcess, TerminalCompletionDetails, TerminalProcessEvents } from "@/integrations/terminal/types"
-import { Logger } from "@/shared/services/Logger"
 
 /**
  * VscodeTerminalProcess - Manages command execution in VSCode's integrated terminal.
@@ -40,26 +37,64 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 	private exitCode: number | null | undefined = undefined
 	private signal: NodeJS.Signals | null = null
 
+	private terminal?: vscode.Terminal
+	private stopped = false
+	private dispatched = false
+
+	constructor(terminal?: vscode.Terminal) {
+		super()
+		this.terminal = terminal
+	}
+
+	private clearHotState() {
+		if (this.hotTimer) clearTimeout(this.hotTimer)
+		this.hotTimer = null
+		this.isHot = false
+	}
+
+	/** Stop this command's terminal only, including while shell integration is starting. */
+	terminate() {
+		if (this.stopped) return
+		this.terminal?.dispose()
+		this.stopped = true
+		this.waitForShellIntegration = false
+		this.signal = "SIGTERM"
+		this.clearHotState()
+		this.emitRemainingBufferIfListening()
+		this.isListening = false
+		this.emit("completed", this.getCompletionDetails())
+		this.emit("continue")
+	}
+
 	async run(terminal: vscode.Terminal, command: string) {
+		if (this.stopped) return
+		this.terminal = terminal
 		this.exitCode = undefined
 		this.signal = null
-
-		// When command does not produce any output, we can assume the shell integration API failed and as a fallback return the current terminal contents
-		const returnCurrentTerminalContents = async () => {
-			try {
-				const terminalSnapshot = await getLatestTerminalOutput()
-				if (terminalSnapshot?.trim()) {
-					const fallbackMessage = `The command's output could not be captured due to some technical issue, however it has been executed successfully. Here's the current terminal's content to help you get the command's output:\n\n${terminalSnapshot}`
-					this.emit("line", fallbackMessage)
-				}
-			} catch (error) {
-				Logger.error("Error capturing terminal output:", error)
+		try {
+			await this.runCommand(terminal, command)
+		} catch (error) {
+			this.clearHotState()
+			if (this.stopped) return
+			if (!this.dispatched) {
+				this.stopped = true
+				this.emit("error", error instanceof Error ? error : new Error(String(error)))
+				return
 			}
+			// Losing observation is not evidence that a dispatched command failed or stopped.
+			const notice = `Terminal output tracking failed: ${error instanceof Error ? error.message : String(error)}. The command may still be running. Inspect its existing terminal before retrying.`
+			this.fullOutput += `\n${notice}\n`
+			if (this.isListening) this.emit("line", notice)
+			this.emit("no_shell_integration")
+			this.continue()
 		}
+	}
 
+	private async runCommand(terminal: vscode.Terminal, command: string) {
 		if (terminal.shellIntegration?.executeCommand) {
 			// Track that we're using shell integration
 			const execution = terminal.shellIntegration.executeCommand(command)
+			this.dispatched = true
 			const stream = execution.read()
 			// todo: need to handle errors
 			let isFirstChunk = true
@@ -67,6 +102,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 			let didEmitEmptyLine = false
 
 			for await (let data of stream) {
+				if (this.stopped) return
 				// Parse shell integration completion markers when present.
 				// Sequence format: ]633;D;<exitCode>
 				const completionMatches = [...data.matchAll(/\]633;D(?:;(-?\d+))?/g)]
@@ -147,6 +183,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 
 				// Ctrl+C detection: if user presses Ctrl+C, treat as command terminated
 				if (data.includes("^C") || data.includes("\u0003")) {
+					this.signal = "SIGINT"
 					if (this.hotTimer) {
 						clearTimeout(this.hotTimer)
 					}
@@ -210,58 +247,25 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 
 			this.emitRemainingBufferIfListening()
 
-			// the command process is finished, let's check the output to see if we need to use the terminal capture fallback
-			if (!this.fullOutput.trim()) {
-				// No output captured via shell integration, trying fallback
-				telemetryService.captureTerminalOutputFailure(TerminalOutputFailureReason.TIMEOUT, "vscode")
-				await returnCurrentTerminalContents()
-				// Check if fallback worked
-				const terminalSnapshot = await getLatestTerminalOutput()
-				if (terminalSnapshot?.trim()) {
-					telemetryService.captureTerminalExecution(true, "vscode", "clipboard")
-				} else {
-					telemetryService.captureTerminalExecution(false, "vscode", "none")
-				}
-			} else {
-				// Shell integration worked
-				telemetryService.captureTerminalExecution(true, "vscode", "shell_integration")
-			}
-
-			// for now we don't want this delaying requests since we don't send diagnostics automatically anymore (previous: "even though the command is finished, we still want to consider it 'hot' in case so that api request stalls to let diagnostics catch up")
-			// to explain this further, before we would send workspace diagnostics automatically with each request, but now we only send new diagnostics after file edits, so there's no need to wait for a bit after commands run to let diagnostics catch up
-			if (this.hotTimer) {
-				clearTimeout(this.hotTimer)
-			}
-			this.isHot = false
+			if (this.stopped) return
+			// A quiet command is valid. Never read an unrelated active terminal's clipboard
+			// or claim success merely because output capture is empty.
+			this.stopped = true
+			this.clearHotState()
 
 			this.emit("completed", this.getCompletionDetails())
 			this.emit("continue")
 		} else {
-			// no shell integration detected, we'll fallback to running the command and capturing the terminal's output after some time
-			telemetryService.captureTerminalOutputFailure(TerminalOutputFailureReason.NO_SHELL_INTEGRATION, "vscode")
 			terminal.sendText(command, true)
-
-			// wait 3 seconds for the command to run
-			await new Promise((resolve) => setTimeout(resolve, 3000))
-
-			// For terminals without shell integration, also try to capture terminal content
-			await returnCurrentTerminalContents()
-			// Check if clipboard fallback worked
-			const terminalSnapshot = await getLatestTerminalOutput()
-			if (terminalSnapshot?.trim()) {
-				telemetryService.captureTerminalExecution(true, "vscode", "clipboard")
-			} else {
-				telemetryService.captureTerminalExecution(false, "vscode", "none")
-			}
-			// For terminals without shell integration, we can't know when the command completes
-			// So we'll just emit the continue event after a delay
-			this.emit("completed", this.getCompletionDetails())
-			this.emit("continue")
+			this.dispatched = true
+			// Without shell integration there is no completion signal. Release the agent
+			// immediately, retain cancellation ownership, and keep this terminal busy.
+			this.emit(
+				"line",
+				"Command sent to the terminal. Shell integration is unavailable, so its completion and exit status are unknown. Inspect the existing terminal; do not launch it again.",
+			)
 			this.emit("no_shell_integration")
-			// setTimeout(() => {
-			// 	Logger.log(`Emitting continue after delay for terminal`)
-			// 	// can't emit completed since we don't if the command actually completed, it could still be running server
-			// }, 500) // Adjust this delay as needed
+			this.continue()
 		}
 	}
 

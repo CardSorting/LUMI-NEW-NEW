@@ -75,13 +75,15 @@ These patterns keep the codebase navigable and maintainable over time.
 ROADMAP.md at the workspace root is the long-horizon steering surface — not a backlog.
 
 **Project:** project
-**Phase:** validate_pending
+**Phase:** bootstrap
 **Health:** unknown
 **Prime directive:** Did the latest work strengthen or weaken the project's center of gravity?
 
-The system auto-bootstraps ROADMAP.md from workspace evidence when missing. After editing ROADMAP.md, run `roadmap(action='validate')` before `attempt_completion`.
+Roadmap advice does not expand the user's task. Anti-goals, template placeholders, and checkpoint age are advisory by default. Only explicitly configured blocking gates require repair. Do not repeat audits, tests, or unchanged validation to improve advisory status.
 
-**Recommended next call:** roadmap(action='validate') then fix reported issues
+After editing ROADMAP.md, run `roadmap(action='validate')` once after the final edit. Stop when relevant checks pass; rerun only after a repair or new evidence.
+
+**Roadmap suggestion (only when relevant):** roadmap(action='checkpoint')
 
 Tool actions (all return _roadmap_operator_hints + project_identity_line):
 - `/roadmap cockpit` — operator one-screen summary (runs synchronously in chat)
@@ -116,7 +118,7 @@ You can track and communicate your progress on the overall task using the task_p
 - If you are creating this checklist for the first time, and the tool use completes the first step in the checklist, make sure to mark it as completed in your task_progress parameter.
 - Provide the whole checklist of steps you intend to complete in the task, and keep the checkboxes updated as you make progress. It's okay to rewrite this checklist as needed if it becomes invalid due to scope changes or new information.
 - Be sure to update the list any time a step has been completed.
-- The final item in every todo list MUST be "- [ ] Update Sovereign Knowledge Ledger (.wiki/) [Structural Audit Required]"
+- Include documentation and verification only when relevant to the assignment or required by workspace policy. Do not append automatic roadmap, wiki, or audit tasks.
 - The system may include todo list context in your prompts when appropriate - these reminders are important, and serve as a validation of your successful task execution.
 
 **How to use task_progress:**
@@ -173,8 +175,9 @@ RULES
 
 - Your current working directory is: /test/project - this is where you will be using tools from.
 - Do not use the ~ character or $HOME to refer to the home directory. Use absolute paths instead.
-- MCP operations should be used one at a time, similar to other tool usage. Wait for confirmation of success before proceeding with additional operations.
-- SOVEREIGN KNOWLEDGE LEDGER: You are STRICTLY MANDATED to maintain the project's Knowledge Ledger (SKL) in the `.wiki/` directory. This is NOT a singular file, but a granular, multi-file breakdown of the system state (index.md, changelog.md, etc.). Before calling attempt_completion, you MUST audit the codebase and document every verified change with 1:1 factual precision in the `.wiki/` directory. Refer to the SOVEREIGN KNOWLEDGE LEDGER (SKL) section for mandatory structural and evidence-based standards. Failure to produce this technical writing is a violation of the Sovereign Protocol.
+- Apply the same dependency and approval rules to MCP tools: inspect results and continue authorized work without extra confirmation.
+- Documentation: follow the workspace's existing conventions. Update relevant documentation when requested or when behavior changes. Keep claims grounded in inspected files and verification results. Do not create a wiki, audit unrelated code, or add documentation work to a research-only task solely to satisfy completion.
+- Execution flow: continue within existing authorization and configured approvals. After an explicit denial, do not repeatedly request the same action or try alternate forms to evade it. Continue independent authorized work; report the specific blocked action once if it prevents completion. Retry only after new user direction or a relevant permission change.
 
 ====
 

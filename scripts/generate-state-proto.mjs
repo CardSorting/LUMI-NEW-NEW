@@ -13,6 +13,8 @@
  */
 
 import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import { pathToFileURL } from "node:url"
 import { Project, SyntaxKind } from "ts-morph"
 
 const STATE_KEYS_PATH = "src/shared/storage/state-keys.ts"
@@ -224,17 +226,10 @@ function parseFieldDefinitions(sourceFile, variableName) {
 }
 
 /**
- * Convert snake_case to camelCase for mapping proto fields back to TS keys
- */
-function snakeToCamel(str) {
-	return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())
-}
-
-/**
  * Parse field numbers from an existing proto message definition
- * Returns a map of camelCase field names to their field numbers
+ * Keep wire names: converting them to camelCase loses hyphens and acronym casing.
  */
-function parseProtoMessageFieldNumbers(protoContent, messageName) {
+export function parseProtoMessageFieldNumbers(protoContent, messageName) {
 	const fieldNumbers = {}
 
 	// Match the message block (handles single-level nesting for now)
@@ -248,14 +243,13 @@ function parseProtoMessageFieldNumbers(protoContent, messageName) {
 	const messageBody = match[1]
 
 	// Match field definitions: optional/required/repeated type name = number;
-	const fieldRegex = /(?:optional|required|repeated)?\s*\w+\s+(\w+)\s*=\s*(\d+)\s*;/g
+	const fieldRegex = /(?:optional|required|repeated)?\s*(?:map\s*<[^>]+>|[\w.]+)\s+(\w+)\s*=\s*(\d+)\s*;/g
 	const matches = messageBody.matchAll(fieldRegex)
 
 	for (const fieldMatch of matches) {
 		const snakeName = fieldMatch[1]
 		const fieldNum = Number.parseInt(fieldMatch[2], 10)
-		const camelName = snakeToCamel(snakeName)
-		fieldNumbers[camelName] = fieldNum
+		fieldNumbers[snakeName] = fieldNum
 	}
 
 	return fieldNumbers
@@ -283,7 +277,7 @@ async function loadFieldNumbersFromProto() {
 /**
  * Assign field numbers, preserving existing assignments and adding new ones
  */
-function assignFieldNumbers(fields, existingNumbers, startNumber = 1) {
+export function assignFieldNumbers(fields, existingNumbers, startNumber = 1) {
 	const result = {}
 	let nextNumber = startNumber
 
@@ -296,8 +290,9 @@ function assignFieldNumbers(fields, existingNumbers, startNumber = 1) {
 
 	// Preserve existing assignments
 	for (const field of fields) {
-		if (existingNumbers[field.name] !== undefined) {
-			result[field.name] = existingNumbers[field.name]
+		const wireName = toProtoFieldName(field.name)
+		if (existingNumbers[wireName] !== undefined) {
+			result[field.name] = existingNumbers[wireName]
 		}
 	}
 
@@ -406,7 +401,9 @@ async function main() {
 	console.log("\nGeneration complete! Run 'npm run protos' to regenerate TypeScript from protos.")
 }
 
-main().catch((error) => {
-	console.error("Error:", error)
-	process.exit(1)
-})
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+	main().catch((error) => {
+		console.error("Error:", error)
+		process.exit(1)
+	})
+}

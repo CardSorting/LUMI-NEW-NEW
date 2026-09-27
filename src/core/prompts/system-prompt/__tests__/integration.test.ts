@@ -271,6 +271,9 @@ describe("Prompt System Integration Tests", () => {
 
 							expect(systemPrompt).to.be.a("string").with.length.greaterThan(100)
 							expect(systemPrompt).to.not.include("{{TOOL_USE_SECTION}}")
+							expect(systemPrompt).to.not.include("wait for the user's response after each tool use")
+							expect(systemPrompt).to.not.include("ALWAYS wait for user confirmation after each tool use")
+							expect(systemPrompt).to.include("continue within existing authorization")
 
 							const snapshotName = `${providerId}_${modelId.replace(/[^a-zA-Z0-9]/g, "_")}-${contextName}.snap`
 							await assertSnapshot(snapshotName, systemPrompt)

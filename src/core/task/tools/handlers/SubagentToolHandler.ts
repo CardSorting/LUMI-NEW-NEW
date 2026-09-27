@@ -8,17 +8,18 @@ import {
 } from "@shared/ExtensionMessage"
 import pTimeout from "p-timeout"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
-import { telemetryService } from "@/services/telemetry"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { showNotificationForApproval } from "../../utils"
 import { AgentConfigLoader } from "../subagent/AgentConfigLoader"
+import { observeHelperOperation } from "../subagent/observeHelperOperation"
 import { SUBAGENT_DEFAULT_ALLOWED_TOOLS, SubagentBuilder } from "../subagent/SubagentBuilder"
 import { SubagentRunner, type SubagentRunResult } from "../subagent/SubagentRunner"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
+import { recordExecutionEvidence } from "../utils/executionEvidence"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
+import { reportToolUsage } from "../utils/toolTelemetry"
 
 interface ConfigWithExtensions extends TaskConfig {
 	getSessionStreamId?: () => string
@@ -75,7 +76,6 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		if (prompts.length === 0) {
 			return
 		}
-
 		const partialMessage = JSON.stringify({ prompts } satisfies DietCodeAskUseSubagents)
 		const autoApproveResult = uiHelpers.shouldAutoApproveTool(this.name)
 		const [shouldAutoApprove] = Array.isArray(autoApproveResult) ? autoApproveResult : [autoApproveResult, false]
@@ -102,6 +102,17 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			config.taskState.consecutiveMistakeCount++
 			return await config.callbacks.sayAndCreateMissingParamError(this.name, configuredSubagentName ? "prompt" : "prompt_1")
 		}
+		const currentDepth = config.recursionDepth || 0
+		const maxDepthSetting = config.services.stateManager.getGlobalSettingsKey("maxSwarmDepth")
+		const maxDepth = typeof maxDepthSetting === "number" ? maxDepthSetting : 3
+		if (currentDepth >= maxDepth) {
+			return formatResponse.toolError(
+				`Helper depth limit reached (${maxDepth}). Return the current findings to the parent.`,
+			)
+		}
+		if (config.taskState.abort) {
+			return formatResponse.toolError("Helper batch cancelled before execution.")
+		}
 
 		// Production Hardening: Limit number of prompts for nested subagents to prevent swarm explosions
 		const MAX_PROMPTS_PER_SWARM = config.isSubagentExecution ? 5 : 15
@@ -127,7 +138,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		const didAutoApprove = !!autoApproveSafe
 
 		if (didAutoApprove) {
-			telemetryService.captureToolUsage(
+			reportToolUsage(
 				config.ulid,
 				this.name,
 				config.api.getModel().id,
@@ -138,15 +149,16 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				block.isNativeToolCall,
 			)
 		} else {
-			showNotificationForApproval(
+			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+				"use_subagents",
+				approvalBody,
+				config,
 				prompts.length === 1
 					? `DietCode wants to use ${configuredSubagentName ? `the '${configuredSubagentName}' subagent` : "a subagent"}`
 					: `DietCode wants to use ${prompts.length} subagents`,
-				config.autoApprovalSettings.enableNotifications,
 			)
-			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("use_subagents", approvalBody, config)
 			if (!didApprove) {
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					this.name,
 					config.api.getModel().id,
@@ -158,7 +170,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				)
 				return formatResponse.toolDenied()
 			}
-			telemetryService.captureToolUsage(
+			reportToolUsage(
 				config.ulid,
 				this.name,
 				config.api.getModel().id,
@@ -189,6 +201,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			latestToolCall: undefined,
 		}))
 
+		let statusMessageTs: number | undefined
 		const emitStatus = async (status: DietCodeSaySubagentStatus["status"], partial: boolean) => {
 			const completed = entries.filter((entry) => entry.status === "completed" || entry.status === "failed").length
 			const successes = entries.filter((entry) => entry.status === "completed").length
@@ -215,25 +228,53 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				items: entries,
 			}
 
-			await config.callbacks.say("subagent", JSON.stringify(payload), undefined, undefined, partial)
+			const text = JSON.stringify(payload)
+			const messages = config.messageState
+			if (messages?.getDietCodeMessages && messages.addToDietCodeMessages && messages.updateDietCodeMessage) {
+				// Own one row. A delayed write cannot replace a newer command, approval, or helper batch.
+				if (statusMessageTs === undefined) {
+					statusMessageTs = Math.max(Date.now(), (messages.getDietCodeMessages().at(-1)?.ts ?? 0) + 1)
+					await messages.addToDietCodeMessages({ ts: statusMessageTs, type: "say", say: "subagent", text, partial })
+				} else {
+					const index = messages.getDietCodeMessages().findIndex((message) => {
+						if (message.ts !== statusMessageTs || message.say !== "subagent") return false
+						try {
+							return JSON.parse(message.text || "{}").items?.[0]?.id === entries[0].id
+						} catch {
+							return false
+						}
+					})
+					if (index < 0) return
+					await messages.updateDietCodeMessage(index, { text, partial })
+				}
+				await config.callbacks.postStateToWebview()
+			} else {
+				await config.callbacks.say("subagent", text, undefined, undefined, partial)
+			}
 		}
 
-		let statusUpdateQueue: Promise<void> = Promise.resolve()
+		let pendingStatus: { status: DietCodeSaySubagentStatus["status"]; partial: boolean } | undefined
+		let statusUpdateQueue: Promise<void> | undefined
 		const queueStatusUpdate = (status: DietCodeSaySubagentStatus["status"], partial: boolean): Promise<void> => {
-			statusUpdateQueue = statusUpdateQueue.catch(() => undefined).then(() => emitStatus(status, partial))
+			// Coalesce progress while the UI is busy; retain the final state without queuing every token update.
+			pendingStatus = { status, partial }
+			statusUpdateQueue ??= (async () => {
+				try {
+					while (pendingStatus) {
+						const update = pendingStatus
+						pendingStatus = undefined
+						try {
+							await emitStatus(update.status, update.partial)
+						} catch (error) {
+							Logger.warn("[SubagentToolHandler] Could not publish helper progress", error)
+						}
+					}
+				} finally {
+					// Clear before resolving, so an update arriving in the next microtask starts a new drain.
+					statusUpdateQueue = undefined
+				}
+			})()
 			return statusUpdateQueue
-		}
-
-		await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "subagent")
-		await queueStatusUpdate("running", true)
-
-		const currentDepth = config.recursionDepth || 0
-		const maxDepthSetting = config.services.stateManager.getGlobalSettingsKey("maxSwarmDepth")
-		const maxDepth = typeof maxDepthSetting === "number" ? maxDepthSetting : 3
-		if (currentDepth >= maxDepth) {
-			const depthError = `Swarm Recursion Limit Reached (Depth: ${currentDepth}). To prevent runaway loops, this swarm cannot spawn further subagents. Complete the current task or simplify the objective.`
-			Logger.warn(`[SubagentToolHandler] Recursion limit reached: ${depthError}`)
-			return formatResponse.toolError(depthError)
 		}
 
 		const builder = new SubagentBuilder(config, configuredSubagentName)
@@ -252,78 +293,122 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			builder.setAllowedTools(requestedTools.filter((t) => !unauthorizedTools.includes(t)))
 		}
 
-		const runners = prompts.map(() => {
-			const runner = new SubagentRunner(config, builder)
+		const runners = prompts.map((_prompt, index) => {
+			// Each helper owns its provider stream and retry signal. Sharing the builder
+			// also shared cancellation across otherwise independent helpers.
+			const helperBuilder = index === 0 ? builder : new SubagentBuilder(config, configuredSubagentName)
+			helperBuilder.setAllowedTools(builder.getAllowedTools())
+			const runner = new SubagentRunner(config, helperBuilder)
 			runner.setRecursionDepth(currentDepth + 1)
 			return runner
 		})
-		const abortPollInterval = setInterval(() => {
-			if (!config.taskState.abort) {
-				return
-			}
-			clearInterval(abortPollInterval)
-			void Promise.allSettled(runners.map((runner) => runner.abort()))
-		}, 100)
+		void queueStatusUpdate("running", true)
+		let stopReason: string | undefined
+		let finalized = false
+		let signalStopped!: () => void
+		const stopped = new Promise<void>((resolve) => {
+			signalStopped = resolve
+		})
+		const stopBatch = (reason: string) => {
+			if (stopReason) return
+			stopReason = reason
+			signalStopped()
+			void Promise.allSettled(runners.map((runner) => Promise.resolve().then(() => runner.abort())))
+		}
+		const onParentAbort = () => stopBatch("Helper batch cancelled.")
+		config.taskState.abortSignal.addEventListener("abort", onParentAbort, { once: true })
+		if (config.taskState.abort) onParentAbort()
 
 		// Wire each subagent prompt to an orchestrator child stream
 		// getSessionStreamId may not be available on all config shapes
-		const parentStreamId = (config as ConfigWithExtensions).getSessionStreamId?.()
-		const childStreamIds: (string | null)[] = await Promise.all(
-			prompts.map(async (prompt) => {
-				if (!parentStreamId) return null
-				try {
-					const childStream = await orchestrator.spawnChildStream(parentStreamId, `subagent: ${prompt.slice(0, 80)}`)
-					return childStream.id
-				} catch {
-					return null
-				}
-			}),
-		)
+		let parentStreamId: string | undefined
+		try {
+			parentStreamId = (config as ConfigWithExtensions).getSessionStreamId?.()
+		} catch (error) {
+			Logger.warn("[SubagentToolHandler] Stream tracking unavailable:", error)
+		}
+		const childStreamIds: (string | undefined)[] = new Array(prompts.length)
 
 		// Production Hardening: Concurrency Limit (max 3 subagents in parallel)
 		const MAX_CONCURRENCY = 3
-		const results: PromiseSettledResult<SubagentRunResult>[] = new Array(prompts.length)
+		const results: (PromiseSettledResult<SubagentRunResult> | undefined)[] = Array.from({ length: prompts.length })
+		const latestStats: (SubagentRunResult["stats"] | undefined)[] = new Array(prompts.length)
+		const recordStats = (index: number, stats: SubagentRunResult["stats"]) => {
+			const previous = latestStats[index]
+			const merged = { ...stats }
+			for (const key of [
+				"toolCalls",
+				"inputTokens",
+				"outputTokens",
+				"cacheWriteTokens",
+				"cacheReadTokens",
+				"totalCost",
+			] as const) {
+				merged[key] = Math.max(previous?.[key] || 0, Number.isFinite(stats[key]) ? stats[key] : 0)
+			}
+			latestStats[index] = merged
+			return merged
+		}
+		const closedStreams = new Set<string>()
+		const closeChildStream = (index: number) => {
+			const id = childStreamIds[index]
+			if (!id || closedStreams.has(id)) return
+			const current = entries[index]
+			if (current.status !== "completed" && current.status !== "failed") return
+			closedStreams.add(id)
+			void observeHelperOperation("Stream finalization", async () => {
+				if (current.status === "completed") await orchestrator.completeStream(id, excerpt(current.result, 200))
+				else await orchestrator.failStream(id, current.error || "Helper stopped")
+			})
+		}
 		let nextIndex = 0
 		let totalSwarmCost = 0
 		const MAX_PARENT_COST = config.taskState.maxCost
+		if (MAX_PARENT_COST !== undefined && Number.isFinite(MAX_PARENT_COST) && MAX_PARENT_COST <= 0) {
+			stopBatch("Helper cost budget is exhausted.")
+		}
+		const recordCost = (current: SubagentStatusItem, cost: number | undefined) => {
+			if (cost === undefined || !Number.isFinite(cost)) return
+			const nextCost = Math.max(current.totalCost || 0, cost)
+			totalSwarmCost += nextCost - (current.totalCost || 0)
+			current.totalCost = nextCost
+			if (MAX_PARENT_COST !== undefined && totalSwarmCost >= MAX_PARENT_COST) {
+				stopBatch(`Helper cost budget reached ($${totalSwarmCost.toFixed(2)} / $${MAX_PARENT_COST.toFixed(2)}).`)
+			}
+		}
 
 		const runSubagent = async (index: number) => {
-			// Production Hardening: Staggered spawn to prevent simultaneous rate-limit bursts
-			if (index > 0) {
-				await new Promise((resolve) => setTimeout(resolve, 500))
-			}
-
 			const current = entries[index]
 			try {
+				if (parentStreamId) {
+					await observeHelperOperation("Stream registration", async () => {
+						const child = await orchestrator.spawnChildStream(
+							parentStreamId!,
+							`subagent: ${prompts[index].slice(0, 80)}`,
+						)
+						childStreamIds[index] = child.id
+						runners[index].setStreamId(child.id)
+						closeChildStream(index)
+					})
+				}
+				if (stopReason || config.taskState.abort) {
+					return
+				}
 				const result = await runners[index].run(
 					prompts[index],
-					async (update) => {
-						// Real-time Swarm Cost Monitoring
-						if (update.stats?.totalCost !== undefined) {
-							const previousSubagentCost = current.totalCost || 0
-							const costDelta = update.stats.totalCost - previousSubagentCost
-							totalSwarmCost += costDelta
-
-							if (MAX_PARENT_COST && totalSwarmCost > MAX_PARENT_COST) {
-								const costError = `Swarm Cumulative Cost Budget Exceeded ($${totalSwarmCost} > $${MAX_PARENT_COST}). Aborting entire swarm.`
-								Logger.error(`[SubagentToolHandler] ${costError}`)
-								// Abort all runners immediately
-								void Promise.allSettled(runners.map((r) => r.abort()))
-							}
-						}
+					(update) => {
+						if (finalized) return
+						if (update.stats) recordStats(index, update.stats)
+						recordCost(current, update.stats?.totalCost)
 
 						if (update.status === "running") {
 							current.status = "running"
 						}
 						if (update.status === "completed") {
 							current.status = "completed"
-							const childId = childStreamIds[index]
-							if (childId) orchestrator.completeStream(childId, excerpt(update.result, 200)).catch(() => {})
 						}
 						if (update.status === "failed") {
 							current.status = "failed"
-							const childId = childStreamIds[index]
-							if (childId) orchestrator.failStream(childId, update.error || "Subagent failed").catch(() => {})
 						}
 						if (update.result !== undefined) {
 							current.result = update.result
@@ -350,29 +435,31 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 							current.toolCalls = update.stats.toolCalls || 0
 							current.inputTokens = update.stats.inputTokens || 0
 							current.outputTokens = update.stats.outputTokens || 0
-							current.totalCost = update.stats.totalCost || 0
 							current.contextTokens = update.stats.contextTokens || 0
 							current.contextWindow = update.stats.contextWindow || 0
 							current.contextUsagePercentage = update.stats.contextUsagePercentage || 0
 						}
-						await queueStatusUpdate("running", true)
+						void queueStatusUpdate("running", true)
 					},
 					childStreamIds[index] || undefined,
 				)
+				if (finalized) return
+				recordStats(index, result.stats)
+				recordCost(current, result.stats.totalCost)
 				results[index] = { status: "fulfilled", value: result }
 			} catch (error) {
+				if (finalized) return
 				Logger.error(`[SubagentToolHandler] Subagent ${index} crashed:`, error)
 				current.status = "failed"
-				current.error = (error as Error).message || "Internal Runner Crash"
-				const childId = childStreamIds[index]
-				if (childId) orchestrator.failStream(childId, current.error).catch(() => {})
-				await queueStatusUpdate("running", true)
+				current.error =
+					error instanceof Error ? error.message : typeof error === "string" ? error : "Internal Runner Crash"
 				results[index] = { status: "rejected", reason: error }
+				void queueStatusUpdate("running", true)
 			}
 		}
 
 		const workers = Array.from({ length: Math.min(MAX_CONCURRENCY, prompts.length) }, async () => {
-			while (nextIndex < prompts.length) {
+			while (nextIndex < prompts.length && !stopReason && !config.taskState.abort) {
 				const i = nextIndex++
 				await runSubagent(i)
 			}
@@ -382,16 +469,17 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		const SUBAGENT_EXECUTION_TIMEOUT_MS = 20 * 60 * 1000
 
 		try {
-			await pTimeout(Promise.all(workers), {
+			await pTimeout(Promise.race([Promise.all(workers), stopped]), {
 				milliseconds: SUBAGENT_EXECUTION_TIMEOUT_MS,
 				message: "Subagent swarm execution timed out after 20 minutes.",
 			})
 		} catch (err: unknown) {
 			Logger.error("[SubagentToolHandler] Swarm execution error or timeout:", err)
 			// Abort all runners on timeout to prevent zombie processes
-			void Promise.allSettled(runners.map((r) => r.abort()))
+			stopBatch(err instanceof Error ? err.message : "Helper batch stopped.")
 		} finally {
-			clearInterval(abortPollInterval)
+			finalized = true
+			config.taskState.abortSignal.removeEventListener("abort", onParentAbort)
 		}
 
 		let usageTokensIn = 0
@@ -403,39 +491,57 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		results.forEach((result, index) => {
 			if (!result) {
 				entries[index].status = "failed"
-				entries[index].error = "Subagent task was aborted or timed out before execution."
+				entries[index].error = stopReason || "Helper cancelled before finishing."
 				return
 			}
 
 			if (result.status === "rejected") {
 				entries[index].status = "failed"
-				entries[index].error = (result.reason as Error)?.message || "Subagent execution failed"
+				entries[index].error = entries[index].error || "Subagent execution failed"
 				return
 			}
 
 			entries[index].status = result.value.status
 			entries[index].result = result.value.result
 			entries[index].error = result.value.error
-			entries[index].filesModified = result.value.filesModified
-			entries[index].filesViewed = result.value.filesViewed
+			entries[index].filesModified = result.value.filesModified ?? entries[index].filesModified
+			entries[index].filesViewed = result.value.filesViewed ?? entries[index].filesViewed
 			entries[index].durationMs = result.value.durationMs
-			entries[index].toolCalls = result.value.stats.toolCalls || 0
-			entries[index].inputTokens = result.value.stats.inputTokens || 0
-			entries[index].outputTokens = result.value.stats.outputTokens || 0
-			entries[index].totalCost = result.value.stats.totalCost || 0
+			const stats = latestStats[index] ?? result.value.stats
+			entries[index].toolCalls = stats.toolCalls || 0
+			entries[index].inputTokens = stats.inputTokens || 0
+			entries[index].outputTokens = stats.outputTokens || 0
+			entries[index].totalCost = stats.totalCost || 0
 			entries[index].contextTokens = result.value.stats.contextTokens || 0
 			entries[index].contextWindow = result.value.stats.contextWindow || 0
 			entries[index].contextUsagePercentage = result.value.stats.contextUsagePercentage || 0
-
-			usageTokensIn += result.value.stats.inputTokens || 0
-			usageTokensOut += result.value.stats.outputTokens || 0
-			usageCacheWrites += result.value.stats.cacheWriteTokens || 0
-			usageCacheReads += result.value.stats.cacheReadTokens || 0
-			usageCost += result.value.stats.totalCost || 0
 		})
+		entries.forEach((_entry, index) => closeChildStream(index))
+		if (entries.some((entry) => entry.status === "completed" || (entry.filesModified?.length ?? 0) > 0)) {
+			// A fresh handoff can resolve the parent's blocker even with checkpoints disabled.
+			recordExecutionEvidence(
+				config.taskState,
+				"helpers",
+				[config.cwd, configuredSubagentName, prompts],
+				entries.map((entry) => ({
+					status: entry.status,
+					result: entry.result,
+					error: entry.error,
+					filesModified: entry.filesModified,
+					filesViewed: entry.filesViewed,
+				})),
+			)
+		}
+		for (const stats of latestStats) {
+			usageTokensIn += stats?.inputTokens || 0
+			usageTokensOut += stats?.outputTokens || 0
+			usageCacheWrites += stats?.cacheWriteTokens || 0
+			usageCacheReads += stats?.cacheReadTokens || 0
+			usageCost += stats?.totalCost || 0
+		}
 
 		const failures = entries.filter((entry) => entry.status === "failed").length
-		await queueStatusUpdate(failures > 0 ? "failed" : "completed", false)
+		const finalStatus = queueStatusUpdate(failures > 0 ? "failed" : "completed", false)
 
 		const subagentUsagePayload: DietCodeSubagentUsageInfo = {
 			source: "subagents",
@@ -445,29 +551,23 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			cacheReads: usageCacheReads,
 			cost: usageCost,
 		}
-		await config.callbacks.say("subagent_usage", JSON.stringify(subagentUsagePayload))
+		await observeHelperOperation("Final status and usage display", () =>
+			Promise.all([
+				finalStatus,
+				Promise.resolve().then(() => config.callbacks.say("subagent_usage", JSON.stringify(subagentUsagePayload))),
+			]),
+		)
 
 		const successCount = entries.length - failures
-		const totalToolCalls = entries.reduce((acc, entry) => acc + (entry.toolCalls || 0), 0)
-		const maxContextUsagePercentage = entries.reduce((acc, entry) => Math.max(acc, entry.contextUsagePercentage || 0), 0)
-		const maxContextTokens = entries.reduce((acc, entry) => Math.max(acc, entry.contextTokens || 0), 0)
-		const contextWindow = entries.reduce((acc, entry) => Math.max(acc, entry.contextWindow || 0), 0)
 
 		const blackboard = config.taskState.swarmBlackboard || []
 		const summary = [
 			"### SWARM EXECUTION SUMMARY",
 			`Total Agents: ${entries.length} (Success: ${successCount}, Fail: ${failures})`,
-			`Total Tool Calls: ${totalToolCalls}`,
-			`Peak Context Usage: ${maxContextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} (${maxContextUsagePercentage.toFixed(1)}%)`,
 			"",
 			"### AGENT DETAILS",
 			...entries.map((entry) => {
-				const durationSec = entry.durationMs ? `${(entry.durationMs / 1000).toFixed(1)}s` : undefined
-				const metaInfo = [durationSec, entry.toolCalls !== undefined ? `${entry.toolCalls} tool calls` : undefined]
-					.filter(Boolean)
-					.join(", ")
-
-				const header = `#### [${entry.index}] ${entry.name} - ${entry.status.toUpperCase()}${metaInfo ? ` (${metaInfo})` : ""}`
+				const header = `#### [${entry.index}] ${entry.name} - ${entry.status.toUpperCase()}`
 				const isSingleAgent = entries.length === 1
 				const promptLimit = isSingleAgent ? 1000 : 300
 				const resultLimit = isSingleAgent ? 8000 : 2500
@@ -484,7 +584,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				const detail =
 					entry.status === "completed"
 						? `**Result:**\n${excerpt(entry.result, resultLimit)}`
-						: `**Error:**\n${entry.error || "Unknown error"}`
+						: `**Error:**\n${entry.error || "Unknown error"}${entry.result ? `\n**Partial result:**\n${excerpt(entry.result, resultLimit)}` : ""}`
 				const signals =
 					entry.criticalSignals && entry.criticalSignals.length > 0
 						? `\n**Signals:** ${entry.criticalSignals.join(", ")}`
@@ -494,6 +594,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			...(blackboard.length > 0 ? ["", "### SHARED SWARM FINDINGS (Blackboard)", ...blackboard.map((f) => `- ${f}`)] : []),
 		].join("\n")
 
-		return formatResponse.toolResult(summary)
+		// Timing and token counters remain in the UI; they cannot make an unchanged handoff look productive.
+		return successCount === 0 ? formatResponse.toolError(summary) : formatResponse.toolResult(summary)
 	}
 }

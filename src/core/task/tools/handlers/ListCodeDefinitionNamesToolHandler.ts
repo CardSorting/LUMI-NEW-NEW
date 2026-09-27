@@ -5,7 +5,6 @@ import { getReadablePath, isLocatedInWorkspace } from "@utils/path"
 import { formatResponse } from "@/core/prompts/responses"
 import { telemetryService } from "@/services/telemetry"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { showNotificationForApproval } from "../../utils"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
@@ -113,11 +112,14 @@ export class ListCodeDefinitionNamesToolHandler implements IFullyManagedTool {
 			const notificationMessage = `DietCode wants to analyze code definitions in ${getWorkspaceBasename(absolutePath, "ListCodeDefinitionNamesToolHandler.notification")}`
 
 			// Show notification
-			showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
-
 			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
 
-			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("tool", completeMessage, config)
+			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+				"tool",
+				completeMessage,
+				config,
+				notificationMessage,
+			)
 			if (!didApprove) {
 				telemetryService.captureToolUsage(
 					config.ulid,

@@ -65,9 +65,9 @@ const RULES = (context: SystemPromptContext) => {
 - The current working directory is \`{{CWD}}\` - this is the directory where all the tools will be executed from.${
 		context.enableParallelToolCalling
 			? `
-- You may use multiple tools in a single response when the operations are independent (e.g., reading several files, creating independent files). For dependent operations where one result informs the next, use tools sequentially and wait for the user's response.`
+- You may use multiple tools in a single response when the operations are independent (e.g., reading several files, creating independent files). For dependent operations where one result informs the next, use tools sequentially and inspect the tool result before continuing.`
 			: ""
-	}{{BROWSER_WAIT_RULES}}${hasMcpServers ? "\n- MCP operations should be used one at a time, similar to other tool usage. Wait for confirmation of success before proceeding with additional operations." : ""}`
+	}{{BROWSER_WAIT_RULES}}${hasMcpServers ? "\n- Apply the same dependency and approval rules to MCP tools: inspect results and continue authorized work without extra confirmation." : ""}`
 }
 
 const TOOL_USE = (context: SystemPromptContext) => `TOOL USE

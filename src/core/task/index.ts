@@ -1,7 +1,7 @@
-import { setTimeout as setTimeoutPromise } from "node:timers/promises"
 import { ApiHandler, ApiProviderInfo, buildApiHandler } from "@core/api"
 import { GeminiHandler } from "@core/api/providers/gemini"
 import { OpenAiHandler } from "@core/api/providers/openai"
+import { getApiRetryDelay, shouldRetryApiError, waitForApiRetry } from "@core/api/retry"
 import { ApiStream } from "@core/api/transform/stream"
 import { AssistantMessageContent, parseAssistantMessageV2, ToolUse } from "@core/assistant-message"
 import { ContextManager } from "@core/context/context-management/ContextManager"
@@ -53,7 +53,6 @@ import { ICheckpointManager } from "@integrations/checkpoints/types"
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import { formatContentBlockToMarkdown } from "@integrations/misc/export-markdown"
 import { processFilesIntoText } from "@integrations/misc/extract-text"
-import { showSystemNotification } from "@integrations/notifications"
 import { ITerminalManager } from "@integrations/terminal/types"
 import { BrowserSession } from "@services/browser/BrowserSession"
 import { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
@@ -77,6 +76,7 @@ import { inferAgentModeFromMessages, stripPartialPlanSummaryMessages } from "@sh
 import { DEFAULT_LANGUAGE_SETTINGS, getLanguageKey, LanguageDisplay } from "@shared/Languages"
 import { USER_CONTENT_TAGS } from "@shared/messages/constants"
 import { convertDietCodeMessageToProto } from "@shared/proto-conversions/dietcode-message"
+import type { Mode } from "@shared/storage/types"
 import { DietCodeDefaultTool, READ_ONLY_TOOLS } from "@shared/tools"
 import { DietCodeAskResponse } from "@shared/WebviewMessage"
 import {
@@ -105,7 +105,7 @@ import {
 	CommandExecutorCallbacks,
 	FullCommandExecutorConfig,
 } from "@/integrations/terminal"
-import { DietCodeError, DietCodeErrorType, ErrorService } from "@/services/error"
+import { DietCodeErrorType, ErrorService } from "@/services/error"
 import { telemetryService } from "@/services/telemetry"
 import { DietCodeClient } from "@/shared/dietcode"
 import {
@@ -122,7 +122,7 @@ import {
 import { ApiFormat } from "@/shared/proto/dietcode/models"
 import { ShowMessageType } from "@/shared/proto/index.host"
 import { Logger } from "@/shared/services/Logger"
-import { Session } from "@/shared/services/Session"
+import { observeSession } from "@/shared/services/Session"
 import { RuleContextBuilder } from "../context/instructions/user-instructions/RuleContextBuilder"
 import { ensureLocalDietCodeDirExists } from "../context/instructions/user-instructions/rule-helpers"
 import { discoverSkills, getAvailableSkills } from "../context/instructions/user-instructions/skills"
@@ -134,6 +134,7 @@ import { StateManager } from "../storage/StateManager"
 import { FocusChainManager } from "./focus-chain"
 import { MessageStateHandler } from "./message-state"
 import { StreamResponseHandler } from "./StreamResponseHandler"
+import { buildInterruptedAssistantContent, STREAM_RECOVERY_INSTRUCTION } from "./streamRecovery"
 import { TaskState } from "./TaskState"
 import { ToolExecutor } from "./ToolExecutor"
 import { detectAvailableCliTools, extractProviderDomainFromUrl, updateApiReqMsg } from "./utils"
@@ -145,8 +146,13 @@ import {
 	consumeSteeringInterrupt,
 	shouldAcceptSteeringInterrupt,
 } from "./utils/steeringInterrupt"
+import { waitForTaskPrerequisite } from "./utils/waitForTaskPrerequisite"
 
 export type ToolResponse = DietCodeToolResponseContent
+
+/** A turn returns its next input; only the request loop may dispatch another turn. */
+type TaskRequest = { userContent: DietCodeContent[]; includeFileDetails?: boolean }
+type TaskRequestOutcome = boolean | TaskRequest
 
 type TaskParams = {
 	controller: IController
@@ -234,7 +240,7 @@ export class Task {
 	private mcpHub: McpHub
 
 	// Service handlers
-	api: ApiHandler
+	api!: ApiHandler
 	terminalManager: ITerminalManager
 	private urlContentFetcher: UrlContentFetcher
 	browserSession: BrowserSession
@@ -459,45 +465,12 @@ export class Task {
 
 		// Prepare effective API configuration
 		const apiConfiguration = this.stateManager.getApiConfiguration()
-		const effectiveApiConfiguration: ApiConfiguration = {
-			...apiConfiguration,
-			ulid: this.ulid,
-			onRetryAttempt: async (attempt: number, maxRetries: number, delay: number, error: Error | unknown) => {
-				const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
-				const lastApiReqStartedIndex = findLastIndex(dietcodeMessages, (m) => m.say === "api_req_started")
-				if (lastApiReqStartedIndex !== -1) {
-					try {
-						const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
-							dietcodeMessages[lastApiReqStartedIndex].text || "{}",
-						)
-						currentApiReqInfo.retryStatus = {
-							attempt: attempt, // attempt is already 1-indexed from retry.ts
-							maxAttempts: maxRetries, // total attempts
-							delaySec: Math.round(delay / 1000),
-							errorSnippet: error instanceof Error ? `${String(error.message).substring(0, 50)}...` : undefined,
-						}
-						// Clear previous cancelReason and streamingFailedMessage if we are retrying
-						delete currentApiReqInfo.cancelReason
-						delete currentApiReqInfo.streamingFailedMessage
-						await this.messageStateHandler.updateDietCodeMessage(lastApiReqStartedIndex, {
-							text: JSON.stringify(currentApiReqInfo),
-						})
 
-						// Post the updated state to the webview so the UI reflects the retry attempt
-						await this.postStateToWebview().catch((e) =>
-							Logger.error("Error posting state to webview in onRetryAttempt:", e),
-						)
-					} catch (e) {
-						Logger.error(`[Task ${this.taskId}] Error updating api_req_started with retryStatus:`, e)
-					}
-				}
-			},
-		}
 		const mode = this.stateManager.getGlobalSettingsKey("mode")
 		const currentProvider = mode === "plan" ? apiConfiguration.planModeApiProvider : apiConfiguration.actModeApiProvider
 
 		// Now that ulid is initialized, we can build the API handler
-		this.api = buildApiHandler(effectiveApiConfiguration, mode)
+		this.updateApiHandler(apiConfiguration, mode)
 
 		// Set ulid on browserSession for telemetry tracking
 		this.browserSession.setUlid(this.ulid)
@@ -723,9 +696,15 @@ export class Task {
 			await this.postStateToWebview()
 		}
 
-		await pWaitFor(() => this.taskState.askResponse !== undefined || this.taskState.lastMessageTs !== askTs, {
-			interval: 100,
-		})
+		await pWaitFor(
+			() => {
+				if (this.taskState.abort && type !== "resume_task" && type !== "resume_completed_task") {
+					throw new Error("DietCode instance aborted")
+				}
+				return this.taskState.askResponse !== undefined || this.taskState.lastMessageTs !== askTs
+			},
+			{ interval: 100 },
+		)
 		if (this.taskState.lastMessageTs !== askTs) {
 			throw new Error("Current ask promise was ignored") // could happen if we send multiple asks in a row i.e. with command_output. It's important that when we know an ask could fail, it is handled gracefully
 		}
@@ -747,6 +726,8 @@ export class Task {
 	}
 
 	async handleWebviewAskResponse(askResponse: DietCodeAskResponse, text?: string, images?: string[], files?: string[]) {
+		this.taskState.executionProgress.reset()
+		this.taskState.consecutiveMistakeCount = 0
 		const feedback = { text, images, files }
 		if (
 			shouldAcceptSteeringInterrupt({
@@ -825,7 +806,7 @@ export class Task {
 
 	/**
 	 * When feedback arrives while the task loop is idle, restart the agent loop to process it.
-	 * When the loop is active, injection checkpoints inside recursivelyMakeDietCodeRequests handle it.
+	 * When the loop is active, injection checkpoints inside makeDietCodeRequest handle it.
 	 */
 	private scheduleIdleGapContinuation(): void {
 		// Defer so continuation runs after the current handler returns and taskLoopActive settles.
@@ -861,7 +842,7 @@ export class Task {
 			totalCost: number | undefined
 		}
 		modelInfo: DietCodeMessageModelInfo
-	}): Promise<boolean> {
+	}): Promise<TaskRequestOutcome> {
 		const steeringUserContent = await consumeSteeringInterrupt({
 			taskState: this.taskState,
 			mode: this.stateManager.getGlobalSettingsKey("mode"),
@@ -882,7 +863,128 @@ export class Task {
 			})
 		}
 
-		return await this.recursivelyMakeDietCodeRequests(steeringUserContent)
+		return { userContent: steeringUserContent }
+	}
+
+	/** Rebuild providers without dropping task-scoped cancellation or retry progress. */
+	updateApiHandler(configuration: ApiConfiguration, mode: Mode): void {
+		const effectiveApiConfiguration: ApiConfiguration = {
+			...configuration,
+			ulid: this.ulid,
+			getRetrySignal: () => this.taskState.abortSignal,
+			onRetryAttempt: async (attempt: number, maxRetries: number, delay: number, error: Error | unknown) => {
+				const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
+				const lastApiReqStartedIndex = findLastIndex(dietcodeMessages, (m) => m.say === "api_req_started")
+				if (lastApiReqStartedIndex !== -1) {
+					try {
+						const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
+							dietcodeMessages[lastApiReqStartedIndex].text || "{}",
+						)
+						currentApiReqInfo.retryStatus = {
+							attempt: attempt, // attempt is already 1-indexed from retry.ts
+							maxAttempts: maxRetries, // total attempts
+							delaySec: Math.round(delay / 1000),
+							errorSnippet: error instanceof Error ? `${String(error.message).substring(0, 50)}...` : undefined,
+						}
+						// Clear previous cancelReason and streamingFailedMessage if we are retrying
+						delete currentApiReqInfo.cancelReason
+						delete currentApiReqInfo.streamingFailedMessage
+						await this.messageStateHandler.updateDietCodeMessage(lastApiReqStartedIndex, {
+							text: JSON.stringify(currentApiReqInfo),
+						})
+
+						// Post the updated state to the webview so the UI reflects the retry attempt
+						await this.postStateToWebview().catch((e) =>
+							Logger.error("Error posting state to webview in onRetryAttempt:", e),
+						)
+					} catch (e) {
+						Logger.error(`[Task ${this.taskId}] Error updating api_req_started with retryStatus:`, e)
+					}
+				}
+			},
+		}
+		this.api = buildApiHandler(effectiveApiConfiguration, mode)
+	}
+
+	private async recoverFromStreamFailure(
+		error: unknown,
+		params: {
+			assistantText: string
+			modelInfo: DietCodeMessageModelInfo
+			taskMetrics: {
+				inputTokens: number
+				outputTokens: number
+				cacheWriteTokens: number
+				cacheReadTokens: number
+				totalCost: number | undefined
+			}
+			lastApiReqIndex: number
+		},
+	): Promise<TaskRequestOutcome> {
+		if (this.taskState.abort || this.taskState.abandoned) return true
+		this.api.abort?.()
+		if (this.diffViewProvider.isEditing) await this.diffViewProvider.revertChanges()
+		await this.diffViewProvider.reset()
+		const failure = ErrorService.get().toDietCodeError(error, this.api.getModel().id)
+		const errorMessage = failure.serialize()
+		// Persist actual results before any delay or user interaction. Never finalize partial tools here.
+		await this.messageStateHandler.addToApiConversationHistory({
+			role: "assistant",
+			content: buildInterruptedAssistantContent(params.assistantText, this.taskState.userMessageContent),
+			modelInfo: params.modelInfo,
+			metrics: {
+				tokens: {
+					prompt: params.taskMetrics.inputTokens,
+					completion: params.taskMetrics.outputTokens,
+					cached: params.taskMetrics.cacheWriteTokens + params.taskMetrics.cacheReadTokens,
+				},
+				cost: params.taskMetrics.totalCost,
+			},
+			ts: Date.now(),
+		})
+		const lastMessage = this.messageStateHandler.getDietCodeMessages().at(-1)
+		if (lastMessage?.partial) lastMessage.partial = false
+		await updateApiReqMsg({
+			messageStateHandler: this.messageStateHandler,
+			lastApiReqIndex: params.lastApiReqIndex,
+			...params.taskMetrics,
+			api: this.api,
+			cancelReason: "streaming_failed",
+			streamingFailedMessage: errorMessage,
+		})
+		await this.messageStateHandler.saveDietCodeMessagesAndUpdateHistory()
+		this.taskState.didCompleteReadingStream = true
+		this.taskState.userMessageContentReady = true
+		this.taskState.assistantMessageContent = []
+		this.taskState.userMessageContent = []
+		this.taskState.isWaitingForFirstChunk = false
+		observeSession((session) => session.finalizeRequest())
+		const delay = getApiRetryDelay(error, this.taskState.autoRetryAttempts, 2000)
+		if (
+			shouldRetryApiError(error, true) &&
+			!failure.isErrorType(DietCodeErrorType.Auth) &&
+			!failure.isErrorType(DietCodeErrorType.Balance) &&
+			delay !== undefined &&
+			this.taskState.autoRetryAttempts < 3
+		) {
+			this.taskState.autoRetryAttempts++
+			await this.say(
+				"error_retry",
+				JSON.stringify({
+					attempt: this.taskState.autoRetryAttempts,
+					maxAttempts: 3,
+					delaySeconds: delay / 1000,
+					errorMessage,
+				}),
+			)
+			await waitForApiRetry(delay, this.taskState.abortSignal)
+		} else {
+			const { response } = await this.ask("api_req_failed", errorMessage)
+			if (response !== "yesButtonClicked") return true
+			this.taskState.autoRetryAttempts = 0
+		}
+		this.taskState.abortSignal.throwIfAborted()
+		return { userContent: [{ type: "text", text: STREAM_RECOVERY_INSTRUCTION }] }
 	}
 
 	async say(
@@ -1013,7 +1115,12 @@ export class Task {
 	}
 
 	private async saveCheckpointCallback(isAttemptCompletionMessage?: boolean, completionMessageTs?: number): Promise<void> {
-		return this.checkpointManager?.saveCheckpoint(isAttemptCompletionMessage, completionMessageTs) ?? Promise.resolve()
+		try {
+			await this.checkpointManager?.saveCheckpoint(isAttemptCompletionMessage, completionMessageTs)
+		} catch (error) {
+			this.taskState.checkpointManagerErrorMessage = error instanceof Error ? error.message : String(error)
+			Logger.warn("Checkpoint unavailable; continuing task:", error)
+		}
 	}
 
 	/**
@@ -1338,6 +1445,7 @@ export class Task {
 		}
 
 		this.taskState.isInitialized = true
+		this.taskState.executionProgress.reset()
 		this.taskState.abort = false // Reset abort flag when resuming task
 
 		const yoloModeToggled = this.stateManager.getGlobalSettingsKey("yoloModeToggled")
@@ -1422,7 +1530,7 @@ export class Task {
 		let responseFiles: string[] | undefined
 		if (response === "messageResponse" || text || (images && images.length > 0) || (files && files.length > 0)) {
 			await this.say("user_feedback", text, images, files)
-			await this.checkpointManager?.saveCheckpoint()
+			await this.saveCheckpointCallback()
 			responseText = text
 			responseImages = images
 			responseFiles = files
@@ -1594,23 +1702,17 @@ export class Task {
 			while (!this.taskState.abort) {
 				const idleGapAtLoopStart = await this.consumeIdleGapFeedbackIfPending()
 				if (idleGapAtLoopStart) {
-					nextUserContent = idleGapAtLoopStart
+					nextUserContent = [...nextUserContent, ...idleGapAtLoopStart]
 				}
 
 				if (nextUserContent.length === 0) {
 					break
 				}
 
-				this.taskState.currentTurnReadHistory.clear() // Reset read history for the new turn
-				this.taskState.currentTurnTotalReadCount = 0 // Reset total read counter for the new turn
-				this.taskState.currentTurnUniqueReadCount = 0 // Reset unique read counter for the new turn
-				this.taskState.currentTurnExplorationCount = 0 // Reset exploration counter for the new turn
-				const didEndLoop = await this.recursivelyMakeDietCodeRequests(nextUserContent, includeFileDetails)
+				const didEndLoop = await this.runRequestLoop(nextUserContent, includeFileDetails)
 				includeFileDetails = false // we only need file details the first time
 
-				//  The way this agentic loop works is that dietcode will be given a task that he then calls tools to complete. unless there's an attempt_completion call, we keep responding back to him with his tool's responses until he either attempt_completion or does not use anymore tools. If he does not use anymore tools, we ask him to consider if he's completed the task and then call attempt_completion, otherwise proceed with completing the task.
-
-				//const totalCost = this.calculateApiCost(totalInputTokens, totalOutputTokens)
+				// New steering can restart a stopped loop; otherwise leave it stopped.
 				if (didEndLoop) {
 					const idleGapOnEnd = await this.consumeIdleGapFeedbackIfPending()
 					if (idleGapOnEnd) {
@@ -1618,14 +1720,9 @@ export class Task {
 						includeFileDetails = false
 						continue
 					}
-					// For now a task never 'completes'. This will only happen if the user hits max requests and denies resetting the count.
-					//this.say("task_completed", `Task completed. Total API usage cost: ${totalCost}`)
 					break
 				}
-				// this.say(
-				// 	"tool",
-				// 	"DietCode responded with only text blocks but has not called attempt_completion yet. Forcing him to continue with task..."
-				// )
+				// Empty provider responses already consumed the bounded recovery delay above.
 				nextUserContent = [
 					{
 						type: "text",
@@ -1856,7 +1953,13 @@ export class Task {
 		timeoutSeconds: number | undefined,
 		options?: CommandExecutionOptions,
 	): Promise<[boolean, DietCodeToolResponseContent]> {
-		const result = await this.commandExecutor.execute(command, timeoutSeconds, options)
+		const result = await this.commandExecutor.execute(command, timeoutSeconds, {
+			interactive:
+				!this.stateManager.getGlobalSettingsKey("yoloModeToggled") &&
+				!this.stateManager.getGlobalSettingsKey("autoApproveAllToggled"),
+			signal: this.taskState.abortSignal,
+			...options,
+		})
 		this.recordCommandResultInJoyRide(command, result)
 
 		// V191 Hardening: Auto-Revoke environmental lease for sensitive commands
@@ -2102,16 +2205,28 @@ export class Task {
 		this.taskState.didAutomaticallyRetryFailedApiRequest = true
 	}
 
+	private mcpStartupWaitComplete = false
+
+	private async waitForMcpStartup(): Promise<void> {
+		this.taskState.abortSignal.throwIfAborted()
+		if (this.mcpStartupWaitComplete) return
+		try {
+			await pWaitFor(() => this.mcpHub.isConnecting !== true || this.taskState.abort, {
+				interval: 100,
+				timeout: 10_000,
+			})
+		} catch (error) {
+			Logger.warn("MCP startup wait ended; continuing with available tools:", error)
+		}
+		this.taskState.abortSignal.throwIfAborted()
+		this.mcpStartupWaitComplete = true
+	}
+
 	async *attemptApiRequest(previousApiReqIndex: number): ApiStream {
-		// Wait for MCP servers to be connected before generating system prompt
-		await pWaitFor(() => this.mcpHub.isConnecting !== true, {
-			timeout: 10_000,
-		}).catch(() => {
-			Logger.error("MCP servers failed to connect in time")
-		})
+		await this.waitForMcpStartup()
 
 		// V192: Environment Blueprinting
-		const lease = await this.environmentLeasePromise
+		const lease = await waitForTaskPrerequisite(this.environmentLeasePromise, this.taskState.abortSignal)
 		const environmentBlueprint = {
 			detectedProjectTypes: lease.details?.detectedProjectTypes || [],
 			toolchain: lease.details?.toolchain || {},
@@ -2299,199 +2414,228 @@ export class Task {
 		const iterator = stream[Symbol.asyncIterator]()
 
 		try {
-			// awaiting first chunk to see if it will throw an error
-			this.taskState.isWaitingForFirstChunk = true
-			const firstChunk = await iterator.next()
-			yield firstChunk.value
-			this.taskState.isWaitingForFirstChunk = false
-		} catch (error) {
-			const isContextWindowExceededError = checkContextWindowExceededError(error)
-			const { model, providerId } = this.getCurrentProviderInfo()
-			const dietcodeError = ErrorService.get().toDietCodeError(error, model.id, providerId)
+			try {
+				// awaiting first chunk to see if it will throw an error
+				this.taskState.isWaitingForFirstChunk = true
+				const firstChunk = await iterator.next()
+				this.taskState.isWaitingForFirstChunk = false
+				if (firstChunk.done) return
+				yield firstChunk.value
+			} catch (error) {
+				this.taskState.isWaitingForFirstChunk = false
+				this.taskState.abortSignal.throwIfAborted()
+				const isContextWindowExceededError = checkContextWindowExceededError(error)
+				const { model, providerId } = this.getCurrentProviderInfo()
+				const dietcodeError = ErrorService.get().toDietCodeError(error, model.id, providerId)
 
-			// Capture provider failure telemetry using dietcodeError
-			ErrorService.get().logMessage(dietcodeError.message)
+				// Capture provider failure telemetry using dietcodeError
+				ErrorService.get().logMessage(dietcodeError.message)
 
-			if (isContextWindowExceededError && !this.taskState.didAutomaticallyRetryFailedApiRequest) {
-				await this.handleContextWindowExceededError()
-			} else {
-				// request failed after retrying automatically once, ask user if they want to retry again
-				// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
+				if (isContextWindowExceededError && !this.taskState.didAutomaticallyRetryFailedApiRequest) {
+					await this.handleContextWindowExceededError()
+				} else {
+					// request failed after retrying automatically once, ask user if they want to retry again
+					// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
 
-				if (isContextWindowExceededError) {
-					const truncatedConversationHistory = this.contextManager.getTruncatedMessages(
-						this.messageStateHandler.getApiConversationHistory(),
-						this.taskState.conversationHistoryDeletedRange,
-					)
+					if (isContextWindowExceededError) {
+						const truncatedConversationHistory = this.contextManager.getTruncatedMessages(
+							this.messageStateHandler.getApiConversationHistory(),
+							this.taskState.conversationHistoryDeletedRange,
+						)
 
-					// If the conversation has more than 3 messages, we can truncate again. If not, then the conversation is bricked.
-					// ToDo: Allow the user to change their input if this is the case.
-					if (truncatedConversationHistory.length > 3) {
-						dietcodeError.message = "Context window exceeded. Click retry to truncate the conversation and try again."
-						this.taskState.didAutomaticallyRetryFailedApiRequest = false
+						// If the conversation has more than 3 messages, we can truncate again. If not, then the conversation is bricked.
+						// ToDo: Allow the user to change their input if this is the case.
+						if (truncatedConversationHistory.length > 3) {
+							dietcodeError.message =
+								"Context window exceeded. Click retry to truncate the conversation and try again."
+							this.taskState.didAutomaticallyRetryFailedApiRequest = false
+						}
 					}
-				}
 
-				const streamingFailedMessage = dietcodeError.serialize()
+					const streamingFailedMessage = dietcodeError.serialize()
 
-				// Update the 'api_req_started' message to reflect final failure before asking user to manually retry
-				const lastApiReqStartedIndex = findLastIndex(
-					this.messageStateHandler.getDietCodeMessages(),
-					(m) => m.say === "api_req_started",
-				)
-				if (lastApiReqStartedIndex !== -1) {
-					const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
-					const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
-						dietcodeMessages[lastApiReqStartedIndex].text || "{}",
-					)
-					delete currentApiReqInfo.retryStatus
-
-					await this.messageStateHandler.updateDietCodeMessage(lastApiReqStartedIndex, {
-						text: JSON.stringify({
-							...currentApiReqInfo, // Spread the modified info (with retryStatus removed)
-							// cancelReason: "retries_exhausted", // Indicate that automatic retries failed
-							streamingFailedMessage,
-						} satisfies DietCodeApiReqInfo),
-					})
-					// this.ask will trigger postStateToWebview, so this change should be picked up.
-				}
-
-				const isAuthError = dietcodeError.isErrorType(DietCodeErrorType.Auth)
-
-				// Check if this is a DietCode provider insufficient credits error - don't auto-retry these
-				const isDietCodeProviderInsufficientCredits = (() => {
-					if (providerId !== "dietcode") {
-						return false
-					}
-					try {
-						const parsedError = DietCodeError.transform(error, model.id, providerId)
-						return parsedError.isErrorType(DietCodeErrorType.Balance)
-					} catch {
-						return false
-					}
-				})()
-
-				let response: DietCodeAskResponse
-				// Skip auto-retry for DietCode provider insufficient credits or auth errors
-				if (!isDietCodeProviderInsufficientCredits && !isAuthError && this.taskState.autoRetryAttempts < 3) {
-					// Auto-retry enabled with max 3 attempts: automatically approve the retry
-					this.taskState.autoRetryAttempts++
-
-					// Calculate delay: 2s, 4s, 8s
-					const delay = 2000 * 2 ** (this.taskState.autoRetryAttempts - 1)
-
-					await updateApiReqMsg({
-						messageStateHandler: this.messageStateHandler,
-						lastApiReqIndex: lastApiReqStartedIndex,
-						inputTokens: 0,
-						outputTokens: 0,
-						cacheWriteTokens: 0,
-						cacheReadTokens: 0,
-						totalCost: undefined,
-						api: this.api,
-						cancelReason: "streaming_failed",
-						streamingFailedMessage,
-					})
-					await this.messageStateHandler.saveDietCodeMessagesAndUpdateHistory()
-					await this.postStateToWebview()
-
-					response = "yesButtonClicked"
-					await this.say(
-						"error_retry",
-						JSON.stringify({
-							attempt: this.taskState.autoRetryAttempts,
-							maxAttempts: 3,
-							delaySeconds: delay / 1000,
-							errorMessage: streamingFailedMessage,
-						}),
-					)
-
-					// Clear streamingFailedMessage now that error_retry contains it
-					// This prevents showing the error in both ErrorRow and error_retry
-					const autoRetryApiReqIndex = findLastIndex(
+					// Update the 'api_req_started' message to reflect final failure before asking user to manually retry
+					const lastApiReqStartedIndex = findLastIndex(
 						this.messageStateHandler.getDietCodeMessages(),
 						(m) => m.say === "api_req_started",
 					)
-					if (autoRetryApiReqIndex !== -1) {
+					if (lastApiReqStartedIndex !== -1) {
 						const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
 						const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
-							dietcodeMessages[autoRetryApiReqIndex].text || "{}",
+							dietcodeMessages[lastApiReqStartedIndex].text || "{}",
+						)
+						delete currentApiReqInfo.retryStatus
+
+						await this.messageStateHandler.updateDietCodeMessage(lastApiReqStartedIndex, {
+							text: JSON.stringify({
+								...currentApiReqInfo, // Spread the modified info (with retryStatus removed)
+								// cancelReason: "retries_exhausted", // Indicate that automatic retries failed
+								streamingFailedMessage,
+							} satisfies DietCodeApiReqInfo),
+						})
+						// this.ask will trigger postStateToWebview, so this change should be picked up.
+					}
+
+					const isAuthError = dietcodeError.isErrorType(DietCodeErrorType.Auth)
+
+					const isInsufficientCredits = dietcodeError.isErrorType(DietCodeErrorType.Balance)
+					const retryDelay = getApiRetryDelay(error, this.taskState.autoRetryAttempts, 2000)
+					const canAutoRetry =
+						!isInsufficientCredits && !isAuthError && shouldRetryApiError(error, true) && retryDelay !== undefined
+
+					let response: DietCodeAskResponse
+					// Skip auto-retry for DietCode provider insufficient credits or auth errors
+					if (canAutoRetry && this.taskState.autoRetryAttempts < 3) {
+						// Auto-retry enabled with max 3 attempts: automatically approve the retry
+						this.taskState.autoRetryAttempts++
+
+						// Calculate delay: 2s, 4s, 8s
+						const delay = retryDelay!
+
+						await updateApiReqMsg({
+							messageStateHandler: this.messageStateHandler,
+							lastApiReqIndex: lastApiReqStartedIndex,
+							inputTokens: 0,
+							outputTokens: 0,
+							cacheWriteTokens: 0,
+							cacheReadTokens: 0,
+							totalCost: undefined,
+							api: this.api,
+							cancelReason: "streaming_failed",
+							streamingFailedMessage,
+						})
+						await this.messageStateHandler.saveDietCodeMessagesAndUpdateHistory()
+						await this.postStateToWebview()
+
+						response = "yesButtonClicked"
+						await this.say(
+							"error_retry",
+							JSON.stringify({
+								attempt: this.taskState.autoRetryAttempts,
+								maxAttempts: 3,
+								delaySeconds: delay / 1000,
+								errorMessage: streamingFailedMessage,
+							}),
+						)
+
+						// Clear streamingFailedMessage now that error_retry contains it
+						// This prevents showing the error in both ErrorRow and error_retry
+						const autoRetryApiReqIndex = findLastIndex(
+							this.messageStateHandler.getDietCodeMessages(),
+							(m) => m.say === "api_req_started",
+						)
+						if (autoRetryApiReqIndex !== -1) {
+							const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
+							const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
+								dietcodeMessages[autoRetryApiReqIndex].text || "{}",
+							)
+							delete currentApiReqInfo.streamingFailedMessage
+							await this.messageStateHandler.updateDietCodeMessage(autoRetryApiReqIndex, {
+								text: JSON.stringify(currentApiReqInfo),
+							})
+						}
+
+						await waitForApiRetry(delay, this.taskState.abortSignal)
+					} else {
+						// Show error_retry with failed flag to indicate all retries exhausted (but not for insufficient credits)
+						if (canAutoRetry) {
+							await this.say(
+								"error_retry",
+								JSON.stringify({
+									attempt: 3,
+									maxAttempts: 3,
+									delaySeconds: 0,
+									failed: true, // Special flag to indicate retries exhausted
+									errorMessage: streamingFailedMessage,
+								}),
+							)
+						}
+						const askResult = await this.ask("api_req_failed", streamingFailedMessage)
+						response = askResult.response
+						if (response === "yesButtonClicked") {
+							this.taskState.autoRetryAttempts = 0
+						}
+					}
+
+					if (response !== "yesButtonClicked") {
+						// this will never happen since if noButtonClicked, we will clear current task, aborting this instance
+						throw new Error("API request failed")
+					}
+
+					// Clear streamingFailedMessage when user manually retries
+					const manualRetryApiReqIndex = findLastIndex(
+						this.messageStateHandler.getDietCodeMessages(),
+						(m) => m.say === "api_req_started",
+					)
+					if (manualRetryApiReqIndex !== -1) {
+						const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
+						const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
+							dietcodeMessages[manualRetryApiReqIndex].text || "{}",
 						)
 						delete currentApiReqInfo.streamingFailedMessage
-						await this.messageStateHandler.updateDietCodeMessage(autoRetryApiReqIndex, {
+						await this.messageStateHandler.updateDietCodeMessage(manualRetryApiReqIndex, {
 							text: JSON.stringify(currentApiReqInfo),
 						})
 					}
 
-					await setTimeoutPromise(delay)
-				} else {
-					// Show error_retry with failed flag to indicate all retries exhausted (but not for insufficient credits)
-					if (!isDietCodeProviderInsufficientCredits && !isAuthError) {
-						await this.say(
-							"error_retry",
-							JSON.stringify({
-								attempt: 3,
-								maxAttempts: 3,
-								delaySeconds: 0,
-								failed: true, // Special flag to indicate retries exhausted
-								errorMessage: streamingFailedMessage,
-							}),
-						)
-					}
-					const askResult = await this.ask("api_req_failed", streamingFailedMessage)
-					response = askResult.response
-					if (response === "yesButtonClicked") {
-						this.taskState.autoRetryAttempts = 0
-					}
+					await this.say("api_req_retried")
+
+					// Reset the automatic retry flag so the request can proceed
+					this.taskState.didAutomaticallyRetryFailedApiRequest = false
 				}
-
-				if (response !== "yesButtonClicked") {
-					// this will never happen since if noButtonClicked, we will clear current task, aborting this instance
-					throw new Error("API request failed")
-				}
-
-				// Clear streamingFailedMessage when user manually retries
-				const manualRetryApiReqIndex = findLastIndex(
-					this.messageStateHandler.getDietCodeMessages(),
-					(m) => m.say === "api_req_started",
-				)
-				if (manualRetryApiReqIndex !== -1) {
-					const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
-					const currentApiReqInfo: DietCodeApiReqInfo = JSON.parse(
-						dietcodeMessages[manualRetryApiReqIndex].text || "{}",
-					)
-					delete currentApiReqInfo.streamingFailedMessage
-					await this.messageStateHandler.updateDietCodeMessage(manualRetryApiReqIndex, {
-						text: JSON.stringify(currentApiReqInfo),
-					})
-				}
-
-				await this.say("api_req_retried")
-
-				// Reset the automatic retry flag so the request can proceed
-				this.taskState.didAutomaticallyRetryFailedApiRequest = false
+				// delegate generator output from the recursive call
+				yield* this.attemptApiRequest(previousApiReqIndex)
+				return
 			}
-			// delegate generator output from the recursive call
-			yield* this.attemptApiRequest(previousApiReqIndex)
-			return
-		}
 
-		// no error, so we can continue to yield all remaining chunks
-		// (needs to be placed outside of try/catch since it we want caller to handle errors not with api_req_failed as that is reserved for first chunk failures only)
-		// this delegates to another generator or iterable object. In this case, it's saying "yield all remaining values from this iterator". This effectively passes along all subsequent chunks from the original stream.
-		yield* iterator
+			// no error, so we can continue to yield all remaining chunks
+			// (needs to be placed outside of try/catch since it we want caller to handle errors not with api_req_failed as that is reserved for first chunk failures only)
+			// this delegates to another generator or iterable object. In this case, it's saying "yield all remaining values from this iterator". This effectively passes along all subsequent chunks from the original stream.
+			yield* iterator
+		} finally {
+			this.taskState.isWaitingForFirstChunk = false
+			await iterator.return?.(undefined)
+		}
 	}
 
-	async presentAssistantMessage() {
+	private presentationPromise?: Promise<void>
+
+	async presentAssistantMessage(): Promise<void> {
+		if (this.presentationPromise) {
+			this.taskState.presentAssistantMessageHasPendingUpdates = true
+			return this.presentationPromise
+		}
+		const presentation = Promise.resolve().then(async () => {
+			try {
+				do {
+					await this.drainAssistantMessage()
+				} while (this.taskState.presentAssistantMessageHasPendingUpdates && !this.taskState.abort)
+			} finally {
+				this.presentationPromise = undefined
+			}
+		})
+		this.presentationPromise = presentation
+		return presentation
+	}
+
+	private async finishAssistantMessage(assistantText: string, toolBlocks: ToolUse[]): Promise<void> {
+		this.taskState.didCompleteReadingStream = true
+		for (const block of this.taskState.assistantMessageContent) block.partial = false
+		await this.processNativeToolCalls(
+			assistantText,
+			toolBlocks.map((block) => ({ ...block, partial: false })),
+		)
+		// Also drain an already-complete response and native calls first discovered at stream end.
+		await this.presentAssistantMessage()
+		this.taskState.abortSignal.throwIfAborted()
+		if (!this.taskState.userMessageContentReady) {
+			throw new Error("Tool presentation ended without its results. Execution was stopped to preserve completed work.")
+		}
+	}
+
+	private async drainAssistantMessage(): Promise<void> {
 		if (this.taskState.abort) {
 			throw new Error("DietCode instance aborted")
-		}
-
-		// If we're locked, mark pending and return
-		// Complete tool blocks can proceed to acquire the lock and execute
-		if (this.taskState.presentAssistantMessageLocked) {
-			this.taskState.presentAssistantMessageHasPendingUpdates = true
-			return
 		}
 
 		this.taskState.presentAssistantMessageLocked = true
@@ -2508,96 +2652,104 @@ export class Task {
 		}
 
 		const block = cloneDeep(this.taskState.assistantMessageContent[this.taskState.currentStreamingContentIndex]) // need to create copy bc while stream is updating the array, it could be updating the reference block properties too
-		switch (block.type) {
-			case "text": {
-				// Skip text rendering if tool was rejected, or if a tool was already used and parallel calling is disabled
-				if (this.taskState.didRejectTool || (!this.isParallelToolCallingEnabled() && this.taskState.didAlreadyUseTool)) {
-					break
-				}
-				let content = block.content
-				if (content) {
-					// (have to do this for partial and complete since sending content in thinking tags to markdown renderer will automatically be removed)
-					// Remove end substrings of <thinking or </thinking (below xml parsing is only for opening tags)
-					// (this is done with the xml parsing below now, but keeping here for reference)
-					// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?$/, "")
-					// Remove all instances of <thinking> (with optional line break after) and </thinking> (with optional line break before)
-					// - Needs to be separate since we dont want to remove the line break before the first tag
-					// - Needs to happen before the xml parsing below
-					content = content.replace(/<thinking>\s?/g, "")
-					content = content.replace(/\s?<\/thinking>/g, "")
+		try {
+			switch (block.type) {
+				case "text": {
+					// Skip text rendering if tool was rejected, or if a tool was already used and parallel calling is disabled
+					if (
+						this.taskState.didRejectTool ||
+						(!this.isParallelToolCallingEnabled() && this.taskState.didAlreadyUseTool)
+					) {
+						break
+					}
+					let content = block.content
+					if (content) {
+						// (have to do this for partial and complete since sending content in thinking tags to markdown renderer will automatically be removed)
+						// Remove end substrings of <thinking or </thinking (below xml parsing is only for opening tags)
+						// (this is done with the xml parsing below now, but keeping here for reference)
+						// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?$/, "")
+						// Remove all instances of <thinking> (with optional line break after) and </thinking> (with optional line break before)
+						// - Needs to be separate since we dont want to remove the line break before the first tag
+						// - Needs to happen before the xml parsing below
+						content = content.replace(/<thinking>\s?/g, "")
+						content = content.replace(/\s?<\/thinking>/g, "")
 
-					// Remove all instances of <think> tags (alternative to <thinking>, some models are trained to use this tag instead)
-					content = content.replace(/<think>\s?/g, "")
-					content = content.replace(/\s?<\/think>/g, "")
+						// Remove all instances of <think> tags (alternative to <thinking>, some models are trained to use this tag instead)
+						content = content.replace(/<think>\s?/g, "")
+						content = content.replace(/\s?<\/think>/g, "")
 
-					// New claude models tend to output <function_calls> tags which we don't want to show in the chat
-					content = content.replace(/<function_calls>\s?/g, "")
-					content = content.replace(/\s?<\/function_calls>/g, "")
+						// New claude models tend to output <function_calls> tags which we don't want to show in the chat
+						content = content.replace(/<function_calls>\s?/g, "")
+						content = content.replace(/\s?<\/function_calls>/g, "")
 
-					// Remove partial XML tag at the very end of the content (for tool use and thinking tags)
-					// (prevents scrollview from jumping when tags are automatically removed)
-					const lastOpenBracketIndex = content.lastIndexOf("<")
-					if (lastOpenBracketIndex !== -1) {
-						const possibleTag = content.slice(lastOpenBracketIndex)
-						// Check if there's a '>' after the last '<' (i.e., if the tag is complete) (complete thinking and tool tags will have been removed by now)
-						const hasCloseBracket = possibleTag.includes(">")
-						if (!hasCloseBracket) {
-							// Extract the potential tag name
-							let tagContent: string
-							if (possibleTag.startsWith("</")) {
-								tagContent = possibleTag.slice(2).trim()
-							} else {
-								tagContent = possibleTag.slice(1).trim()
-							}
-							// Check if tagContent is likely an incomplete tag name (letters and underscores only)
-							const isLikelyTagName = /^[a-zA-Z_]+$/.test(tagContent)
-							// Preemptively remove < or </ to keep from these artifacts showing up in chat (also handles closing thinking tags)
-							const isOpeningOrClosing = possibleTag === "<" || possibleTag === "</"
-							// If the tag is incomplete and at the end, remove it from the content
-							if (isOpeningOrClosing || isLikelyTagName) {
-								content = content.slice(0, lastOpenBracketIndex).trim()
+						// Remove partial XML tag at the very end of the content (for tool use and thinking tags)
+						// (prevents scrollview from jumping when tags are automatically removed)
+						const lastOpenBracketIndex = content.lastIndexOf("<")
+						if (lastOpenBracketIndex !== -1) {
+							const possibleTag = content.slice(lastOpenBracketIndex)
+							// Check if there's a '>' after the last '<' (i.e., if the tag is complete) (complete thinking and tool tags will have been removed by now)
+							const hasCloseBracket = possibleTag.includes(">")
+							if (!hasCloseBracket) {
+								// Extract the potential tag name
+								let tagContent: string
+								if (possibleTag.startsWith("</")) {
+									tagContent = possibleTag.slice(2).trim()
+								} else {
+									tagContent = possibleTag.slice(1).trim()
+								}
+								// Check if tagContent is likely an incomplete tag name (letters and underscores only)
+								const isLikelyTagName = /^[a-zA-Z_]+$/.test(tagContent)
+								// Preemptively remove < or </ to keep from these artifacts showing up in chat (also handles closing thinking tags)
+								const isOpeningOrClosing = possibleTag === "<" || possibleTag === "</"
+								// If the tag is incomplete and at the end, remove it from the content
+								if (isOpeningOrClosing || isLikelyTagName) {
+									content = content.slice(0, lastOpenBracketIndex).trim()
+								}
 							}
 						}
 					}
-				}
 
-				if (!block.partial) {
-					// Some models add code block artifacts (around the tool calls) which show up at the end of text content
-					// matches ``` with at least one char after the last backtick, at the end of the string
-					const match = content?.trimEnd().match(/```[a-zA-Z0-9_-]+$/)
-					if (match) {
-						const matchLength = match[0].length
-						content = content.trimEnd().slice(0, -matchLength)
+					if (!block.partial) {
+						// Some models add code block artifacts (around the tool calls) which show up at the end of text content
+						// matches ``` with at least one char after the last backtick, at the end of the string
+						const match = content?.trimEnd().match(/```[a-zA-Z0-9_-]+$/)
+						if (match) {
+							const matchLength = match[0].length
+							content = content.trimEnd().slice(0, -matchLength)
+						}
 					}
-				}
 
-				await this.say("text", content, undefined, undefined, block.partial)
-				break
-			}
-			case "tool_use":
-				// If we have a pending initial commit, we must block unsafe tools until it finishes.
-				// Safe tools (read-only) can run in parallel.
-				if (this.initialCheckpointCommitPromise) {
-					if (!(READ_ONLY_TOOLS as readonly string[]).includes(block.name as string)) {
-						await this.initialCheckpointCommitPromise
-						this.initialCheckpointCommitPromise = undefined
+					await this.say("text", content, undefined, undefined, block.partial)
+					break
+				}
+				case "tool_use":
+					// Partial previews and reads do not need to wait for the initial snapshot.
+					// Mutations still wait for startup prerequisites before their normal approval checks.
+					if (!block.partial && !(READ_ONLY_TOOLS as readonly string[]).includes(block.name)) {
+						if (this.initialCheckpointCommitPromise) {
+							await waitForTaskPrerequisite(this.initialCheckpointCommitPromise, this.taskState.abortSignal)
+							this.initialCheckpointCommitPromise = undefined
+						}
+						await waitForTaskPrerequisite(this.environmentLeasePromise, this.taskState.abortSignal)
 					}
-				} else {
-					// V190: Interlock - Wait for environment validation before executing any acting tool
-					await this.environmentLeasePromise
+					if (this.taskState.abort) {
+						throw new Error("DietCode instance aborted")
+					}
 					await this.toolExecutor.executeTool(block)
-				}
-				if (block.call_id) {
-					Session.get().updateToolCall(block.call_id, block.name)
-				}
-				break
+					if (block.call_id) {
+						observeSession((session) => session.updateToolCall(block.call_id!, block.name))
+					}
+					break
+			}
+		} finally {
+			// A failed prerequisite, tool, or UI write must not strand the streaming lock.
+			this.taskState.presentAssistantMessageLocked = false
 		}
 
 		/*
 		Seeing out of bounds is fine, it means that the next tool call is being built up and ready to add to assistantMessageContent to present.
 		When you see the UI inactive during this, it means that a tool is breaking without presenting any UI. For example the write_to_file tool was breaking when relpath was undefined, and for invalid relpath it never presented UI.
 		*/
-		this.taskState.presentAssistantMessageLocked = false // this needs to be placed here, if not then calling this.presentAssistantMessage below would fail (sometimes) since it's locked
 		// NOTE: when tool is rejected, iterator stream is interrupted and it waits for userMessageContentReady to be true. Future calls to present will skip execution since didRejectTool and iterate until contentIndex is set to message length and it sets userMessageContentReady to true itself (instead of preemptively doing it in iterator)
 		// Also advance when a tool was used and parallel calling is disabled
 		if (
@@ -2617,17 +2769,77 @@ export class Task {
 
 			if (this.taskState.currentStreamingContentIndex < this.taskState.assistantMessageContent.length) {
 				// there are already more content blocks to stream, so we'll call this function ourselves
-				await this.presentAssistantMessage()
+				await this.drainAssistantMessage()
 				return
 			}
 		}
 		// block is partial, but the read stream may have finished
 		if (this.taskState.presentAssistantMessageHasPendingUpdates) {
-			await this.presentAssistantMessage()
+			await this.drainAssistantMessage()
 		}
 	}
 
-	async recursivelyMakeDietCodeRequests(userContent: DietCodeContent[], includeFileDetails = false): Promise<boolean> {
+	private async continueAfterToolResponse(): Promise<TaskRequestOutcome> {
+		// Checkpoint support is optional; the conversation already owns the executed tool results.
+		await this.saveCheckpointCallback()
+		this.taskState.abortSignal.throwIfAborted()
+		const feedback = await this.consumeIdleGapFeedbackIfPending()
+		if (feedback) return { userContent: [...this.taskState.userMessageContent, ...feedback] }
+
+		const decision = this.taskState.executionProgress.finishTurn(
+			this.stateManager.getGlobalSettingsKey("maxConsecutiveMistakes"),
+		)
+		if (decision === "handoff") {
+			// Preserve native tool/result pairs even though there will be no next provider request.
+			if (this.taskState.userMessageContent.length) {
+				await this.messageStateHandler.addToApiConversationHistory({
+					role: "user",
+					content: this.taskState.userMessageContent,
+					ts: Date.now(),
+				})
+			}
+			await this.say(
+				"error",
+				"Stopped a repeated no-progress loop. Completed tool results are saved. Send an updated instruction or resolve the last blocker to continue.",
+			)
+			return true
+		}
+		if (decision === "redirect") {
+			this.taskState.userMessageContent.push({
+				type: "text",
+				text: "Recent attempts produced no new tool evidence. Use the results already collected and take a different concrete step toward the user's goal. Continue independent authorized work where possible. Do not repeat unchanged checks, completion submissions, or permission requests. If no useful action remains, report the specific blocker and preserved work.",
+			})
+			this.toolExecutor?.resetSystemPressure()
+		}
+		return { userContent: this.taskState.userMessageContent }
+	}
+
+	private async runRequestLoop(userContent: DietCodeContent[], includeFileDetails = false): Promise<boolean> {
+		let next: TaskRequest = { userContent, includeFileDetails }
+		try {
+			while (!this.taskState.abort && !this.taskState.abandoned) {
+				// These limits apply to one model turn, not the entire autonomous task.
+				this.taskState.currentTurnReadHistory.clear()
+				this.taskState.currentTurnTotalReadCount = 0
+				this.taskState.currentTurnUniqueReadCount = 0
+				this.taskState.currentTurnExplorationCount = 0
+				const outcome = await this.makeDietCodeRequest(next.userContent, next.includeFileDetails ?? false)
+				if (typeof outcome === "boolean") return outcome
+				next = outcome
+			}
+		} catch (error) {
+			if (!this.taskState.abort && !this.taskState.abandoned) {
+				Logger.error("Task continuation failed:", error)
+				const detail = error instanceof Error ? error.message : String(error)
+				await this.say("error", `Task stopped because execution could not continue: ${detail}`).catch((displayError) =>
+					Logger.warn("Unable to display task failure:", displayError),
+				)
+			}
+		}
+		return true
+	}
+
+	private async makeDietCodeRequest(userContent: DietCodeContent[], includeFileDetails = false): Promise<TaskRequestOutcome> {
 		// Check abort flag at the very start to prevent any execution after cancellation
 		if (this.taskState.abort) {
 			throw new Error("Task instance aborted")
@@ -2635,7 +2847,7 @@ export class Task {
 
 		const idleGapAtRequestStart = await this.consumeIdleGapFeedbackIfPending()
 		if (idleGapAtRequestStart) {
-			return await this.recursivelyMakeDietCodeRequests(idleGapAtRequestStart, includeFileDetails)
+			return { userContent: [...userContent, ...idleGapAtRequestStart], includeFileDetails }
 		}
 
 		// Increment API request counter for focus chain list management
@@ -2654,144 +2866,6 @@ export class Task {
 			modelId: model.id,
 			providerId: providerId,
 			mode: mode,
-		}
-
-		if (this.taskState.consecutiveMistakeCount >= this.stateManager.getGlobalSettingsKey("maxConsecutiveMistakes")) {
-			// Cognitive Reflection Nudge ("Taking a Breather")
-			// Instead of a hard halt or stopping the workflow, we inject a psychological save point
-			let breatherText =
-				"You seem to be hitting some friction. Let's take a breather. Please take a moment to review your `scratchpad.md` or journal notes to re-orient yourself against the macro plan."
-
-			const completionGateBlocks = this.taskState.completionGateBlockCount ?? 0
-			if (completionGateBlocks > 0) {
-				breatherText += `\n\n⛔ **Completion gate pressure:** attempt_completion was blocked ${completionGateBlocks} time(s) this task. Do not retry with the same summary — fix audit/roadmap violations in the workspace first, verify with tests or commands, then call attempt_completion with an updated result.`
-				const {
-					buildCompletionBreatherHint,
-					buildCompletionGateEscalationBrief,
-					buildCompletionGateHumanBrief,
-					buildCompletionGateObservabilityEnvelope,
-					buildCompletionGatePipelineBrief,
-					buildCompletionGatePlaybook,
-					mapCompletionReasonToPreflightStage,
-				} = await import("./tools/attemptCompletionUtils")
-				const gateConfig = {
-					taskState: this.taskState,
-					focusChainSettings: this.stateManager.getGlobalSettingsKey("focusChainSettings"),
-				} as import("./tools/types/TaskConfig").TaskConfig
-				const lastReason = this.taskState.lastCompletionBlockReason as
-					| import("./tools/attemptCompletionUtils").CompletionPreflightReason
-					| undefined
-				const failedStage = lastReason ? mapCompletionReasonToPreflightStage(lastReason) : undefined
-				const observabilityEnvelope =
-					this.taskState.completionGateObservabilityEnvelope ?? buildCompletionGateObservabilityEnvelope(gateConfig)
-				const pipelineBrief = buildCompletionGatePipelineBrief(failedStage)
-				const humanBrief = lastReason ? buildCompletionGateHumanBrief(gateConfig, lastReason) : ""
-				const breatherHint = buildCompletionBreatherHint(gateConfig)
-				const escalationBrief = buildCompletionGateEscalationBrief(gateConfig)
-				breatherText += `\n\n${observabilityEnvelope}\n\n${pipelineBrief}`
-				if (humanBrief) {
-					breatherText += `\n\n${humanBrief}`
-				}
-				if (escalationBrief) {
-					breatherText += `\n\n${escalationBrief}`
-				}
-				if (breatherHint) {
-					breatherText += `\n\n${breatherHint}`
-				}
-				if (lastReason) {
-					const playbook = buildCompletionGatePlaybook(lastReason)
-					if (playbook) {
-						breatherText += `\n\n${playbook}`
-					}
-				}
-			}
-
-			// 1. Memory Context Injection
-			let scratchpadExists = false
-			try {
-				const scratchpadPath = path.join(this.cwd, "scratchpad.md")
-				const stats = await fs.stat(scratchpadPath)
-				if (stats.size > 0) {
-					// Production Hardening: Prevent context bloat by truncating extremely large scratchpads
-					const scratchpadContent = await fs.readFile(scratchpadPath, "utf-8")
-					const MAX_SCRATCHPAD_LENGTH = 3000
-					const truncatedContent =
-						scratchpadContent.length > MAX_SCRATCHPAD_LENGTH
-							? scratchpadContent.slice(0, MAX_SCRATCHPAD_LENGTH) +
-								"\n\n... [TRUNCATED] Please use `read_file` for complete contents."
-							: scratchpadContent
-
-					if (truncatedContent.trim()) {
-						breatherText += `\n\nTo save you a read operation, here is the current state of your \`scratchpad.md\` for immediate review:\n<scratchpad>\n${truncatedContent}\n</scratchpad>`
-						scratchpadExists = true
-					}
-				}
-			} catch {
-				// Ignore if scratchpad doesn't exist yet
-			}
-
-			if (!scratchpadExists) {
-				breatherText += `\n\n💡 ALARM: You do not currently have a \`scratchpad.md\` file! When the substrate rejects your edits, you MUST slow down and document a map. It is highly recommended to use \`write_to_file\` to create a scratchpad to define your architecture before taking another blind stab.`
-			}
-
-			// 2. Physical Environment Anchoring (Blast Radius)
-			try {
-				const { exec } = require("child_process")
-				const { promisify } = require("util")
-				const execAsync = promisify(exec)
-				// Production Hardening: timeout and maxBuffer to prevent zombie processes or memory limits crash
-				const { stdout } = await execAsync("git status -s", { cwd: this.cwd, timeout: 2000, maxBuffer: 1024 * 1024 })
-				let statusOutput = stdout.trim()
-
-				if (statusOutput) {
-					// Production Hardening: Prevent context bloat if repository has thousands of modified files
-					const MAX_GIT_LINES = 50
-					const lines = statusOutput.split("\n")
-					if (lines.length > MAX_GIT_LINES) {
-						statusOutput = `${lines.slice(0, MAX_GIT_LINES).join("\n")}\n... and ${lines.length - MAX_GIT_LINES} more files.`
-					}
-					breatherText += `\n\nTo prevent context drift, here is the exact current \`git status -s\` of your disk. These are the files you have currently modified:\n<git_status>\n${statusOutput}\n</git_status>`
-				}
-			} catch {
-				// Ignore if git fails (e.g. no repo)
-			}
-			// 3. System Diagnostics Injection
-			if (this.toolExecutor) {
-				const diagnostics = this.toolExecutor.getSystemDiagnostics()
-				if (diagnostics.trim()) {
-					breatherText += `\n\nAdditionally, here are the exact architectural blockades and metabolic hotspots you are currently hitting. This is likely WHY your execution was failing:\n<system_diagnostics>\n${diagnostics.trim()}\n</system_diagnostics>`
-				}
-			}
-
-			userContent.push({
-				type: "text",
-				text: `<system_nudge>\n${breatherText}\n</system_nudge>`,
-			})
-
-			// Notify UI
-			await this.say(
-				"text",
-				"🗣️ [COGNITIVE REFLECTION] System triggered a breather nudge. The agent is organically reviewing its notes to re-orient.",
-			)
-
-			const autoApprovalSettings = this.stateManager.getGlobalSettingsKey("autoApprovalSettings")
-			if (autoApprovalSettings.enableNotifications) {
-				showSystemNotification({
-					subtitle: "Cognitive Reflection Activity",
-					message: "DietCode encountered friction and is taking a breather.",
-				})
-			}
-
-			// Clean state to give the agent a fresh attempt window without artificial throttling
-			this.taskState.consecutiveMistakeCount = 0
-			this.taskState.autoRetryAttempts = 0
-
-			// 3. Systemic Recalibration
-			// We MUST physically clear the metabolic pressure in the Universal Guard,
-			// otherwise the agent will instantly trigger a "Substrate Heat Warning" upon resuming execution.
-			if (this.toolExecutor) {
-				this.toolExecutor.resetSystemPressure()
-			}
 		}
 
 		// get previous api req's index to check token usage and determine if we need to truncate conversation history
@@ -2838,7 +2912,12 @@ export class Task {
 				(m) => m.say === "checkpoint_created",
 			)
 			if (lastCheckpointMessageIndex !== -1) {
-				const commitPromise = this.checkpointManager?.commit()
+				const commitPromise = this.checkpointManager.commit().catch((error) => {
+					// Checkpoints are optional recovery support. Surface a failure without retaining a rejected barrier.
+					this.taskState.checkpointManagerErrorMessage = error instanceof Error ? error.message : String(error)
+					Logger.error(`[TaskCheckpointManager] Failed to create initial checkpoint for task ${this.taskId}:`, error)
+					return undefined
+				})
 				this.initialCheckpointCommitPromise = commitPromise
 				commitPromise
 					?.then(async (commitHash) => {
@@ -2940,7 +3019,7 @@ export class Task {
 			// When NOT compacting, load full context with mentions parsing and slash commands
 			const idleGapBeforeLoadContext = await this.consumeIdleGapFeedbackIfPending()
 			if (idleGapBeforeLoadContext) {
-				return await this.recursivelyMakeDietCodeRequests(idleGapBeforeLoadContext, includeFileDetails)
+				return { userContent: [...userContent, ...idleGapBeforeLoadContext], includeFileDetails }
 			}
 
 			;[parsedUserContent, environmentDetails, dietcoderulesError] = await this.loadContext(
@@ -2963,7 +3042,7 @@ export class Task {
 
 		const idleGapAfterContext = await this.consumeIdleGapFeedbackIfPending()
 		if (idleGapAfterContext) {
-			return await this.recursivelyMakeDietCodeRequests(idleGapAfterContext, false)
+			return { userContent: [...userContent, ...idleGapAfterContext] }
 		}
 
 		// add environment details as its own text block, separate from tool results
@@ -2985,7 +3064,7 @@ export class Task {
 
 		const idleGapBeforeApiReq = await this.consumeIdleGapFeedbackIfPending()
 		if (idleGapBeforeApiReq) {
-			return await this.recursivelyMakeDietCodeRequests(idleGapBeforeApiReq, false)
+			return { userContent: [...userContent, ...idleGapBeforeApiReq] }
 		}
 
 		// getting verbose details is an expensive operation, it uses globby to top-down build file structure of project which for large projects can take a few seconds
@@ -3035,7 +3114,7 @@ export class Task {
 			} = { cacheWriteTokens: 0, cacheReadTokens: 0, inputTokens: 0, outputTokens: 0, totalCost: undefined }
 
 			const abortStream = async (cancelReason: DietCodeApiReqCancelReason, streamingFailedMessage?: string) => {
-				Session.get().finalizeRequest()
+				observeSession((session) => session.finalizeRequest())
 
 				if (this.diffViewProvider.isEditing) {
 					await this.diffViewProvider.revertChanges() // closes diff view
@@ -3126,11 +3205,12 @@ export class Task {
 			await this.diffViewProvider.reset()
 			this.streamHandler.reset()
 			this.taskState.toolUseIdMap.clear()
+			this.taskState.nativeToolExecutions.clear()
 
 			const idleGapBeforeStream = await this.consumeIdleGapFeedbackIfPending()
 			if (idleGapBeforeStream) {
 				await this.rollbackStagedApiUserTurn(lastApiReqIndex)
-				return await this.recursivelyMakeDietCodeRequests(idleGapBeforeStream, false)
+				return { userContent: [...userContent, ...idleGapBeforeStream] }
 			}
 
 			const { toolUseHandler, reasonsHandler } = this.streamHandler.getHandlers()
@@ -3140,6 +3220,8 @@ export class Task {
 			let assistantMessage = "" // For UI display (includes XML)
 			let assistantTextOnly = "" // For API history (text only, no tool XML)
 			let assistantTextSignature: string | undefined
+			let streamFailure: { error: unknown } | undefined
+			let didReceiveStreamChunk = false
 
 			this.taskState.isStreaming = true
 			let didReceiveUsageChunk = false
@@ -3167,10 +3249,11 @@ export class Task {
 			}
 
 			// Track API call time for session statistics
-			Session.get().startApiCall()
+			observeSession((session) => session.startApiCall())
 
 			try {
 				for await (const chunk of stream) {
+					didReceiveStreamChunk = true
 					if (
 						!this.taskState.taskFirstTokenTimeMs &&
 						(chunk.type === "text" || chunk.type === "reasoning" || chunk.type === "tool_calls")
@@ -3262,9 +3345,7 @@ export class Task {
 
 					// Present content once per chunk. Calling this from multiple case branches can
 					// race partial updates and duplicate text rows in the chat.
-					await this.presentAssistantMessage().catch((error) =>
-						Logger.debug(`[Task] Failed to present message: ${error}`),
-					)
+					await this.presentAssistantMessage()
 
 					if (this.taskState.abort) {
 						this.api.abort?.()
@@ -3297,6 +3378,18 @@ export class Task {
 					}
 				}
 
+				if (!this.taskState.abort && !this.taskState.didRejectTool && !this.taskState.steeringInterruptRequested) {
+					if (this.useNativeToolCalls) {
+						toolUseHandler.assertCompleteToolUses()
+					} else if (
+						this.taskState.assistantMessageContent.some((block) => block.type === "tool_use" && block.partial)
+					) {
+						throw new Error(
+							"The provider ended with an unfinished tool call. Complete arguments are required before execution.",
+						)
+					}
+				}
+
 				if (!this.taskState.abort && !didFinalizeReasoningForUi) {
 					const finalReasoning = reasonsHandler.getCurrentReasoning()
 					if (finalReasoning?.thinking) {
@@ -3308,48 +3401,22 @@ export class Task {
 					}
 				}
 			} catch (error) {
-				// abandoned happens when extension is no longer waiting for the dietcode instance to finish aborting (error is thrown here when any function in the for loop throws due to this.abort)
-				if (!this.taskState.abandoned) {
-					const dietcodeError = ErrorService.get().toDietCodeError(error, this.api.getModel().id)
-					const errorMessage = dietcodeError.serialize()
-					// Auto-retry for streaming failures (always enabled)
-					if (this.taskState.autoRetryAttempts < 3) {
-						this.taskState.autoRetryAttempts++
-
-						// Calculate exponential backoff for streaming failures: 2s, 4s, 8s
-						const delay = 2000 * 2 ** (this.taskState.autoRetryAttempts - 1)
-
-						// API Request component is updated to show error message, we then display retry information underneath that...
-						await this.say(
-							"error_retry",
-							JSON.stringify({
-								attempt: this.taskState.autoRetryAttempts,
-								maxAttempts: 3,
-								delaySeconds: delay / 1000,
-								errorMessage,
-							}),
-						)
-
-						// Pass grounding state to the new task instance immediately
-						const initialTaskState: Partial<TaskState> = {
-							autoRetryAttempts: this.taskState.autoRetryAttempts,
-						}
-
-						// Wait with exponential backoff before auto-resuming
-						setTimeoutPromise(delay).then(async () => {
-							// Programmatically click the resume button on the new task instance
-							if (this.controller.task) {
-								await this.controller.task.handleWebviewAskResponse("yesButtonClicked", "", [])
-							}
-						})
-
-						await this.reinitExistingTaskFromId(this.taskId, initialTaskState)
-					}
-				}
+				streamFailure = { error }
 			} finally {
 				this.taskState.isStreaming = false
 				// End API call tracking for session statistics
-				Session.get().endApiCall()
+				observeSession((session) => session.endApiCall())
+			}
+
+			if (streamFailure) {
+				// Initial request failures already used their retry/repair UI. Do not ask again here.
+				if (this.taskState.abort || this.taskState.abandoned || !didReceiveStreamChunk) return true
+				return await this.recoverFromStreamFailure(streamFailure.error, {
+					assistantText: assistantTextOnly || assistantMessage,
+					modelInfo,
+					taskMetrics,
+					lastApiReqIndex,
+				})
 			}
 
 			// Finalize any remaining tool calls at the end of the stream
@@ -3357,15 +3424,18 @@ export class Task {
 			// OpenRouter/DietCode may not return token usage as part of the stream (since it may abort early), so we fetch after the stream is finished
 			// (updateApiReq below will update the api_req_started message with the usage details. we do this async so it updates the api_req_started message in the background)
 			if (!didReceiveUsageChunk) {
-				this.api.getApiStreamUsage?.().then(async (apiStreamUsage) => {
-					if (apiStreamUsage) {
-						taskMetrics.inputTokens += apiStreamUsage.inputTokens
-						taskMetrics.outputTokens += apiStreamUsage.outputTokens
-						taskMetrics.cacheWriteTokens += apiStreamUsage.cacheWriteTokens ?? 0
-						taskMetrics.cacheReadTokens += apiStreamUsage.cacheReadTokens ?? 0
-						taskMetrics.totalCost = apiStreamUsage.totalCost ?? taskMetrics.totalCost
-					}
-				})
+				void Promise.resolve()
+					.then(() => this.api.getApiStreamUsage?.())
+					.then((apiStreamUsage) => {
+						if (apiStreamUsage) {
+							taskMetrics.inputTokens += apiStreamUsage.inputTokens
+							taskMetrics.outputTokens += apiStreamUsage.outputTokens
+							taskMetrics.cacheWriteTokens += apiStreamUsage.cacheWriteTokens ?? 0
+							taskMetrics.cacheReadTokens += apiStreamUsage.cacheReadTokens ?? 0
+							taskMetrics.totalCost = apiStreamUsage.totalCost ?? taskMetrics.totalCost
+						}
+					})
+					.catch((error) => Logger.warn("Stream usage unavailable; retaining reported usage:", error))
 			}
 
 			// Update the api_req_started message with final usage and cost details
@@ -3391,7 +3461,7 @@ export class Task {
 					modelId: this.api.getModel().id,
 				},
 				this.taskId,
-			)
+			).catch((error) => Logger.warn("Usage observation unavailable; continuing task:", error))
 
 			await this.postStateToWebview()
 
@@ -3409,7 +3479,7 @@ export class Task {
 			}
 
 			// Stored the assistant API response immediately after the stream finishes in the same turn
-			const assistantHasContent = assistantMessage.length > 0 || this.useNativeToolCalls
+			const assistantHasContent = assistantMessage.trim().length > 0 || toolUseHandler.getAllFinalizedToolUses().length > 0
 			if (assistantHasContent) {
 				telemetryService.captureConversationTurnEvent(
 					this.ulid,
@@ -3489,47 +3559,9 @@ export class Task {
 				}
 			}
 
-			this.taskState.didCompleteReadingStream = true
+			await this.finishAssistantMessage(assistantTextOnly, toolUseHandler.getPartialToolUsesAsContent())
 
-			// set any blocks to be complete to allow presentAssistantMessage to finish and set userMessageContentReady to true
-			// (could be a text block that had no subsequent tool uses, or a text block at the very end, or an invalid tool use, etc. whatever the case, presentAssistantMessage relies on these blocks either to be completed or the user to reject a block in order to proceed and eventually set userMessageContentReady to true)
-			const partialBlocks = this.taskState.assistantMessageContent.filter((block) => block.partial)
-			partialBlocks.forEach((block) => {
-				block.partial = false
-			})
-			// in case there are native tool calls pending
-			const partialToolBlocks = toolUseHandler.getPartialToolUsesAsContent()?.map((block) => ({ ...block, partial: false }))
-			await this.processNativeToolCalls(assistantTextOnly, partialToolBlocks)
-
-			if (partialBlocks.length > 0) {
-				await this.presentAssistantMessage() // if there is content to update then it will complete and update this.userMessageContentReady to true, which we pwaitfor before making the next request. all this is really doing is presenting the last partial message that we just set to complete
-			}
-
-			// now add to apiconversationhistory
-			// need to save assistant responses to file before proceeding to tool use since user can exit at any moment and we wouldn't be able to save the assistant's response
-			let didEndLoop = false
 			if (assistantHasContent) {
-				// NOTE: this comment is here for future reference - this was a workaround for userMessageContent not getting set to true. It was due to it not recursively calling for partial blocks when didRejectTool, so it would get stuck waiting for a partial block to complete before it could continue.
-				// in case the content blocks finished
-				// it may be the api stream finished after the last parsed content block was executed, so  we are able to detect out of bounds and set userMessageContentReady to true (note you should not call presentAssistantMessage since if the last block is completed it will be presented again)
-				// const completeBlocks = this.assistantMessageContent.filter((block) => !block.partial) // if there are any partial blocks after the stream ended we can consider them invalid
-				// if (this.currentStreamingContentIndex >= completeBlocks.length) {
-				// 	this.userMessageContentReady = true
-				// }
-
-				await pWaitFor(() => this.taskState.userMessageContentReady || this.taskState.idleGapFeedbackRequested)
-
-				if (this.taskState.idleGapFeedbackRequested) {
-					this.taskState.userMessageContent = []
-					const idleGapContent = await this.consumeIdleGapFeedbackIfPending()
-					if (idleGapContent) {
-						return await this.recursivelyMakeDietCodeRequests(idleGapContent, false)
-					}
-				}
-
-				// Save checkpoint after all tools in this response have finished executing
-				await this.checkpointManager?.saveCheckpoint()
-
 				// if the model did not tool use, then we need to tell it to either use a tool or attempt_completion
 				const didToolUse = this.taskState.assistantMessageContent.some((block) => block.type === "tool_use")
 
@@ -3545,108 +3577,95 @@ export class Task {
 				// Reset auto-retry counter for each new API request
 				this.taskState.autoRetryAttempts = 0
 
-				if (this.taskState.idleGapFeedbackRequested) {
-					this.taskState.userMessageContent = []
-					const idleGapBeforeContinuation = await this.consumeIdleGapFeedbackIfPending()
-					if (idleGapBeforeContinuation) {
-						return await this.recursivelyMakeDietCodeRequests(idleGapBeforeContinuation, false)
-					}
-				}
+				return await this.continueAfterToolResponse()
+			}
+			// An empty provider response uses the existing bounded recovery budget.
+			const reqId = this.getApiRequestIdSafe()
 
-				const recDidEndLoop = await this.recursivelyMakeDietCodeRequests(this.taskState.userMessageContent)
-				didEndLoop = recDidEndLoop
-			} else {
-				// if there's no assistant_responses, that means we got no text or tool_use content blocks from API which we should assume is an error
-				const { model, providerId } = this.getCurrentProviderInfo()
-				const reqId = this.getApiRequestIdSafe()
+			// Minimal diagnostics: structured log and telemetry
+			telemetryService.captureProviderApiError({
+				ulid: this.ulid,
+				model: model.id,
+				provider: providerId,
+				errorMessage: "empty_assistant_message",
+				requestId: reqId,
+				isNativeToolCall: this.useNativeToolCalls,
+			})
 
-				// Minimal diagnostics: structured log and telemetry
-				telemetryService.captureProviderApiError({
-					ulid: this.ulid,
-					model: model.id,
-					provider: providerId,
-					errorMessage: "empty_assistant_message",
-					requestId: reqId,
-					isNativeToolCall: this.useNativeToolCalls,
-				})
+			const baseErrorMessage =
+				"Invalid API Response: The provider returned an empty or unparsable response. This is a provider-side issue where the model failed to generate valid output or returned tool calls that DietCode cannot process. Retrying the request may help resolve this issue."
+			const errorText = reqId ? `${baseErrorMessage} (Request ID: ${reqId})` : baseErrorMessage
 
-				const baseErrorMessage =
-					"Invalid API Response: The provider returned an empty or unparsable response. This is a provider-side issue where the model failed to generate valid output or returned tool calls that DietCode cannot process. Retrying the request may help resolve this issue."
-				const errorText = reqId ? `${baseErrorMessage} (Request ID: ${reqId})` : baseErrorMessage
-
-				await this.say("error", errorText)
-				await this.messageStateHandler.addToApiConversationHistory({
-					role: "assistant",
-					content: [
-						{
-							type: "text",
-							text: "Failure: I did not provide a response.",
-						},
-					],
-					modelInfo,
-					id: this.streamHandler.requestId,
-					metrics: {
-						tokens: {
-							prompt: taskMetrics.inputTokens,
-							completion: taskMetrics.outputTokens,
-							cached: (taskMetrics.cacheWriteTokens ?? 0) + (taskMetrics.cacheReadTokens ?? 0),
-						},
-						cost: taskMetrics.totalCost,
+			await this.say("error", errorText)
+			await this.messageStateHandler.addToApiConversationHistory({
+				role: "assistant",
+				content: [
+					{
+						type: "text",
+						text: "Failure: I did not provide a response.",
 					},
-					ts: Date.now(),
-				})
+				],
+				modelInfo,
+				id: this.streamHandler.requestId,
+				metrics: {
+					tokens: {
+						prompt: taskMetrics.inputTokens,
+						completion: taskMetrics.outputTokens,
+						cached: (taskMetrics.cacheWriteTokens ?? 0) + (taskMetrics.cacheReadTokens ?? 0),
+					},
+					cost: taskMetrics.totalCost,
+				},
+				ts: Date.now(),
+			})
 
-				let response: DietCodeAskResponse
+			let response: DietCodeAskResponse
 
-				const noResponseErrorMessage = "No assistant message was received. Would you like to retry the request?"
+			const noResponseErrorMessage = "No assistant message was received. Would you like to retry the request?"
 
-				if (this.taskState.autoRetryAttempts < 3) {
-					// Auto-retry enabled with max 3 attempts: automatically approve the retry
-					this.taskState.autoRetryAttempts++
+			if (this.taskState.autoRetryAttempts < 3) {
+				// Auto-retry enabled with max 3 attempts: automatically approve the retry
+				this.taskState.autoRetryAttempts++
 
-					// Calculate delay: 2s, 4s, 8s
-					const delay = 2000 * 2 ** (this.taskState.autoRetryAttempts - 1)
-					response = "yesButtonClicked"
-					await this.say(
-						"error_retry",
-						JSON.stringify({
-							attempt: this.taskState.autoRetryAttempts,
-							maxAttempts: 3,
-							delaySeconds: delay / 1000,
-							errorMessage: noResponseErrorMessage,
-						}),
-					)
-					await setTimeoutPromise(delay)
-				} else {
-					// Max retries exhausted (>= 3 attempts), ask user
-					await this.say(
-						"error_retry",
-						JSON.stringify({
-							attempt: 3,
-							maxAttempts: 3,
-							delaySeconds: 0,
-							failed: true, // Special flag to indicate retries exhausted
-							errorMessage: noResponseErrorMessage,
-						}),
-					)
-					const askResult = await this.ask("api_req_failed", noResponseErrorMessage)
-					response = askResult.response
-					// Reset retry counter if user chooses to manually retry
-					if (response === "yesButtonClicked") {
-						this.taskState.autoRetryAttempts = 0
-					}
-				}
-
+				// Calculate delay: 2s, 4s, 8s
+				const delay = 2000 * 2 ** (this.taskState.autoRetryAttempts - 1)
+				response = "yesButtonClicked"
+				await this.say(
+					"error_retry",
+					JSON.stringify({
+						attempt: this.taskState.autoRetryAttempts,
+						maxAttempts: 3,
+						delaySeconds: delay / 1000,
+						errorMessage: noResponseErrorMessage,
+					}),
+				)
+				await waitForApiRetry(delay, this.taskState.abortSignal)
+			} else {
+				// Max retries exhausted (>= 3 attempts), ask user
+				await this.say(
+					"error_retry",
+					JSON.stringify({
+						attempt: 3,
+						maxAttempts: 3,
+						delaySeconds: 0,
+						failed: true, // Special flag to indicate retries exhausted
+						errorMessage: noResponseErrorMessage,
+					}),
+				)
+				const askResult = await this.ask("api_req_failed", noResponseErrorMessage)
+				response = askResult.response
+				// Reset retry counter if user chooses to manually retry
 				if (response === "yesButtonClicked") {
-					// Signal the loop to continue (i.e., do not end), so it will attempt again
-					return false
+					this.taskState.autoRetryAttempts = 0
 				}
-
-				// Returns early to avoid retry since user dismissed
-				return true
 			}
 
-			return didEndLoop // will always be false for now
+			if (response === "yesButtonClicked") {
+				// Signal the loop to continue (i.e., do not end), so it will attempt again
+				return false
+			}
+
+			// Returns early to avoid retry since user dismissed
+			return true
 		} catch (_error) {
 			if (this.taskState.steeringInterruptRequested) {
 				const providerInfo = this.getCurrentProviderInfo()
@@ -3666,8 +3685,7 @@ export class Task {
 					},
 				})
 			}
-			// this should never happen since the only thing that can throw an error is the attemptApiRequest, which is wrapped in a try catch that sends an ask where if noButtonClicked, will clear current task and destroy this instance. However to avoid unhandled promise rejection, we will end this loop which will end execution of this instance (see startTask)
-			return true // needs to be true so parent loop knows to end task
+			throw _error
 		}
 	}
 
@@ -3702,7 +3720,7 @@ export class Task {
 			// Create MCP prompt fetcher callback that wraps mcpHub.getPrompt
 			const mcpPromptFetcher = async (serverName: string, promptName: string) => {
 				try {
-					return await this.mcpHub.getPrompt(serverName, promptName)
+					return await this.mcpHub.getPrompt(serverName, promptName, undefined, this.taskState.abortSignal)
 				} catch {
 					return null
 				}
@@ -3946,28 +3964,14 @@ export class Task {
 
 		const busyTerminals = this.terminalManager.getTerminals(true)
 		const inactiveTerminals = this.terminalManager.getTerminals(false)
-		// const allTerminals = [...busyTerminals, ...inactiveTerminals]
+		// Environment snapshots must not wait for unrelated servers, watchers, or builds.
+		// Each command owns its wait; collect whatever output is currently available.
+		this.taskState.didEditFile = false
 
-		if (busyTerminals.length > 0 && this.taskState.didEditFile) {
-			//  || this.didEditFile
-			await setTimeoutPromise(300) // delay after saving file to let terminals catch up
-		}
-		// let terminalWasBusy = false
-		if (busyTerminals.length > 0) {
-			// wait for terminals to cool down
-			// terminalWasBusy = allTerminals.some((t) => this.terminalManager.isProcessHot(t.id))
-			await pWaitFor(() => busyTerminals.every((t) => !this.terminalManager.isProcessHot(t.id)), {
-				interval: 100,
-				timeout: 15_000,
-			}).catch(() => {})
-		}
-
-		this.taskState.didEditFile = false // reset, this lets us know when to wait for saved files to update terminals
-
-		// waiting for updated diagnostics lets terminal output be the most up-to-date possible
+		// Take a non-blocking snapshot of terminal state.
 		let terminalDetails = ""
 		if (busyTerminals.length > 0) {
-			// terminals are cool, let's retrieve their output
+			// Running commands remain visible while independent work continues.
 			terminalDetails += "\n\n# Actively Running Terminals"
 			for (const busyTerminal of busyTerminals) {
 				terminalDetails += `\n## Original command: \`${busyTerminal.lastCommand}\``

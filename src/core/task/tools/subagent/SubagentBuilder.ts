@@ -32,60 +32,24 @@ export const SUBAGENT_DEFAULT_ALLOWED_TOOLS: DietCodeDefaultTool[] = [
 	DietCodeDefaultTool.STABILITY_SWEEP,
 ]
 
-// Peer-Review & Consensus loops
-const CONSENSUS_PROTO = `
-### SWARM CONSENSUS PROTOCOL
-If you are performing a critical or complex modification, you SHOULD request a peer review before finalizing:
-1. Use the 'use_subagents' tool with a 'Verifier' profile.
-2. Provide the 'Verifier' with your proposed changes and the original objective.
-3. If the 'Verifier' identifies issues, address them before calling 'attempt_completion'.
-4. Signal consensus by including 'SIGNAL: CONSENSUS_REACHED' in your final report.
-`
-
-const AUTONOMOUS_NUDGE_PROTO = `
-AUTONOMOUS NUDGE: If you sense "Context Uncertainty" (ambiguous requirements or inability to ground your task), invoke the 'mem_refresh' tool or explicitly request a "Grounded Specification Refresh" from the parent in your result.
-`
-
-const STRUCTURED_SIGNALING_PROTO = `
-STRUCTURED SIGNALING: When signaling critical findings or final results, use structured markers [SIGNAL: ARCHITECTURE_VIOLATION] or [SIGNAL: SECURITY_RISK] followed by detailed JSON metadata if possible.
-`
-
-const FORENSIC_AXIOMS = `
-### FORENSIC HARDENING AXIOMS
-1. DOCUMENTATION IS CODE: Every technical change must be mirrored in the Knowledge Ledger (.wiki/).
-2. THE OMNI-BRIDGE RULE: Documentation MUST guarantee maximum success for humans and agents by explicitly defining constraints, schemas, and implementation patterns.
-3. HIERARCHICAL TAXONOMY: You MUST organize the wiki into strict subdirectories (\`onboarding/\`, \`architecture/\`, \`agent/\`). Do NOT dump files in the root.
-4. DECISIONS & RISK MAPPING: You MUST document the "Why" (ADRs) behind architectural choices and map the blast radius/risk of fragile systems.
-5. ENVIRONMENTAL PARITY: Always provide self-verification commands to ensure a contributor's environment is fully configured.
-6. VISUAL CLARITY: Use Mermaid diagrams (\`mermaid\` blocks) to visualize complex structural relationships or state logic.
-7. ENVIRONMENTAL REALITY: Document what the workspace IS (structure, tech stack, gravity centers), not just what changed in git.
-8. PHYSICAL VERIFICATION RULE: You MUST cite the relative paths of ALL modified files in your documentation.
-9. METABOLIC CITATIONS GAUGE: Documentation depth MUST be proportional to the file's churn. Complex changes REQUIRE granular logic/structural records.
-10. ZERO HALLUCINATION: Citations must be grounded in actual file reads and Spider Engine diagnostics.
-11. ANTI-STALL: Avoid reading massive git logs. Use structural tools for context.
-12. STRUCTURAL SYNC: Verify that all internal wiki links are valid and that index.md is current.
-`
-
+/** A helper has a bounded assignment; workspace release checks belong to its parent. */
 export const SUBAGENT_SYSTEM_SUFFIX = `
-${AUTONOMOUS_NUDGE_PROTO}
-${STRUCTURED_SIGNALING_PROTO}
-${CONSENSUS_PROTO}
-${FORENSIC_AXIOMS}
+# Scoped helper workflow
 
-Standardized Swarm Reporting:
-1. RESEARCH MANDATE: Every file you explore MUST be identified by its architectural layer (Domain, Core, Infrastructure, UI, or Plumbing). 
-2. DOMAIN-FIRST: Prioritize understanding the Domain layer before exploring implementation details in Infrastructure or UI.
-3. REPORTING MANDATE: In your final 'attempt_completion' result, you MUST provide a "JoyZoning Alignment" section, categorizing your findings by their respective layers and evaluating their "Architectural Suitability" (e.g., is the logic appearing in the right zone?).
-4. DEPENDENCY RULE: Ensure your recommendations respect the "Outside-In" dependency rule (Infrastructure/UI -> Core -> Domain).
-5. SWARM IDENTITY: You are part of a collective swarm. Value inherited context as foundational truth, but adjust dynamically based on your specialized research.
-6. SHARED KNOWLEDGE: Proactively signal critical findings (hotspots, violations) via your result messages to inform the broader swarm.
-7. AUTONOMOUS NUDGE: If you sense "Context Uncertainty" (ambiguous requirements or inability to ground your task), invoke the 'mem_refresh' tool or explicitly request a "Grounded Specification Refresh" from the parent in your result.
-8. STRUCTURED SIGNALING: When signaling critical findings or final results, use structured markers [SIGNAL: ARCHITECTURE_VIOLATION] or [SIGNAL: SECURITY_RISK] followed by detailed JSON metadata if possible.
+- Complete the assigned scope and return findings or changes with relevant file paths.
+- Use only the tools exposed to you. Do not request nested helpers or wait for peer consensus; request additional review in your handoff when needed.
+- Parent roadmap, checklist, and audit signals are context, not prerequisites for your handoff. Do not repair unrelated parent work or rewrite ROADMAP.md to finish your assignment.
+- Follow the workspace's existing architecture and documentation conventions. Update documentation only when your assignment changes documented behavior; do not create a new wiki or audit every file by default.
+- Run the smallest meaningful checks for your changes. Reuse passing evidence for unchanged code. Run broader checks only when required by the assignment, workspace policy, or a concrete failure.
+- After a failed check, fix its cause before rerunning it. If the same failure remains and no new evidence or repair is available, stop retrying and report the blocker to the parent. Never claim an unavailable check passed.
+- Finish once the assigned deliverable and relevant verification are complete. A research-only assignment can finish with findings and limitations without code changes or tests.
+- Handoff: outcome, evidence or changed paths, checks and results, and remaining blockers. Report uncertainty explicitly. Use [SIGNAL: ARCHITECTURE_VIOLATION] or [SIGNAL: SECURITY_RISK] only for supported findings.
 `
 
 export class SubagentBuilder {
 	private readonly agentConfig: AgentConfig = {}
 	private allowedTools: DietCodeDefaultTool[]
+	private readonly retryAbortController = new AbortController()
 	private readonly apiHandler: ReturnType<typeof buildApiHandler>
 	private parentStreamContext: string | null = null
 
@@ -102,10 +66,15 @@ export class SubagentBuilder {
 		const effectiveApiConfiguration = {
 			...apiConfiguration,
 			ulid: this.baseConfig.ulid,
+			getRetrySignal: () => this.retryAbortController.signal,
 		}
 
 		this.applyModelOverride(effectiveApiConfiguration as Record<string, unknown>, mode, this.agentConfig.modelId)
 		this.apiHandler = buildApiHandler(effectiveApiConfiguration as typeof apiConfiguration, mode)
+	}
+
+	cancelPendingRetry(): void {
+		this.retryAbortController.abort()
 	}
 
 	setAllowedTools(tools: DietCodeDefaultTool[]): void {
@@ -134,11 +103,11 @@ export class SubagentBuilder {
 
 		// Nesting depth awareness for the subagent
 		const currentDepth = this.baseConfig.taskState?.recursionDepth || 0
-		const depthBlock = `\n\n# SWARM NESTING CONTEXT\nYou are operating at nesting depth ${currentDepth} (Max: 3). ${currentDepth >= 2 ? "You are at a deep structural layer; avoid spawning further subagents unless absolutely critical." : ""}`
+		const depthBlock = `\n\n# SWARM NESTING CONTEXT\nYou are operating at nesting depth ${currentDepth}. Return the assigned deliverable to your parent; additional delegation is owned by the parent.`
 
 		// 1. Fetch current structural health signal
 		let architectureSignal = ""
-		architectureSignal = `\n\n# SUBSTRATE HEALTH SIGNAL\n[STATUS: JOY-ZONED]\n[SIGNAL: Every file you modify must respect the architecture axioms defined in 'SOVEREIGN_GUIDE.md'.]`
+		architectureSignal = `\n\n# SUBSTRATE HEALTH SIGNAL\nFollow applicable workspace instructions and existing architecture. Do not assume a guide exists or architectural health has been verified.`
 
 		const parentContextBlock = this.parentStreamContext
 			? `\n\n# Parent Agent Context\n${this.parentStreamContext}\nUse the context above to prioritize your research within the broader task goals.`

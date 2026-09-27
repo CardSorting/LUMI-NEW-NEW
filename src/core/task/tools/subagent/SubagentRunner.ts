@@ -1,6 +1,7 @@
 import * as path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import type { ApiHandler, buildApiHandler } from "@core/api"
+import { getApiRetryDelay, shouldRetryApiError, waitForApiRetry } from "@core/api/retry"
 import { parseAssistantMessageV2, ToolUse } from "@core/assistant-message"
 import { discoverSkills, getAvailableSkills } from "@core/context/instructions/user-instructions/skills"
 import { formatResponse } from "@core/prompts/responses"
@@ -28,24 +29,26 @@ import { ApiFormat } from "@/shared/proto/dietcode/models"
 import { calculateApiCostAnthropic, calculateApiCostOpenAI } from "@/utils/cost"
 import { isNextGenModelFamily } from "@/utils/model-utils"
 import { TaskState } from "../../TaskState"
+import { ToolProgressTracker } from "../../ToolProgressTracker"
 import {
 	buildCompletionGateObservabilityEnvelope,
 	canonicalizeAttemptCompletionResultParams,
 	getCompletionGateOperationalState,
 	getCompletionGatePressureLevel,
 	getCompletionGateRetryPolicy,
+	isCompletionGateCircuitBreakerTripped,
 } from "../attemptCompletionUtils"
 import { validateSubagentCompletionGates } from "../subagentCompletionGates"
 import { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
+import { isToolFailure } from "../utils/toolOutcome"
+import { observeHelperOperation } from "./observeHelperOperation"
 import { SubagentBuilder } from "./SubagentBuilder"
 import { SwarmConsensusHandler } from "./SwarmConsensusHandler"
 
 const MAX_EMPTY_ASSISTANT_RETRIES = 3
 const MAX_INITIAL_STREAM_ATTEMPTS = 3
 const INITIAL_STREAM_RETRY_BASE_DELAY_MS = 250
-const MAX_TOTAL_TOOL_CALLS = 50
-const MAX_TASK_ITERATIONS = 25
 
 function getParentCompletionFailedStage(taskState: TaskState): string | undefined {
 	return taskState.lastCompletionFailedStage
@@ -275,6 +278,7 @@ function pushSubagentToolResultBlock(
 	call: SubagentToolCall,
 	label: string,
 	content: string,
+	isError = isToolFailure(content),
 ): void {
 	if (call.isNativeToolCall) {
 		toolResultBlocks.push({
@@ -282,6 +286,7 @@ function pushSubagentToolResultBlock(
 			tool_use_id: call.toolUseId,
 			call_id: call.call_id,
 			content,
+			...(isError ? { is_error: true } : {}),
 		})
 		return
 	}
@@ -299,13 +304,9 @@ export class SubagentRunner {
 	private activeApiAbort?: () => void
 	private abortRequested = false
 	private recursionDepth = 0
-	private activeCommandExecutions = 0
-	private abortingCommands = false
 	private streamId?: string
 
 	private readonly baseConfig: TaskConfig
-	private totalConsecutiveIdenticalCalls = 0
-	private readonly MAX_CONSECUTIVE_IDENTICAL_CALLS = 3
 	private signaledFindings = new Set<string>()
 	private stats: SubagentRunStats = {
 		toolCalls: 0,
@@ -320,7 +321,7 @@ export class SubagentRunner {
 	}
 	private activeSignals: string[] = []
 	private onProgress?: (update: SubagentProgressUpdate) => void
-	private toolCallHistory: string[] = []
+	private activeTaskState?: TaskState
 
 	constructor(baseConfig: TaskConfig, agent: SubagentBuilder) {
 		this.baseConfig = baseConfig
@@ -333,24 +334,23 @@ export class SubagentRunner {
 		this.recursionDepth = depth
 	}
 
+	setStreamId(streamId: string): void {
+		this.streamId = streamId
+	}
+
 	async abort(): Promise<void> {
 		this.abortRequested = true
+		if (this.activeTaskState) this.activeTaskState.abort = true
+		try {
+			this.agent.cancelPendingRetry()
+		} catch (error) {
+			Logger.warn("[SubagentRunner] Failed to cancel retry wait:", error)
+		}
 
 		try {
 			this.activeApiAbort?.()
 		} catch (error) {
 			Logger.error("[SubagentRunner] failed to abort active API stream", error)
-		}
-
-		if (this.activeCommandExecutions > 0 && !this.abortingCommands && this.baseConfig.callbacks.cancelRunningCommandTool) {
-			this.abortingCommands = true
-			try {
-				await this.baseConfig.callbacks.cancelRunningCommandTool()
-			} catch (error) {
-				Logger.error("[SubagentRunner] failed to cancel running command execution", error)
-			} finally {
-				this.abortingCommands = false
-			}
 		}
 	}
 
@@ -361,7 +361,11 @@ export class SubagentRunner {
 	private async getWorkspaceMetadataEnvironmentBlock(): Promise<string | null> {
 		try {
 			const workspacesJson =
-				(await this.baseConfig.workspaceManager?.buildWorkspacesJson()) ??
+				(this.baseConfig.workspaceManager
+					? await observeHelperOperation("Workspace metadata", () =>
+							this.baseConfig.workspaceManager!.buildWorkspacesJson(),
+						)
+					: undefined) ??
 				JSON.stringify(
 					{
 						workspaces: {
@@ -383,11 +387,26 @@ export class SubagentRunner {
 
 	async run(
 		prompt: string,
-		onProgress: (update: SubagentProgressUpdate) => void,
+		reportProgress: (update: SubagentProgressUpdate) => void,
 		streamId?: string,
 	): Promise<SubagentRunResult> {
 		this.streamId = streamId
-		this.abortRequested = false
+		const onProgress = (update: SubagentProgressUpdate): void => {
+			try {
+				// Observers receive snapshots and cannot mutate usage or invalidate a completed action.
+				void Promise.resolve(
+					reportProgress({
+						...update,
+						stats: update.stats ? { ...update.stats } : undefined,
+						filesModified: update.filesModified?.slice(),
+						filesViewed: update.filesViewed?.slice(),
+						activeSignals: update.activeSignals?.slice(),
+					}),
+				).catch((error) => Logger.warn("[SubagentRunner] Progress observer failed:", error))
+			} catch (error) {
+				Logger.warn("[SubagentRunner] Progress observer failed:", error)
+			}
+		}
 		const startTime = Date.now()
 		const filesModified = new Set<string>()
 		const filesViewed = new Set<string>()
@@ -454,6 +473,10 @@ export class SubagentRunner {
 			onProgress({ activeSignals: parentGateSignals })
 		}
 
+		const onParentAbort = () => {
+			void this.abort().catch((error) => Logger.warn("[SubagentRunner] Cancellation unavailable:", error))
+		}
+		this.baseConfig.taskState.abortSignal.addEventListener("abort", onParentAbort, { once: true })
 		try {
 			const mode = this.baseConfig.services.stateManager.getGlobalSettingsKey("mode")
 			const apiConfiguration = this.baseConfig.services.stateManager.getApiConfiguration()
@@ -498,7 +521,7 @@ export class SubagentRunner {
 				skills,
 				focusChainSettings: this.baseConfig.focusChainSettings,
 				browserSettings: this.baseConfig.browserSettings,
-				yoloModeToggled: false,
+				yoloModeToggled: this.baseConfig.yoloModeToggled,
 				enableNativeToolCalls: nativeToolCallsRequested,
 				enableParallelToolCalling: false,
 				isSubagentRun: true,
@@ -509,10 +532,10 @@ export class SubagentRunner {
 			const promptRegistry = PromptRegistry.getInstance()
 			const generatedSystemPrompt = await promptRegistry.get(context)
 
-			// Fluid Orchestration: Inject parent stream context for subagent awareness
-			const parentStreamId = (this.baseConfig as ConfigWithExtensions).getSessionStreamId?.()
-			if (parentStreamId) {
-				try {
+			// Supplement the assignment with available parent context without making tracking a prerequisite.
+			try {
+				const parentStreamId = (this.baseConfig as ConfigWithExtensions).getSessionStreamId?.()
+				if (parentStreamId) {
 					const auditContext = buildSubagentAuditContext({
 						lastCompletionAudit: this.baseConfig.taskState.lastCompletionAudit,
 						lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
@@ -528,12 +551,14 @@ export class SubagentRunner {
 						completionGateOperationalState: parentGateOperationalState,
 						gateOptions,
 					})
-					const compressed = await orchestrator.getCompressedContext(parentStreamId)
+					const compressed = await observeHelperOperation("Parent context", () =>
+						orchestrator.getCompressedContext(parentStreamId),
+					)
 					const combined = [auditContext, compressed].filter(Boolean).join("\n\n")
 					this.agent.setParentStreamContext(combined)
-				} catch (err) {
-					Logger.error("[SubagentRunner] Failed to fetch parent context:", err)
 				}
+			} catch (err) {
+				Logger.warn("[SubagentRunner] Parent context unavailable; using the assignment:", err)
 			}
 
 			const useNativeToolCalls = !!promptRegistry.nativeTools?.length
@@ -573,9 +598,14 @@ export class SubagentRunner {
 				},
 			]
 
-			let iterationCount = 0
-			while (iterationCount < MAX_TASK_ITERATIONS) {
-				iterationCount++
+			// Keep one state for the whole helper run, isolated from the parent's
+			// checklist/retry budget and shared by tool execution and completion.
+			const subagentConfig = this.createSubagentTaskConfig()
+			this.activeTaskState = subagentConfig.taskState
+			this.activeTaskState.abort = this.shouldAbort()
+			const progress = new ToolProgressTracker()
+			while (true) {
+				if (this.shouldAbort()) throw new Error("Subagent run cancelled.")
 				const systemPrompt = this.agent.buildSystemPrompt(generatedSystemPrompt)
 				if (
 					usageState.lastRequest &&
@@ -674,27 +704,6 @@ export class SubagentRunner {
 								}
 							}
 
-							if (stats.toolCalls >= MAX_TOTAL_TOOL_CALLS) {
-								const error = `Swarm Tool Call Limit Exceeded (${MAX_TOTAL_TOOL_CALLS}). Terminating subagent to prevent infinite tool loops.`
-								Logger.warn(`[SubagentRunner] ${error}`)
-								const durationMs = Date.now() - startTime
-								onProgress({
-									status: "failed",
-									error,
-									stats: { ...stats },
-									filesModified: Array.from(filesModified),
-									filesViewed: Array.from(filesViewed),
-									durationMs,
-								})
-								return {
-									status: "failed",
-									error,
-									stats,
-									filesModified: Array.from(filesModified),
-									filesViewed: Array.from(filesViewed),
-									durationMs,
-								}
-							}
 							break
 						case "text":
 							requestId = requestId ?? chunk.id
@@ -743,6 +752,7 @@ export class SubagentRunner {
 				stats.totalCost += calculatedRequestCost || 0
 				usageState.lastRequest = { ...requestUsage }
 
+				toolUseHandler.assertCompleteToolUses()
 				const nativeFinalizedToolCalls = toolUseHandler.getAllFinalizedToolUses().map((toolCall, index) => ({
 					toolUseId: resolveToolUseId(toolCall, index),
 					id: toolCall.id,
@@ -798,6 +808,8 @@ export class SubagentRunner {
 						// accept it as the completion result instead of discarding it!
 						if (assistantText.trim().length > 0) {
 							const directResult = assistantText.trim()
+							const gateError = await validateSubagentCompletionGates(subagentConfig, directResult)
+							if (gateError) throw new Error(gateError)
 							onProgress({
 								status: "completed",
 								result: directResult,
@@ -809,27 +821,6 @@ export class SubagentRunner {
 							return {
 								status: "completed",
 								result: directResult,
-								stats,
-								filesModified: Array.from(filesModified),
-								filesViewed: Array.from(filesViewed),
-								durationMs,
-							}
-						}
-
-						const lastAssistantResponse = this.extractLastAssistantText(conversation)
-						if (lastAssistantResponse) {
-							const partialResult = `[Completed with text response]:\n${lastAssistantResponse}`
-							onProgress({
-								status: "completed",
-								result: partialResult,
-								stats: { ...stats },
-								filesModified: Array.from(filesModified),
-								filesViewed: Array.from(filesViewed),
-								durationMs,
-							})
-							return {
-								status: "completed",
-								result: partialResult,
 								stats,
 								filesModified: Array.from(filesModified),
 								filesViewed: Array.from(filesViewed),
@@ -892,7 +883,7 @@ export class SubagentRunner {
 					if (toolName === DietCodeDefaultTool.ATTEMPT) {
 						canonicalizeAttemptCompletionResultParams(toolCallParams)
 						if (toolCallParams?.result) {
-							await this.signalCriticalFindingsToSwarm(toolCallParams.result as string)
+							this.signalCriticalFindingsToSwarm(toolCallParams.result as string)
 						}
 						const completionResult = typeof toolCallParams?.result === "string" ? toolCallParams.result.trim() : ""
 						if (!completionResult) {
@@ -904,15 +895,20 @@ export class SubagentRunner {
 						let gateError: string | null = null
 						try {
 							gateError = await validateSubagentCompletionGates(
-								this.baseConfig,
+								subagentConfig,
 								completionResult,
 								typeof toolCallParams?.task_progress === "string" ? toolCallParams.task_progress : undefined,
 								typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
 							)
 						} catch (err) {
 							Logger.warn("[SubagentRunner] Subagent completion gate check error:", err)
+							const error = "Helper completion checks could not run. Return this failure to the parent for review."
+							throw new Error(error)
 						}
 						if (gateError) {
+							if (isCompletionGateCircuitBreakerTripped(subagentConfig)) {
+								throw new Error(gateError)
+							}
 							pushSubagentToolResultBlock(toolResultBlocks, call, toolName, gateError)
 							continue
 						}
@@ -928,8 +924,10 @@ export class SubagentRunner {
 							filesViewed: Array.from(filesViewed),
 							durationMs,
 						})
-						await this.signalCriticalFindingsToSwarm(completionResult)
-						await SwarmConsensusHandler.handleSignal(this.baseConfig, completionResult)
+						this.signalCriticalFindingsToSwarm(completionResult)
+						void SwarmConsensusHandler.handleSignal(this.baseConfig, completionResult).catch((error) =>
+							Logger.warn("[SubagentRunner] Consensus observation unavailable; handoff retained:", error),
+						)
 						return {
 							status: "completed",
 							result: completionResult,
@@ -962,10 +960,11 @@ export class SubagentRunner {
 					const latestToolCall = formatToolCallPreview(toolName, toolCallParams)
 					onProgress({ latestToolCall })
 
-					const subagentConfig = this.createSubagentTaskConfig()
 					const handler =
 						subagentConfig.coordinator?.getHandler(toolName) || this.baseConfig.coordinator?.getHandler(toolName)
 					let toolResult: unknown
+					let executionResult: unknown
+					let operationReturned = false
 
 					if (!handler) {
 						toolResult = formatResponse.toolError(`No handler registered for tool '${toolName}'.`)
@@ -988,23 +987,6 @@ export class SubagentRunner {
 							}
 
 							if (!toolResult) {
-								// Track file side-effects
-								if (toolCallParams?.path && typeof toolCallParams.path === "string") {
-									if (
-										toolName === DietCodeDefaultTool.FILE_NEW ||
-										toolName === DietCodeDefaultTool.FILE_EDIT ||
-										toolName === DietCodeDefaultTool.APPLY_PATCH
-									) {
-										filesModified.add(toolCallParams.path)
-									} else if (
-										toolName === DietCodeDefaultTool.FILE_READ ||
-										toolName === DietCodeDefaultTool.SEARCH ||
-										toolName === DietCodeDefaultTool.LIST_CODE_DEF
-									) {
-										filesViewed.add(toolCallParams.path)
-									}
-								}
-
 								// V227: Sovereign Audit Integration for Swarms
 								// Ensure subagent actions are recorded in the shared StabilityMonitor
 								const guard = this.baseConfig.universalGuard
@@ -1016,10 +998,13 @@ export class SubagentRunner {
 										)
 									} else {
 										toolResult = await handler.execute(subagentConfig, toolCallBlock)
-										await guard.guardPostExecution(toolCallBlock, toolResult)
+										executionResult = toolResult
+										operationReturned = true
+										if (!isToolFailure(toolResult)) await guard.guardPostExecution(toolCallBlock, toolResult)
 
 										// V227: Substrate Read Auditing for Swarms
 										if (
+											!isToolFailure(toolResult) &&
 											(toolName === DietCodeDefaultTool.FILE_READ ||
 												toolName === DietCodeDefaultTool.SEARCH) &&
 											toolCallParams.path &&
@@ -1049,10 +1034,35 @@ export class SubagentRunner {
 									}
 								} else {
 									toolResult = await handler.execute(subagentConfig, toolCallBlock)
+									executionResult = toolResult
+									operationReturned = true
 								}
 							}
 						} catch (error) {
-							toolResult = formatResponse.toolError((error as Error).message)
+							if (operationReturned) {
+								Logger.warn("[SubagentRunner] Observation failed after tool returned; result retained:", error)
+							} else {
+								toolResult = formatResponse.toolError((error as Error).message)
+							}
+						}
+					}
+
+					if (operationReturned && !isToolFailure(toolResult)) {
+						// Track file side-effects
+						if (toolCallParams?.path && typeof toolCallParams.path === "string") {
+							if (
+								toolName === DietCodeDefaultTool.FILE_NEW ||
+								toolName === DietCodeDefaultTool.FILE_EDIT ||
+								toolName === DietCodeDefaultTool.APPLY_PATCH
+							) {
+								filesModified.add(toolCallParams.path)
+							} else if (
+								toolName === DietCodeDefaultTool.FILE_READ ||
+								toolName === DietCodeDefaultTool.SEARCH ||
+								toolName === DietCodeDefaultTool.LIST_CODE_DEF
+							) {
+								filesViewed.add(toolCallParams.path)
+							}
 						}
 					}
 
@@ -1066,42 +1076,34 @@ export class SubagentRunner {
 
 					const serializedToolResult = serializeToolResult(toolResult)
 					const toolDescription = handler?.getDescription(toolCallBlock) || `[${toolName}]`
-					pushSubagentToolResultBlock(toolResultBlocks, call, toolDescription, serializedToolResult)
+					pushSubagentToolResultBlock(
+						toolResultBlocks,
+						call,
+						toolDescription,
+						serializedToolResult,
+						isToolFailure(toolResult),
+					)
 
 					// Phase 5: Cross-Swarm Memory Signalling
 					// If the tool execution revealed something architecturally significant, signal it via orchestrator
 					if (serializedToolResult.length > 0) {
-						await this.signalCriticalFindingsToSwarm(serializedToolResult)
+						this.signalCriticalFindingsToSwarm(serializedToolResult)
 					}
 
-					// Phase 6: Repetition Detection & Self-Correction
-					const currentCallKey = `${toolName}:${JSON.stringify(toolCallParams)}`
-					if (
-						this.toolCallHistory.length > 0 &&
-						this.toolCallHistory[this.toolCallHistory.length - 1] === currentCallKey
-					) {
-						this.totalConsecutiveIdenticalCalls += 1
-					} else {
-						this.totalConsecutiveIdenticalCalls = 0
-					}
-					this.toolCallHistory.push(currentCallKey)
-					if (this.toolCallHistory.length > 10) this.toolCallHistory.shift()
+					progress.record(toolName, toolCallParams, operationReturned ? executionResult : toolResult)
+				}
 
-					if (this.totalConsecutiveIdenticalCalls >= this.MAX_CONSECUTIVE_IDENTICAL_CALLS) {
-						const nudge = `[SELF-CORRECTION NUDGE] You have called the same tool with the same parameters ${this.MAX_CONSECUTIVE_IDENTICAL_CALLS + 1} times in a row. This suggests you are stuck. Please RE-EVALUATE your approach, explore a different architectural layer, or use 'ask_followup_question' to clarify the objective with the parent.`
-						toolResultBlocks.push({
-							type: "text",
-							text: nudge,
-						})
-						Logger.warn(`[SubagentRunner] Repetition detected for tool ${toolName}; injected nudge.`)
-
-						// Phase 4: Autonomous Toxic Hotspot Signaling
-						this.signalCriticalFindingsToSwarm(
-							`TOXIC HOTSPOT DETECTED: Subagent is stuck in a repetition loop with tool '${toolName}'. Potential architectural conflict or context uncertainty at this depth.`,
-						).catch((e) => Logger.warn("[SubagentRunner] Failed to signal toxic hotspot:", e))
-
-						this.totalConsecutiveIdenticalCalls = 0 // Reset after nudge
-					}
+				const progressState = progress.finishTurn()
+				if (progressState === "handoff") {
+					throw new Error(
+						"Helper made no new tool progress for eight turns. Completed work is preserved. Continue independent work or resolve the reported blocker in the parent; do not restart the same assignment unchanged.",
+					)
+				}
+				if (progressState === "redirect") {
+					toolResultBlocks.push({
+						type: "text",
+						text: "Recent tool calls returned no new evidence. Use the results already collected, change the failing input or approach, or finish with a clear blocker handoff. Do not repeat the same checks or request more permission.",
+					})
 				}
 
 				conversation.push({
@@ -1110,48 +1112,6 @@ export class SubagentRunner {
 				})
 
 				await delay(0)
-			}
-
-			const loopError = `Swarm Iteration Limit Exceeded (${MAX_TASK_ITERATIONS}). Subagent failed to complete the task within allowed turns.`
-			const durationMs = Date.now() - startTime
-			const lastAssistantResponse = this.extractLastAssistantText(conversation)
-			if (lastAssistantResponse) {
-				const partialResult = `[Partial Result - turn limit reached]:\n${lastAssistantResponse}`
-				onProgress({
-					status: "completed",
-					result: partialResult,
-					stats: { ...stats },
-					filesModified: Array.from(filesModified),
-					filesViewed: Array.from(filesViewed),
-					durationMs,
-				})
-				return {
-					status: "completed",
-					result: partialResult,
-					error: loopError,
-					isPartial: true,
-					stats,
-					filesModified: Array.from(filesModified),
-					filesViewed: Array.from(filesViewed),
-					durationMs,
-				}
-			}
-
-			onProgress({
-				status: "failed",
-				error: loopError,
-				stats: { ...stats },
-				filesModified: Array.from(filesModified),
-				filesViewed: Array.from(filesViewed),
-				durationMs,
-			})
-			return {
-				status: "failed",
-				error: loopError,
-				stats,
-				filesModified: Array.from(filesModified),
-				filesViewed: Array.from(filesViewed),
-				durationMs,
 			}
 		} catch (error) {
 			const durationMs = Date.now() - startTime
@@ -1175,7 +1135,8 @@ export class SubagentRunner {
 				}
 			}
 
-			const errorText = (error as Error).message || "Subagent execution failed."
+			const errorText =
+				error instanceof Error ? error.message : typeof error === "string" ? error : "Subagent execution failed."
 			Logger.error("[SubagentRunner] run failed", error)
 			onProgress({
 				status: "failed",
@@ -1194,22 +1155,11 @@ export class SubagentRunner {
 				durationMs,
 			}
 		} finally {
+			this.baseConfig.taskState.abortSignal.removeEventListener("abort", onParentAbort)
 			this.activeApiAbort = undefined
+			this.activeTaskState = undefined
+			this.onProgress = undefined
 		}
-	}
-
-	private extractLastAssistantText(conversation: DietCodeStorageMessage[]): string | undefined {
-		for (let i = conversation.length - 1; i >= 0; i--) {
-			const msg = conversation[i]
-			if (msg.role === "assistant" && Array.isArray(msg.content)) {
-				for (const part of msg.content) {
-					if (part.type === "text" && part.text?.trim()) {
-						return part.text.trim()
-					}
-				}
-			}
-		}
-		return undefined
 	}
 
 	private createSubagentTaskConfig(): TaskConfig {
@@ -1240,14 +1190,11 @@ export class SubagentRunner {
 				sayAndCreateMissingParamError: async (_toolName, paramName) =>
 					formatResponse.toolError(formatResponse.missingToolParameterError(paramName)),
 				executeCommandTool: async (command: string, timeoutSeconds: number | undefined) => {
-					this.activeCommandExecutions += 1
-					try {
-						return await baseCallbacks.executeCommandTool(command, timeoutSeconds, {
-							suppressUserInteraction: true,
-						})
-					} finally {
-						this.activeCommandExecutions = Math.max(0, this.activeCommandExecutions - 1)
-					}
+					return await baseCallbacks.executeCommandTool(command, timeoutSeconds, {
+						suppressUserInteraction: true,
+						interactive: false,
+						signal: subagentTaskState.abortSignal,
+					})
 				},
 			},
 		}
@@ -1263,7 +1210,7 @@ export class SubagentRunner {
 			return false
 		}
 
-		return true
+		return shouldRetryApiError(error, true)
 	}
 
 	private compactConversationForContextWindow(conversation: DietCodeStorageMessage[]): boolean {
@@ -1337,15 +1284,10 @@ export class SubagentRunner {
 		for (let attempt = 1; attempt <= MAX_INITIAL_STREAM_ATTEMPTS; attempt += 1) {
 			const stream = api.createMessage(systemPrompt, conversation, nativeTools)
 			const iterator = stream[Symbol.asyncIterator]()
+			let firstChunk: Awaited<ReturnType<typeof iterator.next>>
 
 			try {
-				const firstChunk = await iterator.next()
-				if (!firstChunk.done) {
-					yield firstChunk.value
-				}
-
-				yield* iterator
-				return
+				firstChunk = await iterator.next()
 			} catch (error) {
 				if (checkContextWindowExceededError(error)) {
 					const didCompact = this.compactConversationForContextWindow(conversation)
@@ -1358,18 +1300,30 @@ export class SubagentRunner {
 					continue
 				}
 
+				const delayMs = getApiRetryDelay(error, attempt - 1, INITIAL_STREAM_RETRY_BASE_DELAY_MS)
 				const shouldRetry =
 					!this.shouldAbort() &&
+					delayMs !== undefined &&
 					attempt < MAX_INITIAL_STREAM_ATTEMPTS &&
 					this.shouldRetryInitialStreamError(error, providerId, modelId)
 				if (!shouldRetry) {
 					throw error
 				}
 
-				const delayMs = INITIAL_STREAM_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1)
 				Logger.warn(`[SubagentRunner] Initial stream failed. Retrying attempt ${attempt + 1}.`, error)
-				await delay(delayMs)
+				await waitForApiRetry(delayMs!, this.activeTaskState?.abortSignal ?? this.baseConfig.taskState.abortSignal)
+				continue
 			}
+
+			// Once anything is emitted, only the caller can reconcile tool results. Never replay this request.
+			if (firstChunk.done) return
+			try {
+				yield firstChunk.value
+				yield* iterator
+			} finally {
+				await iterator.return?.(undefined)
+			}
+			return
 		}
 	}
 
@@ -1382,8 +1336,14 @@ export class SubagentRunner {
 		return (hash >>> 0).toString(36)
 	}
 
-	private async signalCriticalFindingsToSwarm(result: string): Promise<void> {
-		const parentStreamId = (this.baseConfig as ConfigWithExtensions).getSessionStreamId?.()
+	private signalCriticalFindingsToSwarm(result: string): void {
+		let parentStreamId: string | undefined
+		try {
+			parentStreamId = (this.baseConfig as ConfigWithExtensions).getSessionStreamId?.()
+		} catch (error) {
+			Logger.warn("[SubagentRunner] Finding stream unavailable:", error)
+			return
+		}
 		if (!parentStreamId) {
 			return
 		}
@@ -1414,10 +1374,13 @@ export class SubagentRunner {
 			try {
 				const label =
 					upperResult.includes("GROUNDED SPECIFICATION REFRESH") || upperResult.includes("CONTEXT UNCERTAINTY")
-						? `swarm_nudge_${Date.now()}`
-						: `swarm_finding_${Date.now()}`
-				await orchestrator.storeMemory(parentStreamId, label, result.slice(0, 1500))
+						? `swarm_nudge_${Date.now()}_${findingKey}`
+						: `swarm_finding_${Date.now()}_${findingKey}`
 				this.signaledFindings.add(findingKey)
+				if (this.signaledFindings.size > 128) this.signaledFindings.delete(this.signaledFindings.values().next().value!)
+				void Promise.resolve(orchestrator.storeMemory(parentStreamId, label, result.slice(0, 1500))).catch((error) =>
+					Logger.warn("[SubagentRunner] Failed to signal swarm finding:", error),
+				)
 			} catch (e) {
 				Logger.warn("[SubagentRunner] Failed to signal swarm finding:", e)
 			}

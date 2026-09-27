@@ -6,7 +6,6 @@ import { listFiles } from "@services/glob/list-files"
 import { arePathsEqual, getReadablePath, isLocatedInWorkspace } from "@utils/path"
 import { telemetryService } from "@/services/telemetry"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { showNotificationForApproval } from "../../utils"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
@@ -134,11 +133,14 @@ export class ListFilesToolHandler implements IFullyManagedTool {
 			const notificationMessage = `DietCode wants to view directory ${getWorkspaceBasename(absolutePath, "ListFilesToolHandler.notification")}/`
 
 			// Show notification
-			showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
-
 			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
 
-			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("tool", completeMessage, config)
+			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+				"tool",
+				completeMessage,
+				config,
+				notificationMessage,
+			)
 			if (!didApprove) {
 				telemetryService.captureToolUsage(
 					config.ulid,

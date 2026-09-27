@@ -1,5 +1,5 @@
-import { exec } from "child_process"
-import { createHash } from "crypto"
+import { execFile } from "child_process"
+import { createHash, randomUUID } from "crypto"
 import * as fs from "fs/promises"
 import * as os from "os"
 import * as path from "path"
@@ -7,7 +7,17 @@ import { promisify } from "util"
 import { Logger } from "@/shared/services/Logger"
 import { StateManager } from "../storage/StateManager"
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
+
+async function probeCommand(file: string, args: string[]): Promise<{ stdout: string }> {
+	return execFileAsync(file, args, {
+		timeout: 3000,
+		killSignal: "SIGKILL",
+		windowsHide: true,
+		encoding: "utf8",
+		maxBuffer: 64 * 1024,
+	})
+}
 
 export interface EnvironmentLease {
 	fingerprint: string
@@ -41,18 +51,19 @@ export class EnvironmentIntegrity {
 	private probePromise: Promise<EnvironmentLease> | null = null
 	private readonly LEASE_DURATION = 1000 * 60 * 60 // 1 hour lease
 
-	private static readonly PROJECT_MARKERS: Record<string, { manifest: string; probe: string }> = {
-		node: { manifest: "package.json", probe: "node -v" },
-		python: { manifest: "requirements.txt", probe: "python3 --version" },
-		rust: { manifest: "Cargo.toml", probe: "cargo --version" },
-		go: { manifest: "go.mod", probe: "go version" },
-		dart: { manifest: "pubspec.yaml", probe: "dart --version" },
-		ruby: { manifest: "Gemfile", probe: "ruby -v" },
+	private static readonly PROJECT_MARKERS: Record<string, { manifest: string; binary: string; args: string[] }> = {
+		node: { manifest: "package.json", binary: "node", args: ["-v"] },
+		python: { manifest: "requirements.txt", binary: "python3", args: ["--version"] },
+		rust: { manifest: "Cargo.toml", binary: "cargo", args: ["--version"] },
+		go: { manifest: "go.mod", binary: "go", args: ["version"] },
+		dart: { manifest: "pubspec.yaml", binary: "dart", args: ["--version"] },
+		ruby: { manifest: "Gemfile", binary: "ruby", args: ["-v"] },
 	}
 
 	constructor(
 		private readonly cwd: string,
 		private readonly stateManager?: StateManager,
+		private readonly runCommand = probeCommand,
 	) {}
 
 	public getFingerprint(): string {
@@ -65,7 +76,7 @@ export class EnvironmentIntegrity {
 			process.platform,
 			process.arch,
 			process.version,
-			"v2",
+			"v3",
 		].join("|")
 		return createHash("sha256").update(data).digest("hex")
 	}
@@ -82,8 +93,9 @@ export class EnvironmentIntegrity {
 	}
 
 	public isLeaseValid(lease: EnvironmentLease | null): boolean {
-		if (!lease) return false
-		if (Date.now() - lease.timestamp > this.LEASE_DURATION) return false
+		if (!lease?.success || !Number.isFinite(lease.timestamp)) return false
+		const age = Date.now() - lease.timestamp
+		if (age < 0 || age > this.LEASE_DURATION) return false
 		if (lease.fingerprint !== this.getFingerprint()) return false
 		return true
 	}
@@ -123,13 +135,6 @@ export class EnvironmentIntegrity {
 		ruby: [".ruby-version", ".tool-versions"],
 	}
 
-	private static readonly MGMT_TOOLS: Record<string, string> = {
-		nvm: "nvm --version",
-		rustup: "rustup --version",
-		pyenv: "pyenv --version",
-		asdf: "asdf --version",
-	}
-
 	private async performFullProbe(): Promise<EnvironmentLease> {
 		Logger.info("[EnvironmentIntegrity] Performing Structural Forensic Probe (L2)...")
 		const fingerprint = this.getFingerprint()
@@ -152,35 +157,28 @@ export class EnvironmentIntegrity {
 			details.shell = process.env.SHELL || (process.platform === "win32" ? "cmd" : "unknown")
 			details.memoryFreeGB = (os.freemem() / (1024 * 1024 * 1024)).toFixed(2)
 
-			if (process.platform !== "win32") {
-				const { stdout: dfOut } = await execAsync(`df -h "${this.cwd}" | tail -1 | awk '{print $4}'`)
-				details.diskSpaceGB = dfOut.trim()
-			} else {
-				try {
-					const drive = path.parse(this.cwd).root.split(":")[0]
-					const { stdout: psOut } = await execAsync(`powershell -Command "(Get-PSDrive ${drive}).Free / 1GB"`)
-					details.diskSpaceGB = `${Number.parseFloat(psOut.trim()).toFixed(2)}GB`
-				} catch {
-					details.diskSpaceGB = "Unknown"
-				}
+			// Filesystem metadata avoids shell quoting and keeps free space in a single unit.
+			try {
+				const disk = await fs.statfs(this.cwd)
+				details.diskSpaceGB = ((disk.bavail * disk.bsize) / 1024 ** 3).toFixed(3)
+			} catch {
+				// Disk telemetry is optional; permission checks and tools still report concrete failures.
 			}
 
-			const canaryPath = path.join(this.cwd, ".dietcode_canary")
+			// An exclusive, unique probe must never overwrite a user's file or a parallel task's probe.
+			const canaryPath = path.join(this.cwd, `.dietcode_canary-${randomUUID()}`)
 			try {
-				await fs.writeFile(canaryPath, `canary-${Date.now()}`)
-				await fs.unlink(canaryPath)
-				details.canWrite = true
+				const canary = await fs.open(canaryPath, "wx")
+				try {
+					details.canWrite = true
+				} finally {
+					await canary.close()
+					await fs.unlink(canaryPath)
+				}
 			} catch {
 				lease.success = false
 				lease.error = `Permission Denied: Cannot write to workspace directory (${this.cwd}).`
 				details.canWrite = false
-			}
-
-			try {
-				await execAsync("git --version")
-			} catch {
-				lease.success = false
-				lease.error = "Git Not Found: Architecture requires git for state tracking."
 			}
 
 			const rootFiles = await fs.readdir(this.cwd)
@@ -200,73 +198,44 @@ export class EnvironmentIntegrity {
 				}
 			}
 
-			// 2. Probe toolchains for DETECTED project types ONLY (plus mandatory git)
-			const toolsToProbe = Array.from(new Set([...(details.detectedProjectTypes || []), "git"]))
-
-			for (const type of toolsToProbe) {
-				const config = EnvironmentIntegrity.PROJECT_MARKERS[type] || (type === "git" ? { probe: "git --version" } : null)
-				if (!config) continue
-
-				try {
-					const { stdout } = await execAsync(config.probe)
-					if (details.toolchain) {
-						details.toolchain[type] = {
-							status: "found",
-							version: stdout.trim(),
-						}
-					}
-
-					const { stdout: binPath } = await execAsync(process.platform === "win32" ? `where ${type}` : `which ${type}`)
-					if (details.toolchain?.[type]) {
-						details.toolchain[type].path = binPath.trim()
-					}
-
-					const isStandardPath =
-						binPath.includes("/usr/local/bin") ||
-						binPath.includes("/usr/bin") ||
-						binPath.includes(".nvm/versions") ||
-						binPath.includes(".asdf/installs")
-
-					if (!isStandardPath && details.toolchain?.[type]?.path?.startsWith(this.cwd)) {
-						details.shadowingAlerts?.push(
-							`⚠️ CAUTION: ${type} binary is located inside workspace: ${details.toolchain[type].path}`,
-						)
-					}
-				} catch {
-					// Fallback for Node via process.execPath
-					if (type === "node" || type === "git" || details.detectedProjectTypes?.includes(type)) {
-						if (type === "node") {
-							const execPath = process.execPath
-							try {
-								const { stdout } = await execAsync(`"${execPath}" -v`)
-								if (details.toolchain) {
-									details.toolchain[type] = {
-										status: "found",
-										version: stdout.trim(),
-										path: execPath,
-									}
-								}
-								Logger.info(`[EnvironmentIntegrity] Node found via process.execPath: ${execPath}`)
-							} catch {
-								if (details.toolchain) details.toolchain[type] = { status: "missing" }
-								details.shadowingAlerts?.push("⚠️ [ADVISORY] Node.js not found on PATH.")
+			// Independent probes run concurrently, once per relevant toolchain, with bounded process lifetimes.
+			const toolsToProbe = [...(details.detectedProjectTypes || []), "git"]
+			await Promise.all(
+				toolsToProbe.map(async (type) => {
+					const config = EnvironmentIntegrity.PROJECT_MARKERS[type] || { binary: "git", args: ["--version"] }
+					try {
+						const [version, location] = await Promise.allSettled([
+							this.runCommand(config.binary, config.args),
+							this.runCommand(process.platform === "win32" ? "where" : "which", [config.binary]),
+						])
+						if (version.status === "rejected") throw version.reason
+						const binPath =
+							location.status === "fulfilled" ? location.value.stdout.trim().split(/\r?\n/)[0] : undefined
+						details.toolchain![type] = { status: "found", version: version.value.stdout.trim(), path: binPath }
+						if (binPath) {
+							const relativePath = path.relative(this.cwd, binPath)
+							if (
+								relativePath &&
+								relativePath !== ".." &&
+								!relativePath.startsWith(`..${path.sep}`) &&
+								!path.isAbsolute(relativePath)
+							) {
+								details.shadowingAlerts?.push(
+									`Advisory: ${config.binary} resolves inside the workspace: ${binPath}`,
+								)
 							}
+						}
+					} catch {
+						if (type === "node") {
+							// The extension's own runtime is known; do not launch another IDE process as a fallback.
+							details.toolchain![type] = { status: "found", version: process.version, path: process.execPath }
+							details.shadowingAlerts?.push("Node.js is unavailable on PATH; reporting the extension runtime.")
 						} else {
-							if (details.toolchain) details.toolchain[type] = { status: "missing" }
+							details.toolchain![type] = { status: "missing" }
 						}
 					}
-				}
-			}
-
-			// 3. Management Tool Probes (Only if relevant)
-			for (const [tool, cmd] of Object.entries(EnvironmentIntegrity.MGMT_TOOLS)) {
-				try {
-					const { stdout } = await execAsync(cmd)
-					if (details.toolchain) details.toolchain[tool] = { status: "found", version: stdout.trim() }
-				} catch {
-					// Silent skip
-				}
-			}
+				}),
+			)
 
 			if (details.toolchain?.node?.status === "found") {
 				const execPath = process.execPath

@@ -21,20 +21,16 @@ Write guard: ROADMAP.md only at workspace root — out-of-tree writes blocked at
 `.trim()
 
 export const AGENT_PLAYBOOK = `
-Roadmap autonomous loop (agents)
+Roadmap workflow (agents)
 
-1. roadmap(action='guide')       — phase, health, steering_line, project_steering_digest, _roadmap_operator_hints
-2. roadmap(action='checkpoint')  — evidence bundle + bootstrap_fill_plan when placeholders remain
-3. roadmap(action='apply_bootstrap_fill') — preview/write per-project evidence autofill
-4. Edit ROADMAP.md at workspace root only
-5. roadmap(action='validate')    — confirm schema + bootstrap completeness before finishing
-6. roadmap(action='explain_gate') — when gates block attempt_completion or schema is unclear
-7. roadmap(action='explain_stale') — when checkpoint freshness vs git activity is unclear
-8. Return Required Final Assistant Response summary (not the full file)
+1. Use roadmap(action='guide') when roadmap context is relevant to the assignment.
+2. For a requested checkpoint or meaningful direction change, gather evidence once with roadmap(action='checkpoint').
+3. Edit only affected sections of ROADMAP.md at the workspace root. Non-goals and template suggestions are advisory; do not invent constraints.
+4. After the final edit, run roadmap(action='validate') once. Fix reported errors before rerunning; unchanged validation cannot improve the result.
+5. Use roadmap(action='explain_gate') only for a configured blocking check. Repair remains available while completion is blocked.
+6. Finish with the outcome and any unresolved limitations. Do not repeat checkpoints, audits, or passing tests without new evidence.
 
-Every roadmap tool response includes steering_line and write_guard hints.
-Prime directive: did the latest work strengthen or weaken center of gravity?
-Section 9 code soup audit is mandatory every pass. Keep Now ≤ 5 items.
+Keep Now focused on the current work. Review section 9 only when architecture or risk changes. Use the smallest relevant verification; research-only tasks do not require test runs. If an unchanged failure cannot be repaired, report the blocker instead of looping.
 `.trim()
 
 export interface GateSnapshot {
@@ -79,7 +75,7 @@ export function determinePhase(params: {
 	validation_valid: boolean | undefined
 	bootstrap_incomplete: boolean
 }): { phase: string; operator_summary: string; agent_next_call: string; agent_blocked: boolean } {
-	if (params.validation_valid === false) {
+	if (params.roadmap_exists && params.validation_valid === false) {
 		return {
 			phase: "validate_pending",
 			operator_summary: "ROADMAP.md failed schema validation — repair before next checkpoint.",
@@ -122,8 +118,8 @@ export function determinePhase(params: {
 	}
 	return {
 		phase: "checkpoint",
-		operator_summary: "Roadmap present — checkpoint after meaningful direction or risk changes.",
-		agent_next_call: "roadmap(action='checkpoint')",
+		operator_summary: "Roadmap present — continue the assigned task. Checkpoint after meaningful direction or risk changes.",
+		agent_next_call: "",
 		agent_blocked: false,
 	}
 }
@@ -190,7 +186,7 @@ export function recommendNextAction(params: {
 		return {
 			action: "explain_stale",
 			command: "roadmap(action='explain_stale')",
-			detail: "Checkpoint freshness gate closed — review stale signals vs git activity, then refresh checkpoint.",
+			detail: "Checkpoint is older than recent activity. Refresh during the next relevant roadmap update; this advisory does not block completion.",
 		}
 	}
 	if (params.phase === "structure_repair") {
@@ -223,8 +219,8 @@ export function recommendNextAction(params: {
 	}
 	return {
 		action: "wait",
-		command: "roadmap(action='cockpit')",
-		detail: "Roadmap steering surface current — checkpoint after meaningful direction shifts.",
+		command: "",
+		detail: "Roadmap steering surface current — continue the assigned task. No further roadmap call is needed until a meaningful direction shift.",
 	}
 }
 
@@ -245,7 +241,10 @@ export function formatExplainGateReport(params: {
 		if (closed.length > 0) {
 			lines.push("")
 			for (const item of closed) {
-				const mark = item.blocks_kanban_complete ? "⚠️ " : "• "
+				const required = params.blocking_gates
+					? params.blocking_gates.some((gate) => gate.id === item.id)
+					: item.blocks_kanban_complete
+				const mark = required ? "Required — " : "Advisory — "
 				lines.push(`${mark}${item.label}: ${item.why}`)
 				lines.push(`   fix: ${item.fix}`)
 			}
@@ -388,8 +387,8 @@ export function wrapClarityEnvelope(
 		payload.project_identity_line || operatorHints.project_identity_line || digest.identity_line || payload.steering_brief
 
 	return {
-		...payload,
 		...(phaseInfo || {}),
+		...payload,
 		success: payload.success ?? payload.ok ?? true,
 		ok: payload.ok ?? payload.success ?? true,
 		execution_path: "roadmap_checkpoint",
@@ -403,9 +402,9 @@ export function wrapClarityEnvelope(
 			skill_path: payload.skill_path,
 			recovery_suggestion: operatorHints.recovery_suggestion || phaseInfo?.operator_summary || payload.operator_summary,
 			next_action:
-				operatorHints.next_action ||
-				(payload.recommended_next_action as Record<string, unknown>)?.command ||
-				phaseInfo?.agent_next_call ||
+				operatorHints.next_action ??
+				(payload.recommended_next_action as Record<string, unknown>)?.command ??
+				phaseInfo?.agent_next_call ??
 				payload.agent_next_call,
 		},
 	}

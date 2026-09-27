@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { EventEmitter } from "events"
-import { describe, it } from "mocha"
+import { afterEach, describe, it } from "mocha"
+import sinon from "sinon"
 import { orchestrateCommandExecution } from "./CommandOrchestrator"
 import type {
 	CommandExecutorCallbacks,
@@ -110,5 +111,162 @@ describe("CommandOrchestrator exit status messaging", () => {
 		assert.equal(result.completed, true)
 		assert.equal(result.exitCode, 0)
 		assert.match(result.result as string, /^Command executed successfully \(exit code 0\)\./)
+	})
+})
+
+describe("CommandOrchestrator lifecycle", () => {
+	afterEach(() => sinon.restore())
+	it("finishes without opening an output prompt when completion precedes the display flush", async () => {
+		const process = new FakeTerminalProcess()
+		let asks = 0
+		const callbacks = {
+			...createCallbacks(),
+			ask: async () => {
+				asks++
+				return { response: "yesButtonClicked" }
+			},
+		}
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "test",
+		})
+		process.emit("line", "done")
+		process.complete({ exitCode: 0 })
+		assert.match(String((await pending).result), /done/)
+		assert.equal(asks, 0)
+	})
+
+	it("serializes output prompts and ignores a stale reply after completion", async () => {
+		const process = new FakeTerminalProcess()
+		let asks = 0
+		let reply!: (value: { response: string }) => void
+		const callbacks = {
+			...createCallbacks(),
+			ask: () => {
+				asks++
+				return new Promise<{ response: string }>((resolve) => {
+					reply = resolve
+				})
+			},
+		}
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "test",
+		})
+		for (let i = 0; i < 80; i++) process.emit("line", `line ${i}`)
+		assert.equal(asks, 1)
+		process.complete({ exitCode: 0 })
+		const result = await pending
+		assert.equal(result.outputLines.length, 80)
+		assert.equal(result.userRejected, false)
+		let continued = 0
+		process.on("continue", () => continued++)
+		reply({ response: "noButtonClicked" })
+		await Promise.resolve()
+		assert.equal(continued, 0)
+		assert.equal(process.listenerCount("line"), 0)
+		assert.equal(process.listenerCount("completed"), 0)
+	})
+
+	it("preserves command results when the display rejects or never settles", async () => {
+		for (const hangs of [false, true]) {
+			const process = new FakeTerminalProcess()
+			let calls = 0
+			const callbacks = {
+				...createCallbacks(),
+				say: () => {
+					calls++
+					return hangs ? new Promise<undefined>(() => {}) : Promise.reject(new Error("webview unavailable"))
+				},
+			}
+			const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+				command: "test",
+				interactive: false,
+			})
+			for (let i = 0; i < 80; i++) process.emit("line", `line ${i}`)
+			process.complete({ exitCode: 0 })
+			assert.equal((await pending).outputLines.length, 80)
+			assert.ok(calls <= 2, "slow display should not accumulate one promise per output chunk")
+		}
+	})
+
+	it("continues an already authorized command once when its output prompt fails", async () => {
+		const process = new FakeTerminalProcess()
+		let asks = 0
+		const callbacks = {
+			...createCallbacks(),
+			ask: async () => {
+				asks++
+				throw new Error("output view lost")
+			},
+		}
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "server",
+		})
+		for (let i = 0; i < 80; i++) process.emit("line", `line ${i}`)
+		const result = await pending
+		assert.equal(result.completed, false)
+		assert.equal(asks, 1)
+		assert.match(String(result.result), /Do not launch it again/)
+		process.complete({ exitCode: 0 })
+	})
+
+	it("updates the initiating command row when a newer command row exists", async () => {
+		const process = new FakeTerminalProcess()
+		const messages = [{ ts: 1, say: "command", text: "first" }]
+		let updated = -1
+		const callbacks = {
+			...createCallbacks(),
+			getDietCodeMessages: () => messages,
+			updateDietCodeMessage: async (index: number) => {
+				updated = index
+			},
+		}
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "first",
+		})
+		messages.push({ ts: 2, say: "command", text: "second" })
+		process.complete({ exitCode: 0 })
+		await pending
+		assert.equal(updated, 0)
+	})
+
+	it("rejects from a terminal error event without waiting for a broken process promise", async () => {
+		const process = new FakeTerminalProcess()
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), createCallbacks(), {
+			command: "broken",
+			timeoutSeconds: 300,
+		})
+		process.emit("error", new Error("launch failed"))
+		await assert.rejects(pending, /launch failed/)
+		assert.equal(process.listenerCount("line"), 0)
+		assert.equal(process.listenerCount("completed"), 0)
+		assert.equal(process.listenerCount("no_shell_integration"), 0)
+	})
+	it("cleans up timers on failures and detached waits while retaining actual completion ownership", async () => {
+		const clock = sinon.useFakeTimers()
+		const failed = new FakeTerminalProcess()
+		const failure = orchestrateCommandExecution(failed.asResultPromise(), createTerminalManager(), createCallbacks(), {
+			command: "broken",
+			timeoutSeconds: 300,
+		})
+		const rejected = assert.rejects(failure, /failed/)
+		failed.fail(new Error("failed"))
+		await clock.tickAsync(0)
+		await rejected
+		assert.equal(clock.countTimers(), 0)
+
+		const background = new FakeTerminalProcess()
+		const pending = orchestrateCommandExecution(background.asResultPromise(), createTerminalManager(), createCallbacks(), {
+			command: "server",
+			timeoutSeconds: 1,
+			interactive: false,
+		})
+		background.emit("line", "server ready")
+		await clock.tickAsync(1100)
+		assert.equal((await pending).completed, false)
+		assert.equal(clock.countTimers(), 0)
+		assert.equal(background.listenerCount("line"), 0)
+		assert.equal(background.listenerCount("completed"), 1)
+		background.complete({ exitCode: 0 })
+		assert.equal(background.listenerCount("completed"), 0)
 	})
 })

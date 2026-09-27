@@ -23,6 +23,16 @@ describe("ExecuteCommandToolHandler timeout policy", () => {
 		assert.equal(timeout, 300)
 	})
 
+	it("honors explicit waits in manual mode and fractional seconds", () => {
+		assert.equal(resolveCommandTimeoutSeconds("server", "0.5", false), 0.5)
+		assert.equal(resolveCommandTimeoutSeconds("server", "60", false), 60)
+	})
+	it("rejects malformed timeout text and prevents timer overflow", () => {
+		assert.equal(resolveCommandTimeoutSeconds("server", "30seconds", true), 30)
+		assert.equal(resolveCommandTimeoutSeconds("server", "Infinity", true), 30)
+		assert.equal(resolveCommandTimeoutSeconds("server", "9999999999", true), 2_147_483_647 / 1000)
+	})
+
 	it("detects common long-running command families", () => {
 		assert.equal(isLikelyLongRunningCommand("cargo build --release"), true)
 		assert.equal(isLikelyLongRunningCommand("docker build ."), true)

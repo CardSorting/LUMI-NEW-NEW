@@ -29,11 +29,12 @@ export const DEFAULT_ROADMAP_CONFIG: RoadmapConfig = {
 	git_timeout_seconds: 5,
 	evidence_cache_ttl_seconds: 15,
 	session_brief_cache_ttl_seconds: 10,
-	block_kanban_on_invalid_schema: true,
-	block_kanban_on_validation_pending: true,
-	block_kanban_on_bootstrap_incomplete: true,
+	// Roadmap maintenance is advisory unless the workspace opts into a required check.
+	block_kanban_on_invalid_schema: false,
+	block_kanban_on_validation_pending: false,
+	block_kanban_on_bootstrap_incomplete: false,
 	warn_on_stale_before_complete: true,
-	fail_closed_completion_gates: true,
+	fail_closed_completion_gates: false,
 }
 
 const CONFIG_TTL_MS = 30_000

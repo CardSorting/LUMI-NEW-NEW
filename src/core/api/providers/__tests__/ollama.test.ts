@@ -1,6 +1,5 @@
 import { afterEach, before, beforeEach, describe, it } from "mocha"
 import "should"
-import { ApiHandlerOptions } from "@shared/api"
 import axios from "axios"
 import sinon from "sinon"
 import { DietCodeStorageMessage } from "@/shared/messages/content"
@@ -21,12 +20,12 @@ describe("OllamaHandler", () => {
 		}
 	})
 	let handler: OllamaHandler
-	let options: ApiHandlerOptions
+	let options: ConstructorParameters<typeof OllamaHandler>[0]
 	let clock: sinon.SinonFakeTimers
 
 	beforeEach(() => {
 		options = {
-			actModeOllamaModelId: "llama2",
+			ollamaModelId: "llama2",
 			ollamaBaseUrl: "http://localhost:11434",
 		}
 		handler = new OllamaHandler(options)

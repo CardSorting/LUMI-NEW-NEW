@@ -287,6 +287,9 @@ export async function evaluateRoadmapCompletionGateError(
 	logPrefix: string,
 	options?: { dryRun?: boolean },
 ): Promise<string | null> {
+	// A helper returns a scoped handoff. Workspace completion belongs to the parent,
+	// and helpers may not even have the roadmap tool needed to repair these gates.
+	if (config.isSubagentExecution) return null
 	const circuitBreakerMessage = getCompletionGateCircuitBreakerError(config)
 	if (circuitBreakerMessage) {
 		return circuitBreakerMessage
@@ -326,7 +329,7 @@ export async function evaluateCompletionAuditGate(
 		logPrefix: string
 	},
 ): Promise<CompletionAuditGateResult> {
-	if (!config.auditCompletionGateEnabled) {
+	if (!config.auditCompletionGateEnabled || config.isSubagentExecution) {
 		return { status: "skipped" }
 	}
 

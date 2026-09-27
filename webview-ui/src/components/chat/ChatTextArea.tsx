@@ -28,6 +28,7 @@ import {
 	getMatchingSlashCommands,
 	insertSlashCommand,
 	removeSlashCommand,
+	type SlashCommand,
 	shouldShowSlashCommandsMenu,
 	slashCommandDeleteRegex,
 } from "@/utils/slash-commands"

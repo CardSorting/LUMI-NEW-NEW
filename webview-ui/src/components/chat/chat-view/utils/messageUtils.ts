@@ -148,12 +148,19 @@ export function groupMessages(visibleMessages: DietCodeMessage[]): (DietCodeMess
 	}
 
 	for (const message of visibleMessages) {
-		if (message.ask === "browser_action_launch" || message.say === "browser_action_launch") {
+		if (
+			message.ask === "browser_action_launch" ||
+			message.say === "browser_action_launch" ||
+			(!isInBrowserSession && (message.say === "browser_action" || message.say === "browser_action_result"))
+		) {
 			// complete existing browser session if any
 			endBrowserSession()
 			// start new
 			isInBrowserSession = true
 			currentGroup.push(message)
+			if (message.say === "browser_action" && JSON.parse(message.text || "{}").action === "close") {
+				endBrowserSession()
+			}
 		} else if (isInBrowserSession) {
 			// end session if api_req_started is cancelled
 			if (message.say === "api_req_started") {

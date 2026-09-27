@@ -16,6 +16,7 @@ import { ApiStream, ApiStreamUsageChunk } from "./transform/stream"
 
 export type CommonApiHandlerOptions = {
 	onRetryAttempt?: ApiConfiguration["onRetryAttempt"]
+	getRetrySignal?: ApiConfiguration["getRetrySignal"]
 }
 
 export interface ApiHandler {

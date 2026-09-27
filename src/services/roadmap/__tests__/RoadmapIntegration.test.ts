@@ -3,13 +3,38 @@ import * as fs from "fs/promises"
 import * as os from "os"
 import * as path from "path"
 import { evaluateRoadmapCompletionBlock, requireFreshCheckpointBeforeComplete } from "../RoadmapCompletionGate"
+import { setRoadmapConfigOverride } from "../RoadmapConfig"
 import { gateClosedEnvelope, validationPendingEnvelope } from "../RoadmapErrors"
 import { preflightRoadmapWrite, validateRoadmapWriteTarget } from "../RoadmapNativeBridge"
 import { formatProgressReport } from "../RoadmapProgress"
+import { BOOTSTRAP_PLACEHOLDER_PHRASES, bootstrapSkeleton } from "../RoadmapSchema"
 import { RoadmapService } from "../RoadmapService"
+import { sessionBrief } from "../RoadmapSession"
 import { buildSteeringContext, enrichPayloadWithSteering } from "../RoadmapSteeringContext"
 
 describe("RoadmapIntegration", () => {
+	afterEach(() => setRoadmapConfigOverride(null))
+	it("finishes with consistent section counts and no recurring next call", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-terminal-"))
+		try {
+			let content = bootstrapSkeleton({})
+			for (const phrase of BOOTSTRAP_PLACEHOLDER_PHRASES)
+				content = content.replaceAll(phrase, "Documented project context.")
+			content = content.replace("## 4. Now", "") + "\n## 4. Now\n### 1. Zero stalled handoffs"
+			await fs.writeFile(path.join(tmp, "ROADMAP.md"), content)
+			const service = RoadmapService.getInstance()
+			const validation = await service.validateRoadmap(tmp)
+			assert.strictEqual(validation.validation.now_item_count, 1)
+			const brief = await sessionBrief(tmp, true)
+			assert.strictEqual(brief?.now_item_count, 1)
+			assert.strictEqual(brief?.agent_next_call, "")
+			assert.strictEqual(brief?.first_call, "")
+			assert.strictEqual(brief?.kanban_complete_allowed, true)
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true })
+		}
+	})
+
 	it("rejects ROADMAP writes outside workspace root", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-int-"))
 		try {
@@ -22,7 +47,8 @@ describe("RoadmapIntegration", () => {
 		}
 	})
 
-	it("blocks completion when validation_pending", async () => {
+	it("blocks completion on invalid schema when explicitly required", async () => {
+		setRoadmapConfigOverride({ block_kanban_on_invalid_schema: true })
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-int-"))
 		try {
 			await fs.mkdir(path.join(tmp, ".dietcode"), { recursive: true })

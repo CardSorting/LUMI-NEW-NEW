@@ -8,9 +8,8 @@ import * as chromeLauncher from "chrome-launcher"
 import os from "os"
 import pWaitFor from "p-wait-for"
 import * as path from "path"
-// @ts-expect-error
-import type { LoggerMessage, ScreenshotOptions } from "puppeteer-core"
-import { Browser, connect, launch, Page, TimeoutError } from "puppeteer-core"
+import type { ConsoleMessage, ScreenshotOptions } from "puppeteer-core"
+import { Browser, connect, launch, Page } from "puppeteer-core"
 import { StateManager } from "@/core/storage/StateManager"
 import { telemetryService } from "@/services/telemetry"
 import { Logger } from "@/shared/services/Logger"
@@ -52,6 +51,10 @@ export class BrowserSession {
 
 	constructor(stateManager: StateManager, useWebp = true) {
 		this.stateManager = stateManager
+		this.useWebp = useWebp
+	}
+
+	setScreenshotFormat(useWebp: boolean) {
 		this.useWebp = useWebp
 	}
 
@@ -342,11 +345,17 @@ export class BrowserSession {
 			// Send telemetry for browser tool end if we have a task ID and session was started
 			if (this.ulid && this.sessionStartTime > 0) {
 				const sessionDuration = Date.now() - this.sessionStartTime
-				telemetryService.captureBrowserToolEnd(this.ulid, {
-					actionCount: this.browserActions.length,
-					duration: sessionDuration,
-					actions: this.browserActions,
-				})
+				try {
+					void Promise.resolve(
+						telemetryService.captureBrowserToolEnd(this.ulid, {
+							actionCount: this.browserActions.length,
+							duration: sessionDuration,
+							actions: this.browserActions,
+						}),
+					).catch((error) => Logger.warn("[BrowserSession] Telemetry unavailable during cleanup:", error))
+				} catch (error) {
+					Logger.warn("[BrowserSession] Telemetry unavailable during cleanup:", error)
+				}
 			}
 
 			if (this.isConnectedToRemote && this.browser) {
@@ -376,118 +385,93 @@ export class BrowserSession {
 	}
 
 	async doAction(action: (page: Page) => Promise<void>): Promise<BrowserActionResult> {
-		if (!this.page) {
-			throw new Error(
-				"Browser is not launched. This may occur if the browser was automatically closed by a non-`browser_action` tool.",
-			)
+		const page = this.page
+		if (!page || page.isClosed()) {
+			throw new Error("Browser is not launched. Use browser_action with action=launch and a URL to start a session.")
 		}
 
 		const logs: string[] = []
 		let lastLogTs = Date.now()
-
-		const LoggerListener = (msg: LoggerMessage) => {
-			if (msg.type() === "log") {
-				logs.push(msg.text())
-			} else {
-				logs.push(`[${msg.type()}] ${msg.text()}`)
-			}
+		const consoleListener = (msg: ConsoleMessage) => {
+			logs.push(msg.type() === "log" ? msg.text() : `[${msg.type()}] ${msg.text()}`)
 			lastLogTs = Date.now()
 		}
-
-		const errorListener = (err: Error) => {
-			logs.push(`[Page Error] ${err.toString()}`)
+		const errorListener = (err: unknown) => {
+			logs.push(`[Page Error] ${String(err)}`)
 			lastLogTs = Date.now()
 		}
-
-		// Add the listeners
-		this.page.on("Logger", LoggerListener)
-		this.page.on("pageerror", errorListener)
+		page.on("console", consoleListener)
+		page.on("pageerror", errorListener)
 
 		try {
-			await action(this.page)
-		} catch (err) {
-			const errorMessage = err instanceof Error ? err.message : String(err)
+			let actionError: string | undefined
+			try {
+				await action(page)
+			} catch (error) {
+				actionError = error instanceof Error ? error.message : String(error)
+				logs.push(`[Action Error] ${actionError}`)
+			}
 
-			if (!(err instanceof TimeoutError)) {
-				logs.push(`[Error] ${errorMessage}`)
+			await pWaitFor(() => page.isClosed() || Date.now() - lastLogTs >= 500, {
+				timeout: 3_000,
+				interval: 100,
+			}).catch(() => {})
 
-				// Capture error telemetry
-				if (this.ulid) {
-					telemetryService.captureBrowserError(this.ulid, "browser_action_error", errorMessage, {
-						isRemote: this.isConnectedToRemote,
-						action: this.browserActions[this.browserActions.length - 1],
-					})
+			// Screenshot failure is an observation failure. Never invite replay of a click or typing that already happened.
+			let screenshot: string | undefined
+			const formats = this.useWebp ? (["webp", "png"] as const) : (["png"] as const)
+			for (const type of formats) {
+				try {
+					const options: ScreenshotOptions = { encoding: "base64", type }
+					const data = await page.screenshot(options)
+					if (data) {
+						screenshot = `data:image/${type};base64,${data}`
+						break
+					}
+				} catch (error) {
+					Logger.warn("[BrowserSession] Screenshot unavailable:", error)
 				}
 			}
-		}
+			if (!screenshot)
+				logs.push(
+					"[Observation] Screenshot unavailable. Use inspect to capture the current page before another interaction.",
+				)
 
-		// Wait for Logger inactivity, with a timeout
-		await pWaitFor(() => Date.now() - lastLogTs >= 500, {
-			timeout: 3_000,
-			interval: 100,
-		}).catch(() => {})
-
-		const options: ScreenshotOptions = {
-			encoding: "base64",
-
-			// clip: {
-			// 	x: 0,
-			// 	y: 0,
-			// 	width: 900,
-			// 	height: 600,
-			// },
-		}
-
-		const screenshotType = this.useWebp ? "webp" : "png"
-		let screenshotBase64 = await this.page.screenshot({
-			...options,
-			type: screenshotType,
-		})
-		let screenshot = `data:image/${screenshotType};base64,${screenshotBase64}`
-
-		if (!screenshotBase64) {
-			// choosing to try screenshot again, regardless of the initial type
-			Logger.info(`${screenshotType} screenshot failed, trying png`)
-			screenshotBase64 = await this.page.screenshot({
-				...options,
-				type: "png",
-			})
-			screenshot = `data:image/png;base64,${screenshotBase64}`
-		}
-
-		if (!screenshotBase64) {
-			// Capture error telemetry
-			if (this.ulid) {
-				telemetryService.captureBrowserError(this.ulid, "screenshot_error", "Failed to take screenshot", {
-					isRemote: this.isConnectedToRemote,
-					action: this.browserActions[this.browserActions.length - 1],
-				})
+			return {
+				screenshot,
+				logs: logs.join("\n"),
+				error: actionError,
+				currentUrl: page.url(),
+				currentMousePosition: this.currentMousePosition,
 			}
-			throw new Error("Failed to take screenshot.")
+		} finally {
+			page.off("console", consoleListener)
+			page.off("pageerror", errorListener)
 		}
+	}
 
-		// this.page.removeAllListeners() <- causes the page to crash!
-		this.page.off("Logger", LoggerListener)
-		this.page.off("pageerror", errorListener)
+	async inspect(): Promise<BrowserActionResult> {
+		return this.doAction(async () => {})
+	}
 
-		return {
-			screenshot,
-			logs: logs.join("\n"),
-			currentUrl: this.page.url(),
-			currentMousePosition: this.currentMousePosition,
-		}
+	async refresh(): Promise<BrowserActionResult> {
+		this.browserActions.push("refresh")
+		return this.doAction(async (page) => {
+			await page.reload({ timeout: 7_000, waitUntil: "domcontentloaded" })
+			await this.waitTillHTMLStable(page)
+		})
 	}
 
 	async navigateToUrl(url: string): Promise<BrowserActionResult> {
 		this.browserActions.push(`navigate: url`)
 
 		return this.doAction(async (page) => {
-			// networkidle2 isn't good enough since page may take some time to load. we can assume locally running dev sites will reach networkidle0 in a reasonable amount of time
+			// Development servers can keep requests open. DOM readiness plus a bounded
+			// stability check avoids waiting for the network to become idle.
 			await page.goto(url, {
 				timeout: 7_000,
-				waitUntil: ["domcontentloaded", "networkidle2"],
+				waitUntil: "domcontentloaded",
 			})
-			// await page.goto(url, { timeout: 10_000, waitUntil: "load" })
 			await this.waitTillHTMLStable(page) // in case the page is loading more resources
 		})
 	}
@@ -537,26 +521,16 @@ export class BrowserSession {
 			}
 			page.on("request", requestListener)
 
-			// Perform the click
-			await page.mouse.click(x, y)
-			this.currentMousePosition = coordinate
-
-			// Small delay to check if click triggered any network activity
-			await setTimeoutPromise(100)
-
-			if (hasNetworkActivity) {
-				// If we detected network activity, wait for navigation/loading
-				await page
-					.waitForNavigation({
-						waitUntil: ["domcontentloaded", "networkidle2"],
-						timeout: 7000,
-					})
-					.catch(() => {})
-				await this.waitTillHTMLStable(page)
+			try {
+				await page.mouse.click(x, y)
+				this.currentMousePosition = coordinate
+				await setTimeoutPromise(100)
+				// A click need not navigate (fetch, analytics, hot reload). Wait for stability without
+				// registering a navigation wait after the event may already have happened.
+				if (hasNetworkActivity) await this.waitTillHTMLStable(page)
+			} finally {
+				page.off("request", requestListener)
 			}
-
-			// Clean up listener
-			page.off("request", requestListener)
 		})
 	}
 

@@ -1,153 +1,162 @@
 import { Logger } from "@/shared/services/Logger"
 
-/**
- * ExecuteOptions defines the reliability parameters for a tool action.
- */
 export interface ExecuteOptions {
+	/** Optional caller deadline. Tools otherwise own their operation timeout. */
 	timeoutMs?: number
+	/** Total attempts, including the first. Repetition requires idempotent: true. */
 	maxRetries?: number
+	idempotent?: boolean
 	backoffMs?: number
 	concurrencyGroup?: string
+	signal?: AbortSignal
+	/** Let an already-started atomic write settle before its caller can revert/reset shared state. */
+	settleOnAbort?: boolean
 }
 
-/**
- * ActionExecutor manages the lifecycle of tool actions.
- * It provides concurrency limiting, retries, timeout protection, and a circuit breaker.
- */
+interface Waiter {
+	start: () => void
+}
+interface Lane {
+	active: number
+	queue: Waiter[]
+}
+
+/** Task-scoped FIFO scheduling. Mutating actions execute once unless explicitly safe to repeat. */
 export class ActionExecutor {
-	private static activeOperations = new Map<string, number>()
-	private static queues = new Map<string, (() => void)[]>()
+	private lanes = new Map<string, Lane>()
+	private readonly concurrency = 5
 
-	// Parameterized constants for production hardening
-	private static CONFIG = {
-		MAX_CONCURRENCY: 5,
-		CIRCUIT_OPEN_THRESHOLD: 20,
-		CIRCUIT_RESET_MS: 30000,
-		DEFAULT_TIMEOUT: 60000, // 60 seconds
-	}
-
-	private static failuresInWindow = 0
-	private static lastFailureTime = 0
-
-	/**
-	 * Execute an async task with retries and timeout protection.
-	 */
-	async execute<T>(taskId: string, operation: () => Promise<T>, options: ExecuteOptions = {}): Promise<T> {
-		const {
-			timeoutMs = ActionExecutor.CONFIG.DEFAULT_TIMEOUT,
-			maxRetries = 3,
-			backoffMs = 500,
-			concurrencyGroup = "default",
-		} = options
-
-		let attempts = 0
-
-		while (attempts < maxRetries) {
-			if (this.isCircuitOpen()) {
-				throw new Error(`[ActionExecutor] Circuit is OPEN. Task ${taskId} rejected to prevent cascading failure.`)
-			}
-
+	async execute<T>(taskId: string, operation: (signal: AbortSignal) => Promise<T>, options: ExecuteOptions = {}): Promise<T> {
+		const requestedAttempts = options.maxRetries ?? 3
+		const attempts =
+			options.idempotent && Number.isFinite(requestedAttempts) ? Math.max(1, Math.min(5, Math.floor(requestedAttempts))) : 1
+		const lane = JSON.stringify([taskId, options.concurrencyGroup ?? "default"])
+		for (let attempt = 1; ; attempt++) {
+			options.signal?.throwIfAborted()
+			const release = await this.acquire(lane, options.signal)
+			const controller = new AbortController()
+			// Retain the slot until the actual work settles, even if its caller stops waiting.
+			const work = Promise.resolve()
+				.then(() => {
+					options.signal?.throwIfAborted()
+					controller.signal.throwIfAborted()
+					return operation(controller.signal)
+				})
+				.finally(release)
 			try {
-				const result = await this.withConcurrency(concurrencyGroup, () =>
-					this.withTimeout(taskId, operation(), timeoutMs),
-				)
-				this.onSuccess()
-				return result
-			} catch (err: any) {
-				attempts++
-				const isRetryable = this.isRetryableError(err)
-
-				if (attempts >= maxRetries || !isRetryable) {
-					this.onFailure()
-					Logger.error(`[ActionExecutor] Task ${taskId} failed permanently after ${attempts} attempts:`, err)
-					throw err
-				}
-
-				const delay = backoffMs * 2 ** (attempts - 1)
-				Logger.warn(
-					`[ActionExecutor] Task ${taskId} retrying (${attempts}/${maxRetries}) because of retryable error: ${
-						err.message || err
-					}. Backoff: ${delay}ms`,
-				)
-				await new Promise((r) => setTimeout(r, delay))
-			}
-		}
-		throw new Error(`[ActionExecutor] Task ${taskId} failed after max retries`)
-	}
-
-	private async withConcurrency<T>(group: string, op: () => Promise<T>): Promise<T> {
-		const active = ActionExecutor.activeOperations.get(group) || 0
-
-		if (active >= ActionExecutor.CONFIG.MAX_CONCURRENCY) {
-			// Wait for a slot in the queue
-			await new Promise<void>((resolve) => {
-				const queue = ActionExecutor.queues.get(group) || []
-				queue.push(resolve)
-				ActionExecutor.queues.set(group, queue)
-			})
-		}
-
-		ActionExecutor.activeOperations.set(group, (ActionExecutor.activeOperations.get(group) || 0) + 1)
-
-		try {
-			return await op()
-		} finally {
-			const remaining = (ActionExecutor.activeOperations.get(group) || 1) - 1
-			ActionExecutor.activeOperations.set(group, remaining)
-
-			// Notify the next in queue if any
-			const queue = ActionExecutor.queues.get(group)
-			if (queue && queue.length > 0) {
-				const next = queue.shift()!
-				if (queue.length === 0) {
-					ActionExecutor.queues.delete(group)
-				}
-				next()
+				return await this.observe(work, controller, options)
+			} catch (error) {
+				if (attempt >= attempts || options.signal?.aborted || controller.signal.aborted || !this.isRetryable(error))
+					throw error
+				const base = options.backoffMs ?? 500
+				const delay = Math.min(30_000, (Number.isFinite(base) ? Math.max(0, base) : 500) * 2 ** (attempt - 1))
+				Logger.warn(`[ActionExecutor] Retrying idempotent action for ${taskId} (${attempt + 1}/${attempts})`)
+				await new Promise<void>((resolve, reject) => {
+					const finish = () => {
+						options.signal?.removeEventListener("abort", cancel)
+						resolve()
+					}
+					const timer = setTimeout(finish, delay)
+					const cancel = () => {
+						clearTimeout(timer)
+						options.signal?.removeEventListener("abort", cancel)
+						reject(options.signal?.reason)
+					}
+					options.signal?.addEventListener("abort", cancel, { once: true })
+					if (options.signal?.aborted) cancel()
+				})
 			}
 		}
 	}
 
-	private async withTimeout<T>(id: string, promise: Promise<T>, ms: number): Promise<T> {
-		const timeout = new Promise<never>((_, reject) => {
-			setTimeout(() => reject(new Error(`[ActionExecutor] Task ${id} timed out after ${ms}ms`)), ms)
+	private acquire(key: string, signal?: AbortSignal): Promise<() => void> {
+		signal?.throwIfAborted()
+		let lane = this.lanes.get(key)
+		if (!lane) {
+			lane = { active: 0, queue: [] }
+			this.lanes.set(key, lane)
+		}
+		const current = lane
+		return new Promise((resolve, reject) => {
+			const waiter: Waiter = {
+				start: () => {
+					signal?.removeEventListener("abort", cancel)
+					let released = false
+					resolve(() => {
+						if (released) return
+						released = true
+						const next = current.queue.shift()
+						// Transfer the occupied slot directly; a new arrival cannot jump the queue.
+						if (next) next.start()
+						else if (--current.active === 0) this.lanes.delete(key)
+					})
+				},
+			}
+			const cancel = () => {
+				const index = current.queue.indexOf(waiter)
+				if (index !== -1) current.queue.splice(index, 1)
+				signal?.removeEventListener("abort", cancel)
+				reject(signal?.reason)
+			}
+			if (current.active < this.concurrency) {
+				current.active++
+				waiter.start()
+			} else {
+				current.queue.push(waiter)
+				signal?.addEventListener("abort", cancel, { once: true })
+			}
 		})
-		return Promise.race([promise, timeout])
 	}
 
-	private isRetryableError(err: any): boolean {
-		const message = (err.message || String(err)).toUpperCase()
-		return (
-			message.includes("ABORTED") ||
-			message.includes("CONTENTION") ||
-			message.includes("DEADLINE EXCEEDED") ||
-			message.includes("SQLITE_BUSY") ||
-			message.includes("SQLITE_LOCKED") ||
-			message.includes("TIMEOUT") ||
-			message.includes("RATE_LIMIT") ||
-			message.includes("UNAVAILABLE")
-		)
-	}
-
-	private isCircuitOpen(): boolean {
-		if (ActionExecutor.failuresInWindow >= ActionExecutor.CONFIG.CIRCUIT_OPEN_THRESHOLD) {
-			if (Date.now() - ActionExecutor.lastFailureTime < ActionExecutor.CONFIG.CIRCUIT_RESET_MS) {
-				return true
+	private observe<T>(work: Promise<T>, controller: AbortController, options: ExecuteOptions): Promise<T> {
+		return new Promise((resolve, reject) => {
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const cleanup = () => {
+				clearTimeout(timer)
+				options.signal?.removeEventListener("abort", cancel)
 			}
-			// Reset after window
-			ActionExecutor.failuresInWindow = 0
-		}
-		return false
+			const stop = (reason: unknown) => {
+				cleanup()
+				controller.abort(reason)
+				reject(reason)
+			}
+			const cancel = () => {
+				if (options.settleOnAbort) {
+					cleanup()
+					controller.abort(options.signal?.reason)
+				} else stop(options.signal?.reason)
+			}
+			options.signal?.addEventListener("abort", cancel, { once: true })
+			if (options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+				timer = setTimeout(
+					() =>
+						stop(
+							new Error(
+								"Action deadline exceeded. The operation may still be running; inspect its result before retrying.",
+							),
+						),
+					options.timeoutMs,
+				)
+			}
+			work.then(
+				(value) => {
+					cleanup()
+					resolve(value)
+				},
+				(error) => {
+					cleanup()
+					reject(error)
+				},
+			)
+			if (options.signal?.aborted) cancel()
+		})
 	}
 
-	private onSuccess() {
-		if (ActionExecutor.failuresInWindow > 0) {
-			ActionExecutor.failuresInWindow = Math.max(0, ActionExecutor.failuresInWindow - 1)
-		}
-	}
-
-	private onFailure() {
-		ActionExecutor.failuresInWindow++
-		ActionExecutor.lastFailureTime = Date.now()
+	private isRetryable(error: unknown): boolean {
+		const message = (error instanceof Error ? error.message : String(error)).toUpperCase()
+		// Timeout/cancellation leaves the outcome unknown, even for nominally idempotent work.
+		if (/ABORT|CANCEL|TIME.?OUT|TIMED OUT|DEADLINE/.test(message)) return false
+		return /CONTENTION|SQLITE_BUSY|SQLITE_LOCKED|RATE_LIMIT|UNAVAILABLE/.test(message)
 	}
 }
 

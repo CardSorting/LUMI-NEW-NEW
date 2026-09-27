@@ -249,6 +249,6 @@ describe("Subagent Swarm Inheritance", () => {
 
 		// biome-ignore lint/suspicious/noExplicitAny: Accessing content from tool result for verification
 		const content = typeof result === "string" ? result : (result as any).content
-		assert.ok(content.includes("Swarm Recursion Limit Reached"), `Expected recursion limit message, but got: ${content}`)
+		assert.ok(content.includes("Helper depth limit reached"), `Expected recursion limit message, but got: ${content}`)
 	})
 })

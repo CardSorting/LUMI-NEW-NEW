@@ -9,6 +9,22 @@ import {
 } from "../RoadmapOperator"
 
 describe("RoadmapOperator", () => {
+	it("preserves a terminal recommendation instead of scheduling another checkpoint", () => {
+		const recommendation = recommendNextAction({ roadmap_exists: true, schema_valid: true, stale: false })
+		assert.strictEqual(recommendation.command, "")
+		const wrapped = wrapClarityEnvelope(
+			{
+				action: "guide",
+				agent_next_call: "",
+				recommended_next_action: recommendation,
+				roadmap_gate: { roadmap_present: true, schema_valid: true, kanban_complete_allowed: true },
+			},
+			{ agent_next_call: "roadmap(action='checkpoint')" },
+		)
+		assert.strictEqual(wrapped.agent_next_call, "")
+		assert.strictEqual((wrapped._roadmap_operator_hints as Record<string, unknown>).next_action, "")
+	})
+
 	describe("isBootstrapIncomplete", () => {
 		it("returns false when roadmap missing", () => {
 			assert.strictEqual(isBootstrapIncomplete({ roadmap_exists: false, bootstrap_complete: false }), false)
@@ -96,11 +112,11 @@ describe("RoadmapOperator", () => {
 })
 
 describe("RoadmapConfig defaults", () => {
-	it("enables production hardening flags by default", () => {
+	it("keeps roadmap maintenance advisory and write safeguards enabled", () => {
 		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.progress_enabled, true)
 		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.auto_install_skills, true)
-		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.block_kanban_on_bootstrap_incomplete, true)
-		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.fail_closed_completion_gates, true)
+		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.block_kanban_on_bootstrap_incomplete, false)
+		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.fail_closed_completion_gates, false)
 		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.session_brief_cache_ttl_seconds > 0, true)
 	})
 })

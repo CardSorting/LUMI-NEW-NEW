@@ -3,14 +3,21 @@ import * as coreApi from "@core/api"
 import * as skills from "@core/context/instructions/user-instructions/skills"
 import { PromptRegistry } from "@core/prompts/system-prompt"
 import type { TaskConfig } from "@core/task/tools/types/TaskConfig"
+import { buildCompletionGateOptionsFromSettings } from "@shared/audit/auditGateOptions"
+import * as gatePolicy from "@shared/audit/auditGatePolicyLoader"
+import { MAX_COMPLETION_GATE_BLOCK_COUNT } from "@shared/audit/gatePolicy"
 import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
+import { formatResponse } from "@/core/prompts/responses"
 import { HostProvider } from "@/hosts/host-provider"
+import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { setRoadmapConfigOverride } from "@/services/roadmap/RoadmapConfig"
 import { ApiFormat } from "@/shared/proto/dietcode/models"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
 import { TaskState } from "../../../TaskState"
+import * as completionGates from "../../subagentCompletionGates"
+import { ToolExecutorCoordinator } from "../../ToolExecutorCoordinator"
 import { SubagentBuilder } from "../SubagentBuilder"
 import { SubagentRunner } from "../SubagentRunner"
 
@@ -224,13 +231,277 @@ describe("SubagentRunner", () => {
 		initializeHostProvider()
 
 		const config = createTaskConfig(true)
+		config.focusChainSettings = { ...config.focusChainSettings, enabled: true }
+		config.taskState.currentFocusChainChecklist = "- [ ] Finish unrelated parent work"
+		config.taskState.completionGateBlockCount = 10
+		config.auditCompletionGateEnabled = true
 		const builder = new SubagentBuilder(config, "subagent")
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
+		assert.equal(config.taskState.completionGateBlockCount, 10)
+		assert.equal(config.taskState.completionAttemptCount ?? 0, 0)
+		assert.equal(config.taskState.currentFocusChainChecklist, "- [ ] Finish unrelated parent work")
+	})
+
+	for (const checkFailure of [false, true]) {
+		it(
+			checkFailure
+				? "returns a failed handoff when completion checks throw"
+				: "hands back stalled completion attempts without consuming parent attempts",
+			async () => {
+				const createMessage = sinon.stub().callsFake(async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: "helper-complete",
+								name: DietCodeDefaultTool.ATTEMPT,
+								arguments: JSON.stringify({
+									result: checkFailure ? VALID_SUBAGENT_COMPLETION_RESULT : "x".repeat(7000),
+								}),
+							},
+						},
+					}
+				})
+				const promptRegistry = PromptRegistry.getInstance()
+				sinon.stub(promptRegistry, "get").callsFake(async () => {
+					promptRegistry.nativeTools = undefined
+					return "system prompt"
+				})
+				sinon.stub(skills, "discoverSkills").resolves([])
+				sinon.stub(skills, "getAvailableSkills").returns([])
+				if (checkFailure)
+					sinon.stub(completionGates, "validateSubagentCompletionGates").rejects(new Error("check unavailable"))
+				stubApiHandler(createMessage)
+				initializeHostProvider()
+				const config = createTaskConfig(true)
+				const result = await new SubagentRunner(config, new SubagentBuilder(config)).run("Review schema", () => {})
+				assert.equal(result.status, "failed", result.error)
+				assert.ok(createMessage.callCount <= MAX_COMPLETION_GATE_BLOCK_COUNT)
+				if (checkFailure) assert.equal(createMessage.callCount, 1)
+				assert.equal(config.taskState.completionGateBlockCount ?? 0, 0)
+				assert.equal(config.taskState.completionAttemptCount ?? 0, 0)
+			},
+		)
+	}
+
+	function prepareProgressRun(createMessage: sinon.SinonStub, tool = DietCodeDefaultTool.LIST_FILES) {
+		const promptRegistry = PromptRegistry.getInstance()
+		sinon.stub(promptRegistry, "get").callsFake(async () => {
+			promptRegistry.nativeTools = [{ name: tool } as any]
+			return "system prompt"
+		})
+		sinon.stub(SubagentBuilder.prototype, "buildNativeTools").returns([{ name: tool }] as any)
+		sinon.stub(skills, "discoverSkills").resolves([])
+		sinon.stub(skills, "getAvailableSkills").returns([])
+		stubApiHandler(createMessage)
+		initializeHostProvider()
+		const config = createTaskConfig(true)
+		const execute = sinon.stub().resolves("observed content")
+		sinon.stub(ToolExecutorCoordinator.prototype, "getHandler").returns({ execute, getDescription: () => tool } as never)
+		const builder = new SubagentBuilder(config)
+		builder.setAllowedTools([tool])
+		return { config, execute, runner: new SubagentRunner(config, builder) }
+	}
+	function callChunk(id: number, name: DietCodeDefaultTool, params: Record<string, unknown>) {
+		return { type: "tool_calls", tool_call: { function: { id: `call-${id}`, name, arguments: JSON.stringify(params) } } }
+	}
+	it("marks multimodal MCP failures as errors and keeps them from renewing the helper progress window", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* (_prompt, conversation) {
+			if (turns > 0) assert.equal(conversation.at(-1).content[0].is_error, true)
+			if (++turns > 8) throw new Error("Failure results must not manufacture progress")
+			yield callChunk(turns, DietCodeDefaultTool.MCP_USE, {
+				server_name: "docs",
+				tool_name: "run",
+				arguments: JSON.stringify({ attempt: turns }),
+			})
+		})
+		const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.MCP_USE)
+		execute.resolves(
+			formatResponse.toolResult(formatResponse.toolError("remote conflict"), ["data:image/png;base64,aW1hZ2U="]),
+		)
+		const result = await runner.run("Use the remote result", () => {})
+		assert.equal(result.status, "failed")
+		assert.match(result.error ?? "", /no new tool progress/)
+		assert.equal(execute.callCount, 8)
+	})
+	for (const observer of ["throws", "rejects", "hangs"] as const) {
+		it(`preserves successful work when its progress observer ${observer}`, async () => {
+			let turns = 0
+			const createMessage = sinon.stub().callsFake(async function* () {
+				yield ++turns === 1
+					? callChunk(turns, DietCodeDefaultTool.FILE_NEW, { path: "saved.ts", content: "saved" })
+					: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			})
+			const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+			const result = await runner.run("Create saved.ts", (update) => {
+				if (update.stats) update.stats.toolCalls = 999
+				if (update.filesModified) update.filesModified.length = 0
+				if (observer === "throws") throw new Error("observer failed")
+				if (observer === "rejects") return Promise.reject(new Error("observer failed"))
+				return new Promise<void>(() => {})
+			})
+			assert.equal(result.status, "completed", result.error)
+			assert.equal(result.stats.toolCalls, 2)
+			assert.deepEqual(result.filesModified, ["saved.ts"])
+			sinon.assert.calledOnce(execute)
+		})
+	}
+	it("returns completion without waiting for finding storage or writing the same finding twice", async () => {
+		const resultText = `${VALID_SUBAGENT_COMPLETION_RESULT} CRITICAL: verified finding for the parent.`
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield callChunk(1, DietCodeDefaultTool.ATTEMPT, { result: resultText })
+		})
+		const { config, runner } = prepareProgressRun(createMessage, DietCodeDefaultTool.LIST_FILES)
+		;(config as any).getSessionStreamId = () => "parent-stream"
+		sinon.stub(completionGates, "validateSubagentCompletionGates").resolves(null)
+		const store = sinon.stub(orchestrator, "storeMemory").returns(new Promise(() => {}))
+		const result = await runner.run("Return findings", () => {})
+		assert.equal(result.status, "completed", result.error)
+		assert.equal(result.result, resultText)
+		sinon.assert.calledOnce(store)
+	})
+	it("starts from the assignment when optional parent context and workspace metadata never settle", async () => {
+		const clock = sinon.useFakeTimers()
+		const createMessage = sinon.stub().callsFake(async function* (_prompt, conversation) {
+			assert.match(JSON.stringify(conversation[0]), /Return the assigned finding/)
+			assert.match(JSON.stringify(conversation[0]), /Workspace Configuration/)
+			assert.match(JSON.stringify(conversation[0]), /tmp/)
+			yield callChunk(1, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { config, runner } = prepareProgressRun(createMessage, DietCodeDefaultTool.LIST_FILES)
+		sinon.stub(gatePolicy, "resolveCompletionGateOptions").resolves(buildCompletionGateOptionsFromSettings(config))
+		sinon.stub(completionGates, "validateSubagentCompletionGates").resolves(null)
+		;(config as any).getSessionStreamId = () => "parent-stream"
+		const parentContext = sinon.stub(orchestrator, "getCompressedContext").returns(new Promise(() => {}))
+		const metadata = sinon.stub().returns(new Promise(() => {}))
+		config.workspaceManager = { buildWorkspacesJson: metadata } as any
+		const running = runner.run("Return the assigned finding", () => {})
+		await clock.tickAsync(2_000)
+		assert.equal((await running).status, "completed")
+		sinon.assert.calledOnce(parentContext)
+		sinon.assert.calledOnce(metadata)
+		sinon.assert.calledOnce(createMessage)
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("ignores unavailable parent tracking and does not let late context alter an already started helper", async () => {
+		const clock = sinon.useFakeTimers()
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield callChunk(1, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { config, runner } = prepareProgressRun(createMessage, DietCodeDefaultTool.LIST_FILES)
+		sinon.stub(gatePolicy, "resolveCompletionGateOptions").resolves(buildCompletionGateOptionsFromSettings(config))
+		sinon.stub(completionGates, "validateSubagentCompletionGates").resolves(null)
+		let finishContext!: (context: string) => void
+		;(config as any).getSessionStreamId = () => "parent-stream"
+		sinon.stub(orchestrator, "getCompressedContext").returns(
+			new Promise((resolve) => {
+				finishContext = resolve
+			}),
+		)
+		const setContext = sinon.spy(SubagentBuilder.prototype, "setParentStreamContext")
+		const running = runner.run("Return findings", () => {})
+		await clock.tickAsync(1_000)
+		assert.equal((await running).status, "completed")
+		const calls = setContext.callCount
+		finishContext("Late context must not change the completed assignment")
+		await clock.tickAsync(0)
+		assert.equal(setContext.callCount, calls)
+		assert.doesNotMatch(String(createMessage.firstCall.args[0]), /Late context/)
+
+		;(config as any).getSessionStreamId = () => {
+			throw new Error("tracking unavailable")
+		}
+		const second = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
+		assert.equal((await second.run("Return findings", () => {})).status, "completed")
+	})
+	it("returns edited paths when completion verification becomes unavailable", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield ++turns === 1
+				? callChunk(turns, DietCodeDefaultTool.FILE_NEW, { path: "saved.ts", content: "saved" })
+				: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { runner } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+		sinon.stub(completionGates, "validateSubagentCompletionGates").rejects(new Error("check unavailable"))
+		const result = await runner.run("Create saved.ts", () => {})
+		assert.equal(result.status, "failed")
+		assert.deepEqual(result.filesModified, ["saved.ts"])
+		assert.equal(result.stats.toolCalls, 1)
+	})
+	it("finishes productive work after more than 50 calls and 25 turns without provider usage chunks", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* () {
+			turns++
+			yield turns <= 55
+				? callChunk(turns, DietCodeDefaultTool.LIST_FILES, { path: `folder-${turns}` })
+				: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { runner, execute } = prepareProgressRun(createMessage)
+		const result = await runner.run("Explore the requested folders", () => {})
+		assert.equal(result.status, "completed", result.error)
+		assert.equal(execute.callCount, 55)
+		assert.equal(turns, 56)
+	})
+	it("hands back unchanged reads even when the observer adds fresh guidance", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield callChunk(++turns, DietCodeDefaultTool.FILE_READ, { path: "a.ts", task_progress: `iteration ${turns}` })
+		})
+		const { config, runner } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_READ)
+		config.universalGuard = {
+			guardPreExecution: sinon.stub().resolves({ success: true }),
+			guardPostExecution: sinon.stub().resolves({ success: true }),
+			onRead: sinon.stub().callsFake(async (_path, result) => `${result}\nRead count: ${turns}`),
+		} as never
+		const result = await runner.run("Inspect a.ts", () => {})
+		assert.equal(result.status, "failed")
+		assert.match(result.error!, /no new tool progress/)
+		assert.equal(turns, 9)
+		assert.deepEqual(result.filesViewed, ["a.ts"])
+	})
+	for (const denied of [false, true]) {
+		it(
+			denied ? "does not report denied writes as modified files" : "preserves successful writes when observation fails",
+			async () => {
+				let turns = 0
+				const createMessage = sinon.stub().callsFake(async function* (_prompt, conversation) {
+					turns++
+					if (turns === 2) {
+						assert.match(JSON.stringify(conversation.at(-1)), denied ? /denied this operation/ : /observed content/)
+						assert.doesNotMatch(JSON.stringify(conversation.at(-1)), /observer unavailable/)
+					}
+					yield turns === 1
+						? callChunk(turns, DietCodeDefaultTool.FILE_NEW, { path: "a.ts", content: "new source" })
+						: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+				})
+				const { config, runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+				if (denied) execute.resolves(formatResponse.toolDenied())
+				config.universalGuard = {
+					guardPreExecution: sinon.stub().resolves({ success: true }),
+					guardPostExecution: sinon.stub().rejects(new Error("observer unavailable")),
+				} as never
+				const result = await runner.run("Create a.ts", () => {})
+				assert.equal(result.status, "completed", result.error)
+				assert.deepEqual(result.filesModified, denied ? [] : ["a.ts"])
+				sinon.assert.calledOnce(execute)
+			},
+		)
+	}
+	it("does not turn an earlier progress sentence into success after empty responses", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {})
+		createMessage.onFirstCall().callsFake(async function* () {
+			yield { type: "text", text: "I will inspect the files." }
+		})
+		const { runner } = prepareProgressRun(createMessage)
+		const result = await runner.run("Inspect the files", () => {})
+		assert.equal(result.status, "failed")
+		assert.equal(createMessage.callCount, 4)
 	})
 
 	it("passes prior request token totals into the next-turn compaction check", async () => {
@@ -289,7 +560,7 @@ describe("SubagentRunner", () => {
 
 		const result = await runner.run("List files", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
 		assert.equal(shouldCompactStub.callCount, 1)
@@ -349,7 +620,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
 	})
@@ -401,7 +672,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
 	})
@@ -444,6 +715,58 @@ describe("SubagentRunner", () => {
 
 		assert.equal(result.status, "failed")
 		assert.equal(createMessage.callCount, 3)
+	})
+
+	it("does not replay a request after text or tool-call output", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield { type: "text", text: "Working on the requested fix." }
+			throw new Error("connection reset after output")
+		})
+		const promptRegistry = PromptRegistry.getInstance()
+		const prompt = sinon.stub(promptRegistry, "get").callsFake(async () => {
+			promptRegistry.nativeTools = undefined
+			return "system prompt"
+		})
+		sinon.stub(skills, "discoverSkills").resolves([])
+		sinon.stub(skills, "getAvailableSkills").returns([])
+		stubApiHandler(createMessage)
+		initializeHostProvider()
+		const config = createTaskConfig(true)
+		config.yoloModeToggled = true
+		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
+		const result = await runner.run("Apply the fix", () => {})
+		assert.equal(result.status, "failed")
+		assert.equal(createMessage.callCount, 1)
+		assert.equal(prompt.firstCall.args[0].yoloModeToggled, true)
+		sinon.assert.notCalled(config.callbacks.executeCommandTool as sinon.SinonStub)
+	})
+
+	it("does not execute native arguments truncated at a normal end of stream", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield {
+				type: "tool_calls",
+				tool_call: {
+					call_id: "partial",
+					function: { id: "partial", name: "execute_command", arguments: '{"command":"touch partial' },
+				},
+			}
+		})
+		const promptRegistry = PromptRegistry.getInstance()
+		sinon.stub(promptRegistry, "get").callsFake(async () => {
+			promptRegistry.nativeTools = undefined
+			return "system prompt"
+		})
+		sinon.stub(skills, "discoverSkills").resolves([])
+		sinon.stub(skills, "getAvailableSkills").returns([])
+		stubApiHandler(createMessage)
+		initializeHostProvider()
+		const config = createTaskConfig(true)
+		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
+		const result = await runner.run("Apply the fix", () => {})
+		assert.equal(result.status, "failed")
+		assert.match(result.error ?? "", /Incomplete arguments/)
+		assert.equal(createMessage.callCount, 1)
+		sinon.assert.notCalled(config.callbacks.executeCommandTool as sinon.SinonStub)
 	})
 
 	it("fails context window errors", async () => {
@@ -504,7 +827,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(createMessage.callCount, 1)
 	})
 
@@ -546,7 +869,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("Run task", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(createMessage.callCount, 1)
 	})
 
@@ -588,7 +911,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("Run task", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(createMessage.callCount, 1)
 	})
 
@@ -630,7 +953,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("Run task", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(createMessage.callCount, 1)
 		sinon.assert.calledWith(warnStub, "[SubagentRunner] Configured skill 'missing-skill' not found for subagent run.")
 	})
@@ -700,7 +1023,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
 
-		assert.equal(result.status, "completed")
+		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
 	})

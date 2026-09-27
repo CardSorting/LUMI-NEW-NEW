@@ -44,8 +44,8 @@ export const AuditChecklistItems = memo(({ items, filterStatuses, className }: A
 						<ChecklistStatusIcon status={item.status} />
 					</span>
 					<div className="min-w-0 flex-1">
-						<span className={cn("font-medium text-[9px]", STATUS_STYLES[item.status])}>{item.label}</span>
-						{item.detail && <span className="block text-[8.5px] text-description/70 break-words">{item.detail}</span>}
+						<span className={"font-medium text-xs text-foreground"}>{item.label}</span>
+						{item.detail && <span className="block text-xs text-description break-words">{item.detail}</span>}
 					</div>
 				</li>
 			))}

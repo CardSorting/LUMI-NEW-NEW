@@ -13,7 +13,7 @@ const GPT5_1_RULES = (_context: SystemPromptContext) => `RULES
 - When responding to the user outside of tool calls, include rich markdown formatting where applicable.
 - Ensure that any code snippets you provide are properly formatted with syntax highlighting for better readability.
 - When performing regex searches, try to craft search patterns that will not return an excessive amount of results.
-- MCP operations should be used one at a time, similar to other tool usage. Wait for confirmation of success before proceeding with additional operations.`
+- Apply the same dependency and approval rules to MCP tools: inspect results and continue authorized work without extra confirmation.`
 
 const GPT5_1_TOOL_USE = (_context: SystemPromptContext) => `TOOL USE
 

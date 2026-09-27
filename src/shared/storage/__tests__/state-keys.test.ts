@@ -112,6 +112,17 @@ function inferExpectedType(value: unknown): string {
 // ============================================================================
 
 describe("State Keys Type Safety", () => {
+	it("starts new configurations in autonomous execution with completion audits opt-in", () => {
+		expect(getDefaultValue("mode")).to.equal("act")
+		expect(getDefaultValue("yoloModeToggled")).to.equal(true)
+		for (const key of [
+			"auditCompletionGateEnabled",
+			"auditAdvisoryEscalationEnabled",
+			"auditPlanRegressionGateEnabled",
+		] as const) {
+			expect(getDefaultValue(key)).to.equal(false)
+		}
+	})
 	describe("Type-Value Consistency", () => {
 		/**
 		 * These tests validate that default values match their declared types.

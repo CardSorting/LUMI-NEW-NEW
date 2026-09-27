@@ -84,6 +84,8 @@ export interface ToolUse {
 	 * The call / response ID this tool use is associated with.
 	 */
 	call_id?: string
+	/** Provider tool-use ID, retained even when no separate transport call ID is supplied. */
+	tool_use_id?: string
 	/**
 	 * The architectural layer this tool use is associated with (e.g. "domain", "infrastructure")
 	 */

@@ -1,21 +1,21 @@
-import { DietCodeAsk, DietCodeSayTool } from "@shared/ExtensionMessage"
+import { DietCodeSayTool } from "@shared/ExtensionMessage"
 import { DietCodeDefaultTool } from "@shared/tools"
 import axios from "axios"
 import { DietCodeEnv } from "@/config"
 import { AuthService } from "@/services/auth/AuthService"
 import { buildDietCodeExtraHeaders } from "@/services/EnvUtils"
 import { featureFlagsService } from "@/services/feature-flags"
-import { telemetryService } from "@/services/telemetry"
 import { parsePartialArrayString } from "@/shared/array"
 import { DIETCODE_ACCOUNT_AUTH_ERROR_MESSAGE } from "@/shared/DietCodeAccount"
 import { getAxiosSettings } from "@/shared/net"
 import { ToolUse } from "../../../assistant-message"
 import { formatResponse } from "../../../prompts/responses"
-import { showNotificationForApproval } from "../../utils"
+import { isToolAutoApproved } from "../autoApprove"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
+import { reportToolUsage } from "../utils/toolTelemetry"
 
 export class WebSearchToolHandler implements IFullyManagedTool {
 	readonly name = DietCodeDefaultTool.WEB_SEARCH
@@ -35,14 +35,18 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 
 		const partialMessage = JSON.stringify(sharedMessageProps)
 
-		// For partial blocks, we'll let the ToolExecutor handle auto-approval logic
-		// Just stream the UI update for now
-		await uiHelpers.removeLastPartialMessageIfExistsWithType("say", "tool")
-		await uiHelpers.ask("tool" as DietCodeAsk, partialMessage, block.partial).catch(() => {})
+		if (isToolAutoApproved(uiHelpers.shouldAutoApproveTool(this.name))) {
+			await uiHelpers.removeLastPartialMessageIfExistsWithType("ask", "tool")
+			await uiHelpers.say("tool", partialMessage, undefined, undefined, block.partial)
+		} else {
+			await uiHelpers.removeLastPartialMessageIfExistsWithType("say", "tool")
+			await uiHelpers.ask("tool", partialMessage, block.partial).catch(() => {})
+		}
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
 		try {
+			config.taskState.abortSignal.throwIfAborted()
 			const query: string | undefined = block.params.query
 			const allowedDomainsRaw: string | undefined = block.params.allowed_domains
 			const blockedDomainsRaw: string | undefined = block.params.blocked_domains
@@ -85,11 +89,11 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 			}
 			const completeMessage = JSON.stringify(sharedMessageProps)
 
-			if (config.callbacks.shouldAutoApproveTool(this.name)) {
+			if (isToolAutoApproved(config.callbacks.shouldAutoApproveTool(this.name))) {
 				// Auto-approve flow
 				await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "tool")
 				await config.callbacks.say("tool", completeMessage, undefined, undefined, false)
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					"web_search",
 					config.api.getModel().id,
@@ -101,15 +105,16 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 				)
 			} else {
 				// Manual approval flow
-				showNotificationForApproval(
-					`DietCode wants to search for: ${query}`,
-					config.autoApprovalSettings.enableNotifications,
-				)
 				await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
 
-				const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("tool", completeMessage, config)
+				const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+					"tool",
+					completeMessage,
+					config,
+					`DietCode wants to search for: ${query}`,
+				)
 				if (!didApprove) {
-					telemetryService.captureToolUsage(
+					reportToolUsage(
 						config.ulid,
 						block.name,
 						config.api.getModel().id,
@@ -121,7 +126,7 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 					)
 					return formatResponse.toolDenied()
 				}
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					block.name,
 					config.api.getModel().id,
@@ -146,6 +151,7 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 			}
 
 			// Execute the actual search
+			config.taskState.abortSignal.throwIfAborted()
 			const baseUrl = DietCodeEnv.config().apiBaseUrl
 			const authToken = await AuthService.getInstance().getAuthToken()
 
@@ -178,6 +184,7 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 				},
 				timeout: 15000,
 				...getAxiosSettings(),
+				signal: config.taskState.abortSignal,
 			})
 
 			// Parse response
@@ -198,7 +205,11 @@ export class WebSearchToolHandler implements IFullyManagedTool {
 
 			return formatResponse.toolResult(resultText)
 		} catch (error) {
-			return `Error performing web search: ${(error as Error).message}`
+			return formatResponse.toolError(
+				config.taskState.abortSignal.aborted
+					? "Web search cancelled."
+					: `Error performing web search: ${(error as Error).message}`,
+			)
 		}
 	}
 }

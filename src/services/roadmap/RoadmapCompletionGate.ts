@@ -20,7 +20,7 @@ export async function evaluateRoadmapCompletionBlock(
 
 	const liveStatus = status || (await RoadmapService.getInstance().getOperationalStatus(workspace, "", "light"))
 
-	if (liveStatus.validation_pending) {
+	if (liveStatus.validation_pending && cfg.block_kanban_on_validation_pending) {
 		return {
 			blocked: true,
 			message:
@@ -40,7 +40,8 @@ export async function evaluateRoadmapCompletionBlock(
 			message:
 				"Task completion blocked by Roadmap Governance Gates:\n" +
 				(closedGatesMsg || "- Unknown gate closed") +
-				"\n\nPlease resolve these gates before calling attempt_completion.",
+				"\n\nFix the reported cause before retrying. Repeating validation on unchanged content cannot resolve it. " +
+				"If repair needs unavailable access or a user decision, report that blocker instead of rerunning checks.",
 			retryCommand: "roadmap(action='explain_gate')",
 			blockingGates,
 		}

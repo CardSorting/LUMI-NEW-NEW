@@ -11,6 +11,7 @@ import { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import { McpHub } from "@services/mcp/McpHub"
 import { DietCodeAsk, DietCodeSay } from "@shared/ExtensionMessage"
 import { DietCodeContent } from "@shared/messages/content"
+import { Logger } from "@shared/services/Logger"
 import { DietCodeDefaultTool, toolUseNames } from "@shared/tools"
 import { DietCodeAskResponse } from "@shared/WebviewMessage"
 import * as path from "path"
@@ -26,13 +27,13 @@ import { MessageStateHandler } from "./message-state"
 import { TaskState } from "./TaskState"
 import { canonicalizeAttemptCompletionParams, checkCompletionGateCircuitBreaker } from "./tools/attemptCompletionUtils"
 import { AutoApprove } from "./tools/autoApprove"
-import { RefactorHealer } from "./tools/RefactorHealer"
 import { IPartialBlockHandler, ToolExecutorCoordinator } from "./tools/ToolExecutorCoordinator"
 import { ToolValidator } from "./tools/ToolValidator"
 import { TaskConfig, validateTaskConfig } from "./tools/types/TaskConfig"
 import { createUIHelpers } from "./tools/types/UIHelpers"
 import { ToolDisplayUtils } from "./tools/utils/ToolDisplayUtils"
 import { ToolResultUtils } from "./tools/utils/ToolResultUtils"
+import { isToolFailure } from "./tools/utils/toolOutcome"
 
 export { canonicalizeAttemptCompletionParams } from "./tools/attemptCompletionUtils"
 
@@ -44,7 +45,6 @@ export class ToolExecutor {
 	private coordinator: ToolExecutorCoordinator
 	private policyObserver: ReactivePolicyObserver
 	private guard: UniversalGuard
-	private healer: RefactorHealer
 
 	public resetSystemPressure(): void {
 		if (this.guard) {
@@ -137,7 +137,6 @@ export class ToolExecutor {
 		this.autoApprover = new AutoApprove(this.stateManager)
 		this.guard = new UniversalGuard(cwd, taskId, this.stateManager)
 		this.policyObserver = new ReactivePolicyObserver(this.guard as any) // Guard wraps engine
-		this.healer = new RefactorHealer(this.cwd)
 		this.coordinator = new ToolExecutorCoordinator()
 		this.registerToolHandlers()
 	}
@@ -245,17 +244,37 @@ export class ToolExecutor {
 	 * Main entry point for tool execution - called by Task class
 	 */
 	public async executeTool(block: ToolUse): Promise<void> {
-		await this.execute(block)
+		const callId = block.tool_use_id || this.taskState.toolUseIdMap.get(block.call_id || "") || block.call_id
+		if (!callId) {
+			await this.execute(block)
+			return
+		}
+		const existing = this.taskState.nativeToolExecutions.get(callId)
+		if (existing) {
+			await existing
+			return
+		}
+		if (block.partial) {
+			await this.execute(block)
+			return
+		}
+		// Claim the ID before execution can yield or trigger a repeated delivery.
+		// Keep even a rejected dispatch until the next response: its side effects may be unknown.
+		const execution = Promise.resolve().then(async () => {
+			await this.execute(block)
+		})
+		this.taskState.nativeToolExecutions.set(callId, execution)
+		await execution
 	}
 
 	/**
 	 * Updates the browser settings
 	 */
 	public async applyLatestBrowserSettings() {
-		await this.browserSession.dispose()
 		const apiHandlerModel = this.api.getModel()
 		const useWebp = this.api ? !modelDoesntSupportWebp(apiHandlerModel) : true
-		this.browserSession = new BrowserSession(this.stateManager, useWebp)
+		// Keep the task-owned instance so Stop always disposes the live browser.
+		this.browserSession.setScreenshotFormat(useWebp)
 		return this.browserSession
 	}
 
@@ -269,13 +288,19 @@ export class ToolExecutor {
 	 * @param error The error that occurred
 	 * @param block The tool use block that caused the error
 	 */
-	private async handleError(action: string, error: Error, block: ToolUse): Promise<void> {
-		const errorString = `Error ${action}: ${error.message}`
-		await this.say("error", errorString)
-
-		// Create error response for the tool
-		const errorResponse = formatResponse.toolError(errorString)
-		this.pushToolResult(errorResponse, block)
+	private async handleError(action: string, error: unknown, block: ToolUse): Promise<void> {
+		const errorString = `Error ${action}: ${error instanceof Error ? error.message : String(error)}`
+		if (block.partial) {
+			// Preview failures cannot complete a native call or suppress its final execution.
+			Logger.warn(errorString)
+			return
+		}
+		this.pushToolResult(formatResponse.toolError(errorString), block)
+		try {
+			await this.say("error", errorString)
+		} catch (displayError) {
+			Logger.warn("Tool error display unavailable; paired result retained:", displayError)
+		}
 	}
 
 	/**
@@ -345,28 +370,34 @@ export class ToolExecutor {
 	 * - Error handling and checkpointing
 	 *
 	 * @param block The tool use block to execute
-	 * @returns true if the tool was handled (even if execution failed), false if not registered
+	 * @returns true once the call or its paired failure has been handled
 	 */
 	private async execute(block: ToolUse): Promise<boolean> {
 		// Note: MCP tool name transformation happens earlier in ToolUseHandler.getPartialToolUsesAsContent()
 		// The toolUseIdMap is updated at the point of transformation in index.ts
 
-		if (!this.coordinator.has(block.name)) {
-			return false // Tool not handled by coordinator
-		}
-		canonicalizeAttemptCompletionParams(block)
-
-		const config = await this.asToolConfig()
-
-		if (block.name === DietCodeDefaultTool.ATTEMPT && !block.partial) {
-			const breakerResult = checkCompletionGateCircuitBreaker(config)
-			if (breakerResult) {
-				this.pushToolResult(breakerResult, block)
+		try {
+			if (!this.coordinator.has(block.name)) {
+				if (!block.partial) {
+					this.pushToolResult(
+						formatResponse.toolError(
+							`Tool '${block.name}' is unavailable. Choose a tool from the current tool definitions.`,
+						),
+						block,
+					)
+				}
 				return true
 			}
-		}
+			canonicalizeAttemptCompletionParams(block)
+			const config = await this.asToolConfig()
 
-		try {
+			if (block.name === DietCodeDefaultTool.ATTEMPT && !block.partial) {
+				const breakerResult = checkCompletionGateCircuitBreaker(config)
+				if (breakerResult) {
+					this.pushToolResult(breakerResult, block)
+					return true
+				}
+			}
 			// Check if user rejected a previous tool
 			if (this.taskState.didRejectTool) {
 				const reason = block.partial
@@ -378,10 +409,7 @@ export class ToolExecutor {
 
 			// Check if a tool has already been used in this message (only enforced when parallel tool calling is disabled)
 			if (!this.isParallelToolCallingEnabled() && this.taskState.didAlreadyUseTool) {
-				this.taskState.userMessageContent.push({
-					type: "text",
-					text: formatResponse.toolAlreadyUsed(block.name),
-				})
+				this.createToolRejectionMessage(block, formatResponse.toolAlreadyUsed(block.name))
 				return true
 			}
 
@@ -433,11 +461,6 @@ export class ToolExecutor {
 				}
 			}
 
-			// Close browser for non-browser tools
-			if (block.name !== "browser_action") {
-				await this.browserSession.closeBrowser()
-			}
-
 			// Handle partial blocks
 			if (block.partial) {
 				await this.handlePartialBlock(block, config)
@@ -448,7 +471,7 @@ export class ToolExecutor {
 			await this.handleCompleteBlock(block, config)
 			return true
 		} catch (error) {
-			await this.handleError(`executing ${block.name}`, error as Error, block)
+			await this.handleError(`executing ${block.name}`, error, block)
 			return true
 		}
 	}
@@ -477,10 +500,9 @@ export class ToolExecutor {
 	 * @param reason Human-readable explanation of why the tool was rejected
 	 */
 	private createToolRejectionMessage(block: ToolUse, reason: string): void {
-		this.taskState.userMessageContent.push({
-			type: "text",
-			text: `${reason} ${ToolDisplayUtils.getToolDescription(block, this.coordinator)}`,
-		})
+		// Completed native calls need a paired result even when skipped. Plain text
+		// leaves a dangling tool_use and makes the next provider request fail.
+		if (!block.partial) this.pushToolResult(formatResponse.toolError(reason), block)
 	}
 
 	/**
@@ -641,6 +663,7 @@ export class ToolExecutor {
 		let executionSuccess = true
 		let toolResult: any = null
 		let toolWasExecuted = false
+		let resultRecorded = false
 		const executionStartTime = Date.now()
 
 		// Mode Awareness: Synchronize the guard with the current task mode
@@ -709,9 +732,12 @@ export class ToolExecutor {
 			// Execute the actual tool
 			toolResult = await this.coordinator.execute(config, block)
 			toolWasExecuted = true
+			executionSuccess = !isToolFailure(toolResult)
+			this.taskState.executionProgress.record(block.name, block.params, toolResult)
 
 			// Roadmap post-write: record mutation and attach validate nudge
 			if (
+				executionSuccess &&
 				(block.name === DietCodeDefaultTool.FILE_NEW ||
 					block.name === DietCodeDefaultTool.FILE_EDIT ||
 					block.name === DietCodeDefaultTool.APPLY_PATCH ||
@@ -730,17 +756,9 @@ export class ToolExecutor {
 				}
 			}
 
-			// Autonomous Self-Healing: Align tags and resolve imports
-			if (
-				(block.name === DietCodeDefaultTool.FILE_NEW || block.name === DietCodeDefaultTool.FILE_EDIT) &&
-				block.params.path
-			) {
-				const fullPath = path.resolve(this.cwd, block.params.path)
-				await this.healer.alignTag(fullPath)
-			}
-
 			// Policy Enforcement: Read-Time
 			if (
+				executionSuccess &&
 				(block.name === DietCodeDefaultTool.FILE_READ || block.name === DietCodeDefaultTool.SEARCH) &&
 				block.params.path &&
 				typeof toolResult === "string"
@@ -778,14 +796,19 @@ export class ToolExecutor {
 			}
 
 			this.pushToolResult(toolResult, block)
+			resultRecorded = true
 
 			// Policy Enforcement: Post-Execution
 			const prevHash = undefined
 
-			const postExecResult = await this.guard.guardPostExecution(block, toolResult, prevHash)
+			const postExecResult = executionSuccess
+				? await this.guard.guardPostExecution(block, toolResult, prevHash)
+				: { success: false, violations: [], warning: undefined }
 
 			// Layer confirmation + architectural feedback for write operations
 			if (
+				executionSuccess &&
+				this.stateManager.getGlobalSettingsKey("auditActModeAdvisoryEnabled") &&
 				(block.name === DietCodeDefaultTool.FILE_NEW || block.name === DietCodeDefaultTool.FILE_EDIT) &&
 				block.params.path
 			) {
@@ -796,27 +819,30 @@ export class ToolExecutor {
 				this.say("text", postExecResult.warning).catch(() => {})
 			}
 		} catch (error) {
-			executionSuccess = false
-			const errorMsg = `Tool execution failed: ${error}`
-			toolResult = formatResponse.toolError(errorMsg)
-
-			// Check abort before running PostToolUse hook (error path)
-			if (this.taskState.abort) {
-				throw error
+			if (toolWasExecuted) {
+				// The operation already returned. An observer failure cannot invalidate or replay it.
+				Logger.warn(`[ToolExecutor] Observation failed after ${block.name}; preserving its result:`, error)
+			} else {
+				executionSuccess = false
+				toolResult = formatResponse.toolError(`Tool execution failed: ${error}`)
 			}
+			if (!resultRecorded) {
+				this.pushToolResult(toolResult, block)
+				resultRecorded = true
+			}
+		}
 
-			// Run PostToolUse hook for failed tool execution
-			// Skip for attempt_completion since it marks task completion, not actual work
-			if (toolWasExecuted && hooksEnabled && block.name !== "attempt_completion") {
-				const hookRequestedCancel = await this.runPostToolUseHook(block, toolResult, executionSuccess, executionStartTime)
-				if (hookRequestedCancel) {
+		// PostToolUse runs once after either outcome. Its failures are observational;
+		// an explicit hook cancellation still stops the task after the result is saved.
+		if (toolWasExecuted && hooksEnabled && block.name !== DietCodeDefaultTool.ATTEMPT && !this.taskState.abort) {
+			try {
+				if (await this.runPostToolUseHook(block, toolResult, executionSuccess, executionStartTime)) {
 					await config.callbacks.cancelTask()
 					shouldCancelAfterHook = true
 				}
+			} catch (error) {
+				Logger.warn("[ToolExecutor] PostToolUse observation failed; tool result retained:", error)
 			}
-
-			// Deliver tool failure back to the agent so it can recover gracefully without crashing the task
-			this.pushToolResult(toolResult, block)
 		}
 
 		// Early return if hook requested cancellation
@@ -826,7 +852,11 @@ export class ToolExecutor {
 
 		// Handle focus chain updates
 		if (!block.partial && this.stateManager.getGlobalSettingsKey("focusChainSettings").enabled) {
-			await this.updateFCListFromToolResponse(block.params.task_progress)
+			try {
+				await this.updateFCListFromToolResponse(block.params.task_progress)
+			} catch (error) {
+				Logger.warn("[ToolExecutor] Progress update unavailable; continuing:", error)
+			}
 		}
 	}
 }

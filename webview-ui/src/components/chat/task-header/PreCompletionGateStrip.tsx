@@ -5,7 +5,7 @@ import {
 } from "@shared/audit/auditPreCompletionChecklist"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react"
-import { memo, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useAuditGateEvaluation } from "@/hooks/useAuditGateEvaluation"
 import { cn } from "@/lib/utils"
 import { auditStrip } from "../audit/auditUiStyles"
@@ -29,6 +29,7 @@ export const PreCompletionGateStrip = memo(
 		embedded = false,
 	}: PreCompletionGateStripProps) => {
 		const [expanded, setExpanded] = useState(embedded)
+		const detailsId = useId()
 		const previousBlockedRef = useRef(false)
 		const gateOptions = useAuditGateEvaluation(auditMetadata)
 		const summary = useMemo(
@@ -70,28 +71,37 @@ export const PreCompletionGateStrip = memo(
 					<p className="m-0 text-[10px] font-medium text-description/85">Before finishing</p>
 				) : (
 					<button
+						aria-controls={detailsId}
 						aria-expanded={expanded}
-						className="flex w-full items-center justify-between cursor-pointer bg-transparent border-0 p-0 text-left font-sans"
+						className="flex w-full items-center justify-between gap-2 cursor-pointer bg-transparent border-0 p-1 text-left font-sans text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--vscode-focusBorder)]"
 						onClick={() => setExpanded(!expanded)}
 						type="button">
 						<div className="flex items-center gap-2 flex-wrap">
 							<span className="font-medium text-description/85">Before finishing</span>
 							<span
 								className={cn(
-									"px-1.5 py-0.5 rounded-full text-[8px] font-medium border",
+									"px-1.5 py-0.5 rounded-full text-xs font-medium border",
 									checklist.blocked
-										? "border-amber-500/40 text-amber-700 dark:text-amber-400"
+										? "border-amber-500/40 text-foreground"
 										: warnCount > 0
-											? "border-amber-500/40 text-amber-600 dark:text-amber-400"
+											? "border-amber-500/40 text-foreground"
 											: "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
 								)}>
-								{checklist.blocked ? "Worth revisiting" : warnCount > 0 ? "Almost there" : "Looking good"}
+								{checklist.blocked ? "Blocked" : warnCount > 0 ? "Ready with warnings" : "Ready"}
 							</span>
 							<span className="font-mono text-description/70">
 								{checklist.score}/{checklist.effectiveThreshold}
 							</span>
-							{failCount > 0 && <span className="text-amber-600 dark:text-amber-400">{failCount} to revisit</span>}
-							{warnCount > 0 && <span className="text-amber-600 dark:text-amber-400">{warnCount} to review</span>}
+							{failCount > 0 && (
+								<span className="text-description">
+									{failCount} failed check{failCount === 1 ? "" : "s"}
+								</span>
+							)}
+							{warnCount > 0 && (
+								<span className="text-description">
+									{warnCount} warning{warnCount === 1 ? "" : "s"}
+								</span>
+							)}
 							{pendingAdvisoryCount > 0 && !checklist.blocked && (
 								<span className="text-amber-600/90">
 									{pendingAdvisoryCount} note{pendingAdvisoryCount === 1 ? "" : "s"}
@@ -106,23 +116,25 @@ export const PreCompletionGateStrip = memo(
 					</button>
 				)}
 
-				{showDetails && <AuditChecklistItems className="mt-2" items={checklist.items} />}
+				<div hidden={!showDetails} id={detailsId}>
+					<AuditChecklistItems className="mt-2" items={checklist.items} />
+				</div>
 
 				{checklist.blocked && onScrollToLatestGateBlock && (
 					<button
-						className="mt-2 text-[9px] font-medium text-amber-700/80 dark:text-amber-400/80 hover:text-amber-800 dark:hover:text-amber-300 cursor-pointer bg-transparent border-0 p-0"
+						className="mt-2 p-1 text-xs font-medium text-link underline underline-offset-2 cursor-pointer bg-transparent border-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--vscode-focusBorder)]"
 						onClick={onScrollToLatestGateBlock}
 						type="button">
-						Go to message
+						View blocking check
 					</button>
 				)}
 
 				{pendingAdvisoryCount > 0 && onScrollToLatestAdvisory && (
 					<button
-						className="mt-2 text-[9px] font-medium text-amber-700/80 dark:text-amber-400/80 hover:text-amber-800 dark:hover:text-amber-300 cursor-pointer bg-transparent border-0 p-0"
+						className="mt-2 p-1 text-xs font-medium text-link underline underline-offset-2 cursor-pointer bg-transparent border-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--vscode-focusBorder)]"
 						onClick={onScrollToLatestAdvisory}
 						type="button">
-						Go to message
+						View advisory notes
 					</button>
 				)}
 			</section>

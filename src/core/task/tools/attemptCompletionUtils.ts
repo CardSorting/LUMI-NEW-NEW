@@ -63,7 +63,7 @@ export const COMPLETION_PREFLIGHT_STAGES = [
 export type CompletionPreflightStage = (typeof COMPLETION_PREFLIGHT_STAGES)[number]
 
 /** Throttle-only blocks — do not consume circuit-breaker budget (mirrors HTTP 429 vs 4xx). */
-export const COMPLETION_SOFT_BLOCK_REASONS = new Set<CompletionPreflightReason>(["retry_cooldown"])
+export const COMPLETION_SOFT_BLOCK_REASONS = new Set<CompletionPreflightReason>(["retry_cooldown", "double_check"])
 
 export function isCompletionSoftBlockReason(reason: CompletionPreflightReason): boolean {
 	return COMPLETION_SOFT_BLOCK_REASONS.has(reason)
@@ -89,7 +89,11 @@ export function getCompletionRetryCooldownMs(blockCount: number): number {
 }
 
 export function getCompletionCooldownRemainingMs(config: TaskConfig): number {
-	if (config.yoloModeToggled || config.isSubagentExecution) {
+	if (
+		config.yoloModeToggled ||
+		config.isSubagentExecution ||
+		hasWorkspaceChangedSinceGateBlock(config, getLatestCheckpointHashFromMessages(config))
+	) {
 		return 0
 	}
 	const blockCount = config.taskState.completionGateBlockCount ?? 0
@@ -178,13 +182,9 @@ export function validateCompletionResultQuality(result: string): string | null {
 	if (!trimmed) {
 		return "Completion rejected: result is empty after trimming whitespace."
 	}
-	if (COMPLETION_QUALITY_BLOCK_PATTERN.test(trimmed)) {
-		return (
-			"Completion rejected: result contains unfinished markers (TODO/FIXME/placeholder). " +
-			"Resolve these in the workspace before calling attempt_completion."
-		)
-	}
-	return validateCompletionResultTone(trimmed)
+	// Summary wording is not evidence of unfinished work. For example, "removed TODOs"
+	// and honest reports of unavailable validation must not create completion loops.
+	return null
 }
 
 /** Bundled quality gate — use when a single validateQuality callback is required. */
@@ -435,7 +435,7 @@ const COMPLETION_GATE_PLAYBOOK_STEPS: Partial<Record<CompletionPreflightReason, 
 	],
 	retry_cooldown: [
 		"Use the cooldown window to fix violations listed above.",
-		"Run verification commands and update scratchpad.md with fixes.",
+		"Run the check relevant to the reported failure.",
 		"Retry attempt_completion after cooldown_remaining_ms reaches 0.",
 	],
 	focus_chain_incomplete: [
@@ -484,9 +484,9 @@ const COMPLETION_GATE_PLAYBOOK_STEPS: Partial<Record<CompletionPreflightReason, 
 		"Call attempt_completion again after verification.",
 	],
 	circuit_breaker: [
-		"Stop calling attempt_completion — further calls fail until you start a new task.",
+		"Stop repeating the unchanged completion attempt.",
 		"Review audit artifacts and fix underlying violations in the workspace.",
-		"Document changes in scratchpad.md before starting fresh.",
+		"Retry in this task after edits, a command result, or a changed checkpoint provides new evidence.",
 	],
 }
 
@@ -537,10 +537,10 @@ export function getRemainingCompletionGateStages(failedStage: CompletionPrefligh
 
 /** Short agent hints per pipeline stage — mirrors CI job descriptions. */
 export const COMPLETION_PREFLIGHT_STAGE_HINTS: Partial<Record<CompletionPreflightStage, string>> = {
-	circuit_breaker: "Hard stop — do not call attempt_completion until a new task",
-	quality: "Substantive prose summary; no TODOs, placeholders, or engagement bait",
+	circuit_breaker: "Fix the issue or gather new validation evidence before retrying in this task",
+	quality: "Provide a nonempty summary of the outcome and any limitations",
 	checklist_in_result: "Keep checklists in task_progress, not in result",
-	min_length: "Result must be at least 40 characters (1–2 paragraphs)",
+	min_length: "Provide enough detail to identify the completed work",
 	max_length: "Trim result to 6000 chars; move detail to task_progress",
 	task_progress_required: "Pass task_progress when focus chain exists",
 	task_progress_complete: "Every task_progress item must be [x]",
@@ -579,7 +579,10 @@ export function getCompletionGateOperationalState(config: TaskConfig): Completio
 }
 
 export function isCompletionGateCircuitBreakerTripped(config: TaskConfig): boolean {
-	return (config.taskState.completionGateBlockCount ?? 0) >= MAX_COMPLETION_GATE_BLOCK_COUNT
+	return (
+		(config.taskState.completionGateBlockCount ?? 0) >= MAX_COMPLETION_GATE_BLOCK_COUNT &&
+		!hasWorkspaceChangedSinceGateBlock(config, getLatestCheckpointHashFromMessages(config))
+	)
 }
 
 export type CompletionGatePressureLevel = "stable" | "elevated" | "critical" | "tripped"
@@ -896,7 +899,7 @@ export function getCompletionGateRetryPolicy(
 	reason: CompletionPreflightReason,
 	config: TaskConfig,
 ): { retryable: boolean; retryAfterMs: number; retryStatus: CompletionGateRetryStatus } {
-	if (reason === "circuit_breaker") {
+	if (reason === "circuit_breaker" && !hasWorkspaceChangedSinceGateBlock(config, getLatestCheckpointHashFromMessages(config))) {
 		return { retryable: false, retryAfterMs: 0, retryStatus: "blocked" }
 	}
 
@@ -1036,6 +1039,17 @@ export function getOrCreateCompletionGateSessionId(config: TaskConfig): string {
 }
 
 export function recordCompletionAttemptTime(config: TaskConfig): void {
+	if (hasWorkspaceChangedSinceGateBlock(config, getLatestCheckpointHashFromMessages(config))) {
+		// New evidence permits a fresh evaluation; audit history remains available.
+		config.taskState.completionGateBlockCount = 0
+		config.taskState.lastCompletionAttemptAt = undefined
+		config.taskState.lastCompletionBlockReason = undefined
+		config.taskState.lastCompletionFailedStage = undefined
+		config.taskState.lastProactiveGuidanceBlockCount = undefined
+		clearBlockedCompletionResultFingerprint(config)
+		config.taskState.lastGateBlockCheckpointHash = undefined
+		config.taskState.lastGateBlockWorkspaceRevision = undefined
+	}
 	getOrCreateCompletionGateSessionId(config)
 	config.taskState.completionAttemptCount = (config.taskState.completionAttemptCount ?? 0) + 1
 }
@@ -1047,6 +1061,8 @@ export function recordGateBlockCheckpointHash(config: TaskConfig, checkpointHash
 }
 
 export function hasWorkspaceChangedSinceGateBlock(config: TaskConfig, currentCheckpointHash?: string): boolean {
+	const priorRevision = config.taskState.lastGateBlockWorkspaceRevision
+	if (priorRevision !== undefined && config.taskState.workspaceRevision > priorRevision) return true
 	const priorHash = config.taskState.lastGateBlockCheckpointHash
 	if (!priorHash || !currentCheckpointHash) {
 		return false
@@ -1055,23 +1071,11 @@ export function hasWorkspaceChangedSinceGateBlock(config: TaskConfig, currentChe
 }
 
 export function validateCompletionAttemptCooldown(config: TaskConfig): string | null {
+	const remainingMs = getCompletionCooldownRemainingMs(config)
+	if (remainingMs === 0) return null
 	const blockCount = config.taskState.completionGateBlockCount ?? 0
-	if (blockCount === 0) {
-		return null
-	}
-
-	const lastAttempt = config.taskState.lastCompletionAttemptAt
-	if (!lastAttempt) {
-		return null
-	}
-
-	const elapsed = Date.now() - lastAttempt
 	const cooldownMs = getCompletionRetryCooldownMs(blockCount)
-	if (elapsed >= cooldownMs) {
-		return null
-	}
-
-	const waitSeconds = Math.ceil((cooldownMs - elapsed) / 1000)
+	const waitSeconds = Math.ceil(remainingMs / 1000)
 	return (
 		`Completion throttled: wait ${waitSeconds}s before retrying after a gate block (backoff ${Math.round(cooldownMs / 1000)}s). ` +
 		"Use this time to fix violations in the workspace."
@@ -1263,13 +1267,11 @@ export function buildCompletionBreatherHint(config: TaskConfig): string {
 	const hints: string[] = []
 
 	if (blockCount >= COMPLETION_GATE_WARN_THRESHOLD) {
-		hints.push(
-			"Pause attempt_completion. Document violation fixes in scratchpad.md, run verification commands, then retry with an updated result.",
-		)
+		hints.push("Fix the reported issue, run the relevant check, then retry completion using the new evidence.")
 	}
 
 	if (mistakes >= DEFAULT_MAX_CONSECUTIVE_MISTAKES - 1) {
-		hints.push("A cognitive breather is imminent — slow down, review scratchpad.md and git status before the next tool call.")
+		hints.push("Choose a concrete recovery action based on the last error; avoid repeating the failed request.")
 	}
 
 	if (hints.length === 0) {
@@ -1306,7 +1308,7 @@ export function buildCompletionPreflightRecoveryHint(reason: CompletionPreflight
 		case "task_progress_align":
 			return "Include every focus chain item in task_progress with matching labels, all [x]."
 		case "circuit_breaker":
-			return "Stop calling attempt_completion — start a new task after fixing root causes."
+			return "Fix the reported cause or run relevant validation, then retry completion in this task."
 		case "roadmap_gate":
 			return "Run the suggested roadmap command to clear governance gates."
 		case "audit_gate":
@@ -1449,10 +1451,9 @@ function getCompletionGateCircuitBreakerMessage(config: TaskConfig): string | nu
 	}
 	return (
 		`Task completion blocked: maximum completion gate retries (${MAX_COMPLETION_GATE_BLOCK_COUNT}) exceeded.\n\n` +
-		"**Recovery playbook:**\n" +
-		"1. Stop calling attempt_completion — further calls will fail until you start a new task.\n" +
-		"2. Review audit artifacts and fix the underlying violations in the workspace.\n" +
-		"3. Use act_mode_respond or scratchpad.md to document what changed before starting fresh."
+		"Stop repeating the same completion attempt. Fix the reported issue or run the relevant validation, then retry. " +
+		"New edits, command results, helper handoffs, or a changed checkpoint reopen evaluation in this task. " +
+		"If progress requires unavailable access or information, report that specific blocker and continue independent work."
 	)
 }
 
@@ -1510,6 +1511,8 @@ export function recordCompletionGateBlockEvent(
 	}
 
 	const blockCount = recordCompletionGateBlock(config)
+	config.taskState.lastGateBlockWorkspaceRevision = config.taskState.workspaceRevision
+	recordGateBlockCheckpointHash(config, options?.checkpointHash ?? getLatestCheckpointHashFromMessages(config))
 	config.taskState.lastCompletionAttemptAt = Date.now()
 	if (options?.result) {
 		recordBlockedCompletionResultFingerprint(config, options.result, options.checkpointHash)
@@ -1523,6 +1526,7 @@ export function markCompletionGatesPassed(config: TaskConfig): void {
 	clearCompletionGateObservabilityState(config)
 	clearBlockedCompletionResultFingerprint(config)
 	config.taskState.lastGateBlockCheckpointHash = undefined
+	config.taskState.lastGateBlockWorkspaceRevision = undefined
 }
 
 /** Reset completion attempt state after a successful finish (next completion gets fresh double-check + gate budget). */
@@ -1531,6 +1535,7 @@ export function markCompletionAttemptFinished(config: TaskConfig): void {
 	config.taskState.completionGateBlockCount = 0
 	config.taskState.lastCompletionAttemptAt = undefined
 	config.taskState.lastGateBlockCheckpointHash = undefined
+	config.taskState.lastGateBlockWorkspaceRevision = undefined
 	clearCompletionGateObservabilityState(config)
 	config.taskState.lastProactiveGuidanceBlockCount = undefined
 	config.taskState.preflightReadinessHintEmitted = undefined

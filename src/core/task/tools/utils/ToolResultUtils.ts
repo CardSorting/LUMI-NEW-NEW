@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import { ToolResponse } from "@core/task"
@@ -5,8 +6,10 @@ import { maybeTransitionToReplanMode } from "@core/task/utils/replanModeTransiti
 import { processFilesIntoText } from "@/integrations/misc/extract-text"
 import { DietCodeAsk } from "@/shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
+import { showNotificationForApproval } from "../../utils"
 import type { ToolExecutorCoordinator } from "../ToolExecutorCoordinator"
 import { TaskConfig } from "../types/TaskConfig"
+import { isToolFailure } from "./toolOutcome"
 
 /**
  * Utility functions for handling tool results and feedback
@@ -23,37 +26,39 @@ export class ToolResultUtils {
 		coordinator?: ToolExecutorCoordinator,
 		toolUseIdMap?: Map<string, string>,
 	): void {
+		const toolUseId = block.tool_use_id || toolUseIdMap?.get(block.call_id || "") || "dietcode"
+		// The first outcome owns this call ID, including empty and multimodal results.
+		if (
+			toolUseId !== "dietcode" &&
+			userMessageContent.some((item) => item.type === "tool_result" && item.tool_use_id === toolUseId)
+		) {
+			Logger.warn(`ToolResultUtils: Tool result for tool_use_id ${toolUseId} already exists. Skipping duplicate.`)
+			return
+		}
 		if (typeof content === "string") {
 			const resultText = content || "(tool did not return anything)"
 
 			// Try to get description from coordinator first, otherwise use the provided function
-			const description = coordinator
-				? (() => {
-						const handler = coordinator.getHandler(block.name)
-						return handler ? handler.getDescription(block) : toolDescription(block)
-					})()
-				: toolDescription(block)
-
-			// Get tool_use_id from map using call_id, or use "dietcode" as fallback for backward compatibility
-			const toolUseId = toolUseIdMap?.get(block.call_id || "") || "dietcode"
-
-			// If we have already added a tool result for this tool use, skip adding another one
-			if (
-				userMessageContent.some((item) => item.type === "tool_result" && item.tool_use_id === toolUseId && item.content)
-			) {
-				Logger.warn(`ToolResultUtils: Tool result for tool_use_id ${toolUseId} already exists. Skipping duplicate.`)
-				return
+			let description: string = block.name
+			try {
+				const handler = coordinator?.getHandler(block.name)
+				description = handler ? handler.getDescription(block) : toolDescription(block)
+			} catch (error) {
+				Logger.warn("Tool description unavailable; preserving the operation result:", error)
 			}
 
 			// Create ToolResultBlockParam with description and result
 			userMessageContent.push(
-				ToolResultUtils.createToolResultBlock(`${description} Result:\n${resultText}`, toolUseId, block.call_id),
+				ToolResultUtils.createToolResultBlock(
+					`${description} Result:\n${resultText}`,
+					toolUseId,
+					block.call_id,
+					isToolFailure(content),
+				),
 			)
 		} else {
 			// For complex content (arrays with text/image blocks), pass it through directly
 			// The content array should already be properly formatted with type, text, source, etc.
-			const toolUseId = toolUseIdMap?.get(block.call_id || "") || "dietcode"
-
 			// If using backward-compatible "dietcode" ID and content is an array, spread it directly
 			// instead of wrapping it (which would cause JSON.stringify in createToolResultBlock)
 			if ((toolUseId === "dietcode" || !toolUseId) && Array.isArray(content)) {
@@ -64,7 +69,7 @@ export class ToolResultUtils {
 		}
 	}
 
-	private static createToolResultBlock(content: ToolResponse, id?: string, call_id?: string) {
+	private static createToolResultBlock(content: ToolResponse, id?: string, call_id?: string, isError = isToolFailure(content)) {
 		// If id is "dietcode", we treat it as a plain text result for backward compatibility
 		// as we cannot find any existing tool call that matches this id.
 		if (id === "dietcode" || !id) {
@@ -81,6 +86,7 @@ export class ToolResultUtils {
 			type: "tool_result",
 			tool_use_id: id,
 			call_id: call_id,
+			...(isError ? { is_error: true } : {}),
 			content: typeof content === "string" ? content : content,
 		}
 	}
@@ -123,9 +129,33 @@ export class ToolResultUtils {
 	/**
 	 * Handles tool approval flow and processes any user feedback
 	 */
-	static async askApprovalAndPushFeedback(type: DietCodeAsk, completeMessage: string, config: TaskConfig) {
+	static async askApprovalAndPushFeedback(
+		type: DietCodeAsk,
+		completeMessage: string,
+		config: TaskConfig,
+		notificationMessage?: string,
+	) {
 		if (config.isSubagentExecution) {
 			return true
+		}
+		const feedbackVersion = () => {
+			const messages = config.messageState?.getDietCodeMessages?.() || []
+			for (let i = messages.length - 1; i >= 0; i--) {
+				if (messages[i].say === "user_feedback") return messages[i].ts
+			}
+			return 0
+		}
+		const approvalKey = createHash("sha256")
+			.update(JSON.stringify([config.cwd, config.mode, type, completeMessage.trim()]))
+			.digest("hex")
+		const denied = (config.taskState.deniedToolApprovals ??= new Map<string, number>())
+		if (denied.get(approvalKey) === feedbackVersion()) {
+			config.taskState.didRejectTool = true
+			await config.callbacks.removeLastPartialMessageIfExistsWithType?.("ask", type)
+			return false
+		}
+		if (notificationMessage) {
+			showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
 		}
 
 		const { response, text, images, files } = await config.callbacks.ask(type, completeMessage, false)
@@ -150,11 +180,18 @@ export class ToolResultUtils {
 			await config.callbacks.say("user_feedback", text, images, files)
 		}
 
+		if (config.taskState.abort) {
+			config.taskState.didRejectTool = true
+			return false
+		}
 		if (response !== "yesButtonClicked") {
 			// User pressed reject button or responded with a message, which we treat as a rejection
 			config.taskState.didRejectTool = true // Prevent further tool uses in this message
+			denied.set(approvalKey, feedbackVersion())
+			if (denied.size > 64) denied.delete(denied.keys().next().value!)
 			return false
 		}
+		denied.delete(approvalKey)
 		// User hit the approve button, and may have provided feedback
 		return true
 	}

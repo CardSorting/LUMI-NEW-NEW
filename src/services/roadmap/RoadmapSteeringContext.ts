@@ -67,7 +67,7 @@ export async function buildSteeringContext(workspace: string): Promise<Record<st
 	const digest = (status.project_steering_digest || {}) as Record<string, unknown>
 	const gate = (status.roadmap_gate || {}) as Record<string, unknown>
 
-	let agentNextCall = String(status.agent_next_call || "roadmap(action='guide')")
+	let agentNextCall = String(status.agent_next_call ?? "")
 	if (status.bootstrap_complete === false && status.roadmap_exists) {
 		const nextRec = recommendNextAction({
 			phase: "bootstrap_fill",

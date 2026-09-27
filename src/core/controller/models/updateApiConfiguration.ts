@@ -1,7 +1,6 @@
 import type { IController as Controller } from "@core/controller/types"
 import { Empty } from "@shared/proto/dietcode/common"
 import { convertProtoToApiProvider } from "@shared/proto-conversions/models/api-configuration-conversion"
-import { buildApiHandler } from "@/core/api"
 import { ApiHandlerOptions, ApiProvider } from "@/shared/api"
 import { UpdateApiConfigurationRequestNew } from "@/shared/proto/index.dietcode"
 import { Logger } from "@/shared/services/Logger"
@@ -143,7 +142,7 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 		if (controller.task) {
 			const currentMode = controller.stateManager.getGlobalSettingsKey("mode")
 			// Build updated config
-			controller.task.api = buildApiHandler(
+			controller.task.updateApiHandler(
 				{
 					...controller.stateManager.getApiConfiguration(),
 					ulid: controller.task.ulid,

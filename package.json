@@ -431,14 +431,24 @@
 					"default": true,
 					"description": "Apply evidence autofill after bootstrap."
 				},
+				"lumi.roadmap.blockKanbanOnInvalidSchema": {
+					"type": "boolean",
+					"default": false,
+					"description": "Require ROADMAP.md schema errors to be repaired before task completion. Otherwise report them as advisory."
+				},
+				"lumi.roadmap.blockKanbanOnBootstrapIncomplete": {
+					"type": "boolean",
+					"default": false,
+					"description": "Require roadmap bootstrap placeholders to be filled before task completion. Otherwise report them as advisory."
+				},
 				"lumi.roadmap.blockKanbanOnValidationPending": {
 					"type": "boolean",
-					"default": true,
+					"default": false,
 					"description": "Block attempt_completion when ROADMAP.md changed since last validate."
 				},
 				"lumi.roadmap.failClosedCompletionGates": {
 					"type": "boolean",
-					"default": true,
+					"default": false,
 					"description": "Block attempt_completion when roadmap gate evaluation fails."
 				}
 			}
@@ -460,7 +470,7 @@
 		"clean:all": "npm run clean:build && npm run clean:deps",
 		"compile-tests": "node ./scripts/build-tests.js",
 		"watch-tests": "tsc -p . -w --outDir out",
-		"check-types": "npm run protos && npx tsc --noEmit && cd webview-ui && npx tsc --noEmit",
+		"check-types": "npm run protos && npx tsc --noEmit && npx tsc -b webview-ui --pretty false",
 		"lint": "biome lint --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error && npm run lint:proto",
 		"lint:proto": "bash ./scripts/proto-lint.sh",
 		"format": "biome format --changed --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error",

@@ -3,7 +3,6 @@ import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import { executePreCompactHookWithCleanup, HookCancellationError } from "@core/hooks/precompact-executor"
 import { continuationPrompt } from "@core/prompts/contextManagement"
 import { formatResponse } from "@core/prompts/responses"
-import { ensureTaskDirectoryExists } from "@core/storage/disk"
 import { StateManager } from "@core/storage/StateManager"
 import { resolveWorkspacePath } from "@core/workspace"
 import { extractFileContent } from "@integrations/misc/extract-file-content"
@@ -15,6 +14,7 @@ import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IPartialBlockHandler, IToolHandler, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
+import { applyContextCompaction } from "../utils/contextCompaction"
 
 export class SummarizeTaskHandler implements IToolHandler, IPartialBlockHandler {
 	readonly name = DietCodeDefaultTool.SUMMARIZE_TASK
@@ -216,55 +216,45 @@ export class SummarizeTaskHandler implements IToolHandler, IPartialBlockHandler 
 
 			const toolResult = formatResponse.toolResult(toolResultContent)
 
-			// Handle context management
-			const apiConversationHistory = config.messageState.getApiConversationHistory()
-			const keepStrategy = "none"
-
-			// clear the context history at this point in time. note that this will not include the assistant message
-			// for summarizing, which we will need to delete later
-			config.taskState.conversationHistoryDeletedRange = config.services.contextManager.getNextTruncationRange(
-				apiConversationHistory,
-				config.taskState.conversationHistoryDeletedRange,
-				keepStrategy,
-			)
-			await config.messageState.saveDietCodeMessagesAndUpdateHistory()
-			await config.services.contextManager.triggerApplyStandardContextTruncationNoticeChange(
-				Date.now(),
-				await ensureTaskDirectoryExists(config.taskId),
-				apiConversationHistory,
-			)
+			await applyContextCompaction(config, "none")
 
 			// Set summarizing state
 			config.taskState.currentlySummarizing = true
 
-			// Capture telemetry after main business logic is complete
-			const telemetryData = config.services.contextManager.getContextTelemetryData(
-				config.messageState.getDietCodeMessages(),
-				config.api,
-				config.taskState.lastAutoCompactTriggerIndex,
-			)
+			try {
+				// Capture telemetry after main business logic is complete
+				const telemetryData = config.services.contextManager.getContextTelemetryData(
+					config.messageState.getDietCodeMessages(),
+					config.api,
+					config.taskState.lastAutoCompactTriggerIndex,
+				)
 
-			if (telemetryData) {
-				// Extract provider information for telemetry
-				const apiConfig = config.services.stateManager.getApiConfiguration()
-				const currentMode = config.services.stateManager.getGlobalSettingsKey("mode")
-				const provider = (currentMode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider) as string
+				if (telemetryData) {
+					// Extract provider information for telemetry
+					const apiConfig = config.services.stateManager.getApiConfiguration()
+					const currentMode = config.services.stateManager.getGlobalSettingsKey("mode")
+					const provider = (
+						currentMode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider
+					) as string
 
-				telemetryService.capture({
-					event: "task.summarize_task",
-					properties: {
-						ulid: config.ulid,
-						modelId: config.api.getModel().id,
-						provider,
-						tokensUsed: telemetryData.tokensUsed,
-						maxContextWindow: telemetryData.maxContextWindow,
-					},
-				})
+					telemetryService.capture({
+						event: "task.summarize_task",
+						properties: {
+							ulid: config.ulid,
+							modelId: config.api.getModel().id,
+							provider,
+							tokensUsed: telemetryData.tokensUsed,
+							maxContextWindow: telemetryData.maxContextWindow,
+						},
+					})
+				}
+			} catch (error) {
+				Logger.warn("[SummarizeTaskHandler] Compaction telemetry unavailable; summary retained:", error)
 			}
 
 			return toolResult
 		} catch (error) {
-			return `Error summarizing context window: ${(error as Error).message}`
+			return formatResponse.toolError(`Error summarizing context window: ${(error as Error).message}`)
 		}
 	}
 

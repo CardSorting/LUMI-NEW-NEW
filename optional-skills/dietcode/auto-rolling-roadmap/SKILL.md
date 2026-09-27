@@ -24,6 +24,17 @@ It should help humans and agents answer:
 * What risks are accumulating?
 * Is the system becoming more coherent or more fragmented?
 
+## Scope and stopping conditions
+
+Use this workflow when the user requests roadmap work or the current task materially changes project direction. Roadmap maintenance must not expand unrelated tasks or delay a scoped subagent handoff.
+
+- Anti-goals are optional, evidence-backed scope notes. Accept familiar labels such as Non-goals or Out of scope. Do not invent restrictions or rewrite them merely to satisfy a schema.
+- Gather relevant evidence once, update affected sections, then validate once after the final edit. Repair an actual error before rerunning validation.
+- Placeholder text and checkpoint age are advisory by default. Only explicitly configured required checks block completion; diagnostic and repair tools remain available.
+- Run the smallest relevant verification plus checks required by the user or workspace. Do not run the full suite for roadmap prose alone. Reuse passing results for unchanged code.
+- Finish when the requested changes and relevant checks are complete. Do not repeat audits or deepen investigation without new evidence. If a check cannot run or an unchanged failure has no available repair, report the limitation instead of retrying indefinitely.
+- The parent owns project-wide roadmap and completion checks. Helpers return their assigned findings, verification, and blockers without waiting for the parent's roadmap to be complete.
+
 ## Primary Output
 
 This skill must create or update:
@@ -54,7 +65,7 @@ Every roadmap pass must answer:
 Did the latest work strengthen or weaken the project's center of gravity?
 ```
 
-If the answer is unclear, the skill must investigate before adding or promoting roadmap items.
+If the answer is unclear, record the uncertainty and keep the item in Discovery. Investigate further only when needed for the current assignment.
 
 A roadmap item that does not connect to the project's center of gravity should remain in Discovery, be reframed, or be archived.
 
@@ -244,9 +255,7 @@ Include:
 <anti-goals that protect coherence>
 ```
 
-The "must not become" field is mandatory.
-
-It prevents drift.
+This field is optional. Use established non-goals when available; missing non-goals are advisory and do not invalidate the schema.
 
 Examples:
 
@@ -553,7 +562,7 @@ Use this checklist:
 <one recommendation to strengthen project gravity>
 ```
 
-This section is mandatory.
+Keep this section in the template; update its assessment when architecture or risk changes.
 
 If the roadmap does not audit code soup risk, the skill failed.
 
@@ -744,7 +753,7 @@ The roadmap must evolve by compression.
 
 Do not allow `ROADMAP.md` to grow endlessly.
 
-On every pass:
+On a requested roadmap checkpoint, review affected areas:
 
 * merge duplicate items
 * remove stale wording

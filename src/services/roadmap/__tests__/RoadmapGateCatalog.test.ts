@@ -1,6 +1,12 @@
 import * as assert from "assert"
 import { DEFAULT_ROADMAP_CONFIG } from "../RoadmapConfig"
-import { blockingClosedGates, evaluateGateChecks, type GateClosedEntry, type GateInputs } from "../RoadmapGateCatalog"
+import {
+	blockingClosedGates,
+	buildGateStateFromInputs,
+	evaluateGateChecks,
+	type GateClosedEntry,
+	type GateInputs,
+} from "../RoadmapGateCatalog"
 
 function baseInputs(overrides: Partial<GateInputs> = {}): GateInputs {
 	return {
@@ -28,13 +34,56 @@ function baseInputs(overrides: Partial<GateInputs> = {}): GateInputs {
 }
 
 describe("RoadmapGateCatalog", () => {
+	it("allows completion with advisory findings by default", async () => {
+		const state = await buildGateStateFromInputs(
+			baseInputs({
+				validation: { valid: false, schema_complete: false, now_item_count: 0, issues: [] },
+				freshness: { stale: true },
+				workspace_state: { validation_pending: true },
+				bootstrap_complete: false,
+			}),
+		)
+		assert.strictEqual(state.kanban_complete_allowed, true)
+		assert.strictEqual(state.checkpoint_allowed, true)
+		assert.ok(state.closed_gate_count >= 4)
+		assert.ok(state.closed_gates.every((gate) => !gate.blocks_kanban_complete))
+	})
+
+	it("keeps repair available while explicitly required checks block completion", async () => {
+		const state = await buildGateStateFromInputs(
+			baseInputs({
+				config: {
+					...DEFAULT_ROADMAP_CONFIG,
+					block_kanban_on_validation_pending: true,
+					block_kanban_on_bootstrap_incomplete: true,
+				},
+				workspace_state: { validation_pending: true },
+				bootstrap_complete: false,
+				freshness: { stale: true },
+			}),
+		)
+		assert.strictEqual(state.kanban_complete_allowed, false)
+		assert.strictEqual(state.checkpoint_allowed, true)
+		assert.deepStrictEqual(
+			state.blocking_gates.map((gate) => gate.id),
+			["validation_current", "bootstrap_complete"],
+		)
+		assert.strictEqual(state.closed_gates.find((gate) => gate.id === "checkpoint_fresh")?.blocks_kanban_complete, false)
+	})
+
+	it("continues to guard checkpoint writes in an extension installation", async () => {
+		const state = await buildGateStateFromInputs(baseInputs({ workspace: "/tmp/.vscode/extensions/lumi" }))
+		assert.strictEqual(state.checkpoint_allowed, false)
+		assert.strictEqual(state.kanban_complete_allowed, false)
+	})
+
 	it("blocks completion on validation_pending when configured", () => {
 		const { closed } = evaluateGateChecks(
 			baseInputs({
 				workspace_state: { validation_pending: true },
 			}),
 		)
-		const blocking = blockingClosedGates(closed, DEFAULT_ROADMAP_CONFIG)
+		const blocking = blockingClosedGates(closed, { ...DEFAULT_ROADMAP_CONFIG, block_kanban_on_validation_pending: true })
 		assert.ok(blocking.some((g) => g.id === "validation_current"))
 	})
 

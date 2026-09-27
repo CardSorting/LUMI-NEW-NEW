@@ -36,7 +36,7 @@ export function buildProjectContextLines(brief: Record<string, unknown>): string
 	if (makeTargets.length > 0) lines.push(`Makefile: ${makeTargets.slice(0, 4).join(", ")}`)
 
 	const verify = (fp.verification_commands as string[]) || (digest.verification_commands as string[]) || []
-	if (verify.length > 0) lines.push(`Verify: ${verify.slice(0, 3).join(", ")}`)
+	if (verify.length > 0) lines.push(`Available checks (choose those relevant to the task): ${verify.slice(0, 3).join(", ")}`)
 
 	const governance = (fp.governance_files as string[]) || (digest.governance_files as string[]) || []
 	if (governance.length > 0) lines.push(`Governance: ${governance.slice(0, 3).join(", ")}`)
@@ -74,7 +74,7 @@ export function formatRoadmapSteeringBlock(brief: Record<string, unknown>): stri
 		lines.push("⛔ attempt_completion blocked — roadmap(action='explain_gate')")
 	}
 	if (brief.validation_pending) {
-		lines.push("⚠️ ROADMAP.md changed since last validate — run roadmap(action='validate') before attempt_completion.")
+		lines.push("ROADMAP.md changed since last validation. Validate once after the final edit; required only when configured.")
 	}
 	if (brief.bootstrap_complete === false) {
 		lines.push(
@@ -82,11 +82,11 @@ export function formatRoadmapSteeringBlock(brief: Record<string, unknown>): stri
 		)
 	}
 	if (brief.operator_summary) lines.push(`Summary: ${brief.operator_summary}`)
-	if (brief.agent_next_call) lines.push(`Next: ${brief.agent_next_call}`)
+	if (brief.agent_next_call) lines.push(`Roadmap suggestion (when relevant): ${brief.agent_next_call}`)
 
 	const hints = brief._roadmap_operator_hints as Record<string, unknown> | undefined
 	const verifyCmds = (hints?.verification_commands as string[]) || []
-	if (verifyCmds.length > 0) lines.push(`Verify: ${verifyCmds[0]}`)
+	if (verifyCmds.length > 0) lines.push(`Available check (run only when relevant): ${verifyCmds[0]}`)
 
 	lines.push("Prime directive: Did the latest work strengthen or weaken the project's center of gravity?")
 	return lines.join("\n")
@@ -95,7 +95,7 @@ export function formatRoadmapSteeringBlock(brief: Record<string, unknown>): stri
 export function formatWatchSteeringLine(brief: Record<string, unknown>): string {
 	const identity = brief.project_identity_line || brief.steering_brief || "project"
 	const phase = brief.phase || "unknown"
-	const next = brief.agent_next_call || "roadmap(action='guide')"
+	const next = brief.agent_next_call || "continue assigned task"
 	const gate = brief.kanban_complete_allowed === false ? " ⛔gates" : ""
 	const pending = brief.validation_pending ? " ⚠️validate" : ""
 	return `[roadmap] ${identity} · phase=${phase}${gate}${pending} → ${next}`

@@ -23,7 +23,6 @@ import { COMPLETION_RESULT_CHANGES_FLAG, type DietCodeMessage, type TaskAuditMet
 import { Logger } from "@shared/services/Logger"
 import { DietCodeDefaultTool } from "@shared/tools"
 import { finalizeRoadmapSession } from "@/services/roadmap/RoadmapLifecycle"
-import { showNotificationForApproval } from "../../utils"
 import { buildUserFeedbackContent } from "../../utils/buildUserFeedbackContent"
 import {
 	buildCompletionGatePassedEnvelope,
@@ -53,8 +52,8 @@ import type { TaskConfig } from "../types/TaskConfig"
 import type { IPartialBlockHandler, IToolHandler, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
 import { getTaskCompletionTelemetry } from "../utils"
-import { ToolResultUtils } from "../utils/ToolResultUtils"
 import { getInitialTaskPreview } from "../utils/taskPreview"
+import { isToolFailure } from "../utils/toolOutcome"
 
 async function buildAuditGateOptions(
 	config: TaskConfig,
@@ -194,19 +193,21 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			const taskSection = taskPreview ? `\n\n<initial_task>\n${taskPreview}\n</initial_task>` : ""
 
 			let auditPreviewSection = ""
-			try {
-				const previewAudit = await runAdvisoryAudit(config.taskId, taskPreview || "", result, taskPreview || "")
-				const policyAppliedAudit = await applyWorkspaceAuditPolicyForTask(config, previewAudit)
-				config.taskState.lastAdvisoryAudit = policyAppliedAudit
-				auditPreviewSection = buildDoubleCheckAuditSection(policyAppliedAudit)
-				auditPreviewSection += buildPreCompletionChecklist(
-					policyAppliedAudit,
-					await buildAuditGateOptions(config, {
-						planBaselineMetadata: getLatestPlanAuditFromMessages(config.messageState.getDietCodeMessages()),
-					}),
-				)
-			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Pre-completion audit preview failed:", error)
+			if (config.auditCompletionGateEnabled) {
+				try {
+					const previewAudit = await runAdvisoryAudit(config.taskId, taskPreview || "", result, taskPreview || "")
+					const policyAppliedAudit = await applyWorkspaceAuditPolicyForTask(config, previewAudit)
+					config.taskState.lastAdvisoryAudit = policyAppliedAudit
+					auditPreviewSection = buildDoubleCheckAuditSection(policyAppliedAudit)
+					auditPreviewSection += buildPreCompletionChecklist(
+						policyAppliedAudit,
+						await buildAuditGateOptions(config, {
+							planBaselineMetadata: getLatestPlanAuditFromMessages(config.messageState.getDietCodeMessages()),
+						}),
+					)
+				} catch (error) {
+					Logger.warn("[AttemptCompletionHandler] Pre-completion audit preview failed:", error)
+				}
 			}
 
 			const blockCount = recordCompletionGateBlockEvent(config, "double_check", { result })
@@ -224,7 +225,7 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 		// V225: Sovereign Forensic Gate (Passive)
 		// We perform a non-blocking check for Knowledge Ledger compliance.
 		// If non-compliant, we provide a passive advisory to the agent.
-		if (config.universalGuard) {
+		if (config.auditActModeAdvisoryEnabled && config.universalGuard) {
 			try {
 				const compliance = await config.universalGuard.checkForensicCompliance()
 				if (!compliance.compliant && compliance.advisory) {
@@ -338,6 +339,25 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			}
 		}
 
+		let commandResult: ToolResponse | undefined
+		if (command?.trim()) {
+			const commandHandler = config.coordinator.getHandler(DietCodeDefaultTool.BASH)
+			if (!commandHandler)
+				return formatResponse.toolError(
+					"execute_command is unavailable. Complete the task without a demonstration command, or use an available tool.",
+				)
+			const commandBlock: ToolUse = {
+				type: "tool_use",
+				name: DietCodeDefaultTool.BASH,
+				partial: false,
+				params: { command, requires_approval: "true", timeout: block.params.timeout },
+			}
+			const permission = await config.universalGuard?.guardPreExecution(commandBlock)
+			if (permission && !permission.success) return formatResponse.toolError(permission.error)
+			commandResult = await commandHandler.execute(config, commandBlock)
+			if (isToolFailure(commandResult) || config.taskState.didRejectTool || config.taskState.abort) return commandResult
+		}
+
 		if (config.autoApprovalSettings.enableNotifications) {
 			showSystemNotification({
 				subtitle: "Task Completed",
@@ -384,102 +404,42 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			await config.messageState.saveDietCodeMessagesAndUpdateHistory()
 		}
 
-		let commandResult: ToolResponse | undefined
-		const lastMessage = config.messageState.getDietCodeMessages().at(-1)
-
-		if (command) {
-			if (lastMessage && lastMessage.ask !== "command") {
-				// haven't sent a command message yet so first send completion_result then command
-				const completionMessageTs = await config.callbacks.say(
-					"completion_result",
-					result,
-					undefined,
-					undefined,
-					false,
-					auditMetadata,
-				)
-				await config.callbacks.saveCheckpoint(true, completionMessageTs)
-				await addNewChangesFlagToLastCompletionResultMessage()
-			} else {
-				// we already sent a command message, meaning the complete completion message has also been sent
-				await config.callbacks.saveCheckpoint(true)
-			}
-
-			// Attempt completion is a special tool where we want to update the focus chain list before the user provides response
-			if (!block.partial && config.focusChainSettings.enabled) {
-				await config.callbacks.updateFCListFromToolResponse(block.params.task_progress)
-			}
-
-			// Check if command should be auto-approved
-			// attempt_completion commands don't have requires_approval param, so we treat them as safe commands
-			const autoApproveResult = config.autoApprover?.shouldAutoApproveTool(DietCodeDefaultTool.BASH)
-			const autoApproveSafe = Array.isArray(autoApproveResult) ? autoApproveResult[0] : autoApproveResult
-
-			if (autoApproveSafe) {
-				// Auto-approve flow - show command as 'say' instead of 'ask'
-				await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "command")
-				await config.callbacks.say("command", command, undefined, undefined, false)
-			} else {
-				// Manual approval flow - need to ask for approval
-				showNotificationForApproval(
-					`DietCode wants to execute a command: ${command}`,
-					config.autoApprovalSettings.enableNotifications,
-				)
-
-				const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("command", command, config)
-				if (!didApprove) {
-					return formatResponse.toolDenied()
-				}
-			}
-
-			// Execute the command
-			const [userRejected, execCommandResult] = await config.callbacks.executeCommandTool(command, undefined) // no timeout for attempt_completion command
-
-			if (userRejected) {
-				config.taskState.didRejectTool = true
-				return execCommandResult
-			}
-			// user didn't reject, but the command may have output
-			commandResult = execCommandResult
-
-			try {
-				telemetryService.captureTaskCompleted(
-					config.ulid,
-					getTaskCompletionTelemetry(config, auditMetadata, {
-						advisoryMetadata: config.taskState.lastAdvisoryAudit,
-						planBaseline,
-					}),
-				)
-				config.services.joyRideCache.flushTask(config.taskId, "task_completed")
-				await finalizeRoadmapSession(config.cwd, config.taskId)
-			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Post-completion cleanup or telemetry skipped:", error)
-			}
-		} else {
-			// Send the complete completion_result message (partial was already removed above)
-			const completionMessageTs = await config.callbacks.say(
-				"completion_result",
-				result,
-				undefined,
-				undefined,
-				false,
-				auditMetadata,
-			)
+		const completionMessageTs = await config.callbacks.say(
+			"completion_result",
+			result,
+			undefined,
+			undefined,
+			false,
+			auditMetadata,
+		)
+		try {
 			await config.callbacks.saveCheckpoint(true, completionMessageTs)
+		} catch (error) {
+			Logger.warn("[AttemptCompletionHandler] Completion snapshot unavailable; result retained:", error)
+		}
+		try {
 			await addNewChangesFlagToLastCompletionResultMessage()
-			try {
-				telemetryService.captureTaskCompleted(
-					config.ulid,
-					getTaskCompletionTelemetry(config, auditMetadata, {
-						advisoryMetadata: config.taskState.lastAdvisoryAudit,
-						planBaseline,
-					}),
-				)
-				config.services.joyRideCache.flushTask(config.taskId, "task_completed")
-				await finalizeRoadmapSession(config.cwd, config.taskId)
-			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Post-completion cleanup or telemetry skipped:", error)
-			}
+		} catch (error) {
+			Logger.warn("[AttemptCompletionHandler] Completion change indicator unavailable:", error)
+		}
+		try {
+			telemetryService.captureTaskCompleted(
+				config.ulid,
+				getTaskCompletionTelemetry(config, auditMetadata, {
+					advisoryMetadata: config.taskState.lastAdvisoryAudit,
+					planBaseline,
+				}),
+			)
+			config.services.joyRideCache.flushTask(config.taskId, "task_completed")
+			await finalizeRoadmapSession(config.cwd, config.taskId)
+		} catch (error) {
+			Logger.warn("[AttemptCompletionHandler] Post-completion cleanup or telemetry skipped:", error)
+		}
+
+		try {
+			await config.services.browserSession.closeBrowser()
+		} catch (error) {
+			Logger.warn("[AttemptCompletionHandler] Browser cleanup failed; completion retained:", error)
 		}
 
 		// we already sent completion_result says, an empty string asks relinquishes control over button and field
@@ -489,7 +449,11 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 		}
 
 		if (!block.partial && config.focusChainSettings.enabled) {
-			await config.callbacks.updateFCListFromToolResponse(block.params.task_progress)
+			try {
+				await config.callbacks.updateFCListFromToolResponse(block.params.task_progress)
+			} catch (error) {
+				Logger.warn("[AttemptCompletionHandler] Completion checklist update unavailable:", error)
+			}
 		}
 
 		// Run TaskComplete hook BEFORE presenting the "Start New Task" button

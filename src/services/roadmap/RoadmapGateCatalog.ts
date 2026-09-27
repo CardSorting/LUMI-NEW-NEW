@@ -109,7 +109,7 @@ const GATE_CHECKS: GateCheckDef[] = [
 			return i.validation ? i.validation.valid : i.workspace_state.schema_valid !== false
 		},
 		whyClosed: "Schema validation failed — checkpoint pass incomplete",
-		fix: "roadmap(action='validate') — use roadmap(action='explain_gate') for schema fixes",
+		fix: "Edit the reported schema errors in ROADMAP.md, then roadmap(action='validate'); unchanged content has the same result",
 		safe: true,
 		blocksKanbanComplete: false,
 	},
@@ -129,7 +129,7 @@ const GATE_CHECKS: GateCheckDef[] = [
 		whyClosed: "Checkpoint stale vs project activity or missing date",
 		fix: "roadmap(action='checkpoint', context='stale refresh')",
 		safe: true,
-		blocksKanbanComplete: true,
+		blocksKanbanComplete: false,
 	},
 	{
 		id: "bootstrap_complete",
@@ -188,20 +188,22 @@ export function evaluateGateChecks(inputs: GateInputs): { closed: GateClosedEntr
 }
 
 export function blockingClosedGates(closed: GateClosedEntry[], cfg: RoadmapConfig): GateClosedEntry[] {
-	const blocking: GateClosedEntry[] = []
-	for (const gate of closed) {
-		const gateId = gate.id
-		if (gateId === "schema_valid" && cfg.block_kanban_on_invalid_schema) {
-			blocking.push(gate)
-			continue
+	if (!cfg.enabled) return []
+	return closed.filter((gate) => {
+		switch (gate.id) {
+			case "schema_valid":
+				return cfg.block_kanban_on_invalid_schema
+			case "validation_current":
+				return cfg.block_kanban_on_validation_pending
+			case "bootstrap_complete":
+				return cfg.block_kanban_on_bootstrap_incomplete
+			case "checkpoint_fresh":
+				// Freshness is informational; "warn" must never require repair.
+				return false
+			default:
+				return gate.blocks_kanban_complete
 		}
-		if (!gate.blocks_kanban_complete) continue
-		if (gateId === "checkpoint_fresh" && !cfg.warn_on_stale_before_complete) continue
-		if (gateId === "validation_current" && !cfg.block_kanban_on_validation_pending) continue
-		if (gateId === "bootstrap_complete" && !cfg.block_kanban_on_bootstrap_incomplete) continue
-		blocking.push(gate)
-	}
-	return blocking
+	})
 }
 
 export function preferredGateCommand(inputs: GateInputs, isValid: boolean): string {
@@ -209,13 +211,17 @@ export function preferredGateCommand(inputs: GateInputs, isValid: boolean): stri
 	if (inputs.bootstrap_complete === false) return "roadmap(action='apply_bootstrap_fill', context='write')"
 	if (inputs.freshness.stale) return "roadmap(action='checkpoint')"
 	if (!isValid) return "roadmap(action='validate')"
-	return "roadmap(action='guide')"
+	return ""
 }
 
 export async function buildGateStateFromInputs(inputs: GateInputs): Promise<GateState> {
 	const cfg = inputs.config
-	const { closed, open } = evaluateGateChecks(inputs)
-	const blocking = blockingClosedGates(closed, cfg)
+	const checks = evaluateGateChecks(inputs)
+	const blockingIds = new Set(blockingClosedGates(checks.closed, cfg).map((gate) => gate.id))
+	// Reports and callers consume the effective policy, not the catalog's defaults.
+	const closed = checks.closed.map((gate) => ({ ...gate, blocks_kanban_complete: blockingIds.has(gate.id) }))
+	const blocking = closed.filter((gate) => gate.blocks_kanban_complete)
+	const open = checks.open
 	const isValid = inputs.validation ? inputs.validation.valid : inputs.workspace_state.schema_valid !== false
 	const validationPending = !!inputs.workspace_state.validation_pending
 	const bootstrapComplete = inputs.bootstrap_complete !== false
@@ -237,7 +243,8 @@ export async function buildGateStateFromInputs(inputs: GateInputs): Promise<Gate
 		closed_gate_count: closed.length,
 		blocking_gate_count: blocking.length,
 		blocking_gates: blocking,
-		checkpoint_allowed: !cfg.enabled || blocking.length === 0,
+		// Repair must remain available while completion checks are closed.
+		checkpoint_allowed: !cfg.enabled || !blockingIds.has("workspace_safe"),
 		preferred_command: preferredGateCommand(inputs, isValid),
 		validation_pending: validationPending,
 		bootstrap_complete: bootstrapComplete,

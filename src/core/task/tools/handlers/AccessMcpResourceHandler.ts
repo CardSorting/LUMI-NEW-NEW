@@ -1,14 +1,16 @@
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import { DietCodeAsk, DietCodeAskUseMcpServer } from "@shared/ExtensionMessage"
-import { telemetryService } from "@/services/telemetry"
-import { truncateContent } from "@/shared/content-limits"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { showNotificationForApproval } from "../../utils"
+import { executor } from "../../ActionExecutor"
+import { shouldAutoApproveMcp } from "../autoApprove"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
+import { McpToolDisplay } from "../utils/McpToolDisplay"
+import { formatMcpRequestFailure, formatMcpResourceResult } from "../utils/mcpResult"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
+import { reportToolUsage } from "../utils/toolTelemetry"
 
 export class AccessMcpResourceHandler implements IFullyManagedTool {
 	readonly name = DietCodeDefaultTool.MCP_ACCESS
@@ -30,7 +32,7 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 		} satisfies DietCodeAskUseMcpServer)
 
 		// Check if tool should be auto-approved (access_mcp_resource uses general auto-approval)
-		const shouldAutoApprove = uiHelpers.shouldAutoApproveTool(block.name)
+		const shouldAutoApprove = shouldAutoApproveMcp(uiHelpers.getConfig(), block.name, server_name)
 
 		if (shouldAutoApprove) {
 			await uiHelpers.removeLastPartialMessageIfExistsWithType("ask", "use_mcp_server")
@@ -42,6 +44,8 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
+		config.taskState.abortSignal.throwIfAborted()
+		const display = new McpToolDisplay(config)
 		const server_name: string | undefined = block.params.server_name
 		const uri: string | undefined = block.params.uri
 
@@ -72,15 +76,15 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 			arguments: undefined,
 		} satisfies DietCodeAskUseMcpServer)
 
-		const shouldAutoApprove = config.callbacks.shouldAutoApproveTool(block.name)
+		const shouldAutoApprove = shouldAutoApproveMcp(config, block.name, server_name)
 
 		if (shouldAutoApprove) {
 			// Auto-approval flow
-			await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "use_mcp_server")
-			await config.callbacks.say("use_mcp_server", completeMessage, undefined, undefined, false)
+			await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "use_mcp_server"))
+			await display.observe(() => config.callbacks.say("use_mcp_server", completeMessage, undefined, undefined, false))
 
 			// Capture telemetry
-			telemetryService.captureToolUsage(
+			reportToolUsage(
 				config.ulid,
 				block.name,
 				config.api.getModel().id,
@@ -95,13 +99,16 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 			const notificationMessage = `DietCode wants to access ${uri || "unknown resource"} on ${server_name || "unknown server"}`
 
 			// Show notification
-			showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
+			await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("say", "use_mcp_server"))
 
-			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "use_mcp_server")
-
-			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("use_mcp_server", completeMessage, config)
+			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+				"use_mcp_server",
+				completeMessage,
+				config,
+				notificationMessage,
+			)
 			if (!didApprove) {
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					block.name,
 					config.api.getModel().id,
@@ -113,7 +120,7 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 				)
 				return formatResponse.toolDenied()
 			}
-			telemetryService.captureToolUsage(
+			reportToolUsage(
 				config.ulid,
 				block.name,
 				config.api.getModel().id,
@@ -124,6 +131,8 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 				block.isNativeToolCall,
 			)
 		}
+
+		config.taskState.abortSignal.throwIfAborted()
 
 		// Run PreToolUse hook after approval but before execution
 		try {
@@ -137,30 +146,19 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 			throw error
 		}
 
-		await config.callbacks.say("mcp_server_request_started")
-
-		// Execute the MCP resource access
-		const resourceResult = await config.services.mcpHub.readResource(server_name, uri)
-
-		// Process the resource result
-		const resourceResultPretty =
-			resourceResult?.contents
-				.map((item: any) => {
-					if (item.text) {
-						return item.text
-					}
-					return ""
-				})
-				.filter(Boolean)
-				.join("\n\n") || "(Empty response)"
-
-		// Display result to user
-		await config.callbacks.say("mcp_server_response", resourceResultPretty)
-
-		// Truncate response if it exceeds 400KB to prevent context overflow
-		const truncatedResult = truncateContent(resourceResultPretty)
-
-		// Return formatted result
-		return formatResponse.toolResult(truncatedResult)
+		config.taskState.abortSignal.throwIfAborted()
+		await display.observe(() => config.callbacks.say("mcp_server_request_started"))
+		try {
+			const result = await executor.execute(
+				config.ulid,
+				(signal) => config.services.mcpHub.readResource(server_name, uri, signal),
+				{ concurrencyGroup: `mcp:${server_name}`, signal: config.taskState.abortSignal },
+			)
+			const text = formatMcpResourceResult(result)
+			await display.observe(() => config.callbacks.say("mcp_server_response", text))
+			return formatResponse.toolResult(text)
+		} catch (error) {
+			return formatMcpRequestFailure(error, false)
+		}
 	}
 }

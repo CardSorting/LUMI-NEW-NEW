@@ -16,7 +16,7 @@ The system automatically manages PLAN and ACT mode transitions. You do not need 
 
 **ACT MODE:**
 - Allowed: all tools except plan_mode_respond.
-- Implement stepwise; one tool per message. When all prior steps are user-confirmed successful, use attempt_completion.`
+- Implement stepwise; one tool per message. When the requested work and relevant checks are complete, use attempt_completion.`
 
 const XS_CAPABILITIES = `CURIOSITY & FIRST CONTACT
 - Ambiguity or missing requirement/success criterion → use <ask_followup_question> (1–2 focused Qs; options allowed).

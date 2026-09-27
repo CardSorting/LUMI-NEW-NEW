@@ -1,237 +1,161 @@
-import { describe, it } from "mocha"
-import "should"
+import { strict as assert } from "node:assert"
+import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
-import { withRetry } from "./retry"
+import { asyncRetry, getApiRetryDelay, RetriableError, shouldRetryApiError, waitForApiRetry, withRetry } from "./retry"
 
-describe("Retry Decorator", () => {
-	afterEach(() => {
-		sinon.restore()
+async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
+	const values: T[] = []
+	for await (const value of stream) values.push(value)
+	return values
+}
+
+describe("bounded API retries", () => {
+	afterEach(() => sinon.restore())
+
+	it("retries before any output and reports the actual backoff", async () => {
+		const attempts = sinon.spy()
+		class Provider {
+			options = { onRetryAttempt: attempts }
+			calls = 0
+			@withRetry({ maxRetries: 3, baseDelay: 1, maxDelay: 2 })
+			async *createMessage() {
+				if (++this.calls < 3) throw new RetriableError("busy")
+				yield "ready"
+			}
+		}
+		const provider = new Provider()
+		assert.deepEqual(await collect(provider.createMessage()), ["ready"])
+		assert.equal(provider.calls, 3)
+		assert.deepEqual(
+			attempts.args.map((args) => args.slice(0, 3)),
+			[
+				[1, 3, 1],
+				[2, 3, 2],
+			],
+		)
 	})
 
-	describe("withRetry", () => {
-		it("should not retry on success", async () => {
-			let callCount = 0
-			class TestClass {
-				@withRetry()
-				async *successMethod() {
-					callCount++
-					yield "success"
-				}
+	it("never replays text or tool output when a stream fails later", async () => {
+		class Provider {
+			calls = 0
+			@withRetry({ retryAllErrors: true, baseDelay: 1 })
+			async *createMessage() {
+				this.calls++
+				yield { type: "tool_calls", id: "write-once" }
+				throw new RetriableError("disconnected")
 			}
+		}
+		const provider = new Provider()
+		const values: unknown[] = []
+		await assert.rejects(async () => {
+			for await (const chunk of provider.createMessage()) values.push(chunk)
+		}, /disconnected/)
+		assert.equal(provider.calls, 1)
+		assert.deepEqual(values, [{ type: "tool_calls", id: "write-once" }])
+	})
 
-			const test = new TestClass()
-			const result = []
-			for await (const value of test.successMethod()) {
-				result.push(value)
-			}
+	it("does not multiply exhausted retries in an outer recovery layer", async () => {
+		let calls = 0
+		await assert.rejects(
+			asyncRetry(
+				() =>
+					asyncRetry(
+						async () => {
+							calls++
+							throw new RetriableError("busy")
+						},
+						{ maxRetries: 2, baseDelay: 1 },
+					),
+				{ maxRetries: 3, baseDelay: 1 },
+			),
+			/busy/,
+		)
+		assert.equal(calls, 2)
+	})
 
-			callCount.should.equal(1)
-			result.should.deepEqual(["success"])
+	for (const status of [400, 401, 402, 403, 404, 422]) {
+		it(`does not retry HTTP ${status} even with retryAllErrors`, async () => {
+			const action = sinon.stub().rejects(Object.assign(new Error("fix configuration"), { status }))
+			await assert.rejects(asyncRetry(action, { retryAllErrors: true, baseDelay: 1 }), /fix configuration/)
+			sinon.assert.calledOnce(action)
 		})
+	}
 
-		it("should retry on rate limit (429) error", async () => {
-			let callCount = 0
-			class TestClass {
-				@withRetry({ maxRetries: 2, baseDelay: 10, maxDelay: 100 })
-				async *failMethod() {
-					callCount++
-					if (callCount === 1) {
-						const error: any = new Error("Rate limit exceeded")
-						error.status = 429
-						throw error
-					}
-					yield "success after retry"
+	it("recognizes cancellation and transient failures", () => {
+		assert.equal(shouldRetryApiError(Object.assign(new Error(), { name: "AbortError" }), true), false)
+		assert.equal(shouldRetryApiError(Object.assign(new Error(), { code: "ERR_CANCELED" }), true), false)
+		assert.equal(shouldRetryApiError(Object.assign(new Error(), { status: 503 }), true), true)
+		assert.equal(shouldRetryApiError(new Error("connection reset"), true), true)
+		assert.equal(shouldRetryApiError(new Error("unknown")), false)
+	})
+
+	it("uses fractional seconds, Headers instances, HTTP dates and epoch reset headers", () => {
+		const now = Date.parse("2026-09-26T12:00:00Z")
+		sinon.stub(Date, "now").returns(now)
+		assert.equal(getApiRetryDelay({ headers: { "retry-after": "0.01" } }, 0), 10)
+		assert.equal(getApiRetryDelay({ headers: new Headers({ "retry-after": "2" }) }, 0), 2000)
+		assert.equal(getApiRetryDelay({ headers: { "retry-after": "Sat, 26 Sep 2026 12:00:03 GMT" } }, 0), 3000)
+		assert.equal(getApiRetryDelay({ headers: { "x-ratelimit-reset": String(now / 1000 + 4) } }, 0), 4000)
+		assert.equal(getApiRetryDelay({ retryAfter: now / 1000 + 5 }, 0), 5000)
+	})
+
+	it("does not hot-loop on expired, zero or malformed headers", () => {
+		for (const value of ["0", "-1", "invalid", "1262304000", "Fri, 01 Jan 2010 00:00:00 GMT"]) {
+			assert.equal(getApiRetryDelay({ headers: { "retry-after": value } }, 1), 2000)
+		}
+	})
+
+	it("stops automatic retries when the server delay exceeds the budget", async () => {
+		const action = sinon.stub().rejects(Object.assign(new Error("busy"), { status: 429, headers: { "retry-after": "3600" } }))
+		await assert.rejects(asyncRetry(action), /busy/)
+		sinon.assert.calledOnce(action)
+	})
+
+	it("normalizes invalid attempt counts without silently skipping the request", async () => {
+		for (const maxRetries of [0, -1, Number.NaN]) {
+			const action = sinon.stub().resolves("ok")
+			assert.equal(await asyncRetry(action, { maxRetries }), "ok")
+			sinon.assert.calledOnce(action)
+		}
+	})
+
+	it("cancels a provider backoff without sending another request", async () => {
+		const controller = new AbortController()
+		class Provider {
+			calls = 0
+			options = { getRetrySignal: () => controller.signal, onRetryAttempt: () => controller.abort() }
+			@withRetry({ baseDelay: 10_000 })
+			async *createMessage() {
+				this.calls++
+				throw new RetriableError("busy")
+			}
+		}
+		const provider = new Provider()
+		await assert.rejects(collect(provider.createMessage()), { name: "AbortError" })
+		assert.equal(provider.calls, 1)
+	})
+
+	it("cancels an already pending wait immediately", async () => {
+		const controller = new AbortController()
+		const pending = waitForApiRetry(60_000, controller.signal)
+		controller.abort()
+		await assert.rejects(pending, { name: "AbortError" })
+	})
+
+	it("closes a provider generator when the consumer stops after its first chunk", async () => {
+		const closed = sinon.spy()
+		class Provider {
+			@withRetry()
+			async *createMessage() {
+				try {
+					yield "one"
+					yield "two"
+				} finally {
+					closed()
 				}
 			}
-
-			const test = new TestClass()
-			const result = []
-			for await (const value of test.failMethod()) {
-				result.push(value)
-			}
-
-			callCount.should.equal(2)
-			result.should.deepEqual(["success after retry"])
-		})
-
-		it("should not retry on non-rate-limit errors", async () => {
-			let callCount = 0
-			class TestClass {
-				@withRetry()
-				async *failMethod() {
-					callCount++
-					throw new Error("Regular error")
-				}
-			}
-
-			const test = new TestClass()
-			try {
-				for await (const _ of test.failMethod()) {
-					// Should not reach here
-				}
-				throw new Error("Should have thrown")
-			} catch (error: any) {
-				error.message.should.equal("Regular error")
-				callCount.should.equal(1)
-			}
-		})
-
-		it("should respect retry-after header with delta seconds", async () => {
-			let callCount = 0
-			const setTimeoutSpy = sinon.spy(global, "setTimeout")
-			const baseDelay = 1000
-
-			class TestClass {
-				@withRetry({ maxRetries: 2, baseDelay }) // Use large baseDelay to ensure header takes precedence
-				async *failMethod() {
-					callCount++
-					if (callCount === 1) {
-						const error: any = new Error("Rate limit exceeded")
-						error.status = 429
-						error.headers = { "retry-after": "0.01" } // 10ms delay
-						throw error
-					}
-					yield "success after retry"
-				}
-			}
-
-			const test = new TestClass()
-			const result = []
-			for await (const value of test.failMethod()) {
-				result.push(value)
-			}
-
-			callCount.should.equal(2)
-			setTimeoutSpy.calledOnce.should.be.true
-			const [_, delay] = setTimeoutSpy.getCall(0).args
-			delay?.should.equal(0)
-
-			result.should.deepEqual(["success after retry"])
-		})
-
-		it("should respect retry-after header with Unix timestamp", async () => {
-			const setTimeoutSpy = sinon.spy(global, "setTimeout")
-			let callCount = 0
-			const fixedDate = new Date("2010-01-01T00:00:00.000Z")
-			const retryTimestamp = Math.floor(fixedDate.getTime() / 1000) + 0.01 // 10ms in the future
-			const baseDelay = 1000
-
-			class TestClass {
-				@withRetry({ maxRetries: 2, baseDelay }) // Use large baseDelay to ensure header takes precedence
-				async *failMethod() {
-					callCount++
-					if (callCount === 1) {
-						const error: any = new Error("Rate limit exceeded")
-						error.status = 429
-						error.headers = { "retry-after": retryTimestamp.toString() }
-						throw error
-					}
-					yield "success after retry"
-				}
-			}
-
-			const test = new TestClass()
-			const result = []
-			for await (const value of test.failMethod()) {
-				result.push(value)
-			}
-
-			callCount.should.equal(2)
-
-			setTimeoutSpy.calledOnce.should.be.true
-			const [_, delay] = setTimeoutSpy.getCall(0).args
-			delay?.should.equal(fixedDate.getTime())
-
-			result.should.deepEqual(["success after retry"])
-		})
-
-		it("should use exponential backoff when no retry-after header", async () => {
-			const setTimeoutSpy = sinon.spy(global, "setTimeout")
-			let callCount = 0
-			const baseDelay = 10
-
-			class TestClass {
-				@withRetry({ maxRetries: 2, baseDelay, maxDelay: 100 })
-				async *failMethod() {
-					callCount++
-					if (callCount === 1) {
-						const error: any = new Error("Rate limit exceeded")
-						error.status = 429
-						throw error
-					}
-					yield "success after retry"
-				}
-			}
-
-			const test = new TestClass()
-			const result = []
-			for await (const value of test.failMethod()) {
-				result.push(value)
-			}
-
-			callCount.should.equal(2)
-			setTimeoutSpy.calledOnce.should.be.true
-			const [_, delay] = setTimeoutSpy.getCall(0).args
-			delay?.should.equal(baseDelay)
-
-			result.should.deepEqual(["success after retry"])
-		})
-
-		it("should respect maxDelay", async () => {
-			const setTimeoutSpy = sinon.spy(global, "setTimeout")
-			let callCount = 0
-			const baseDelay = 50
-			const maxDelay = 10
-
-			class TestClass {
-				@withRetry({ maxRetries: 3, baseDelay, maxDelay })
-				async *failMethod() {
-					callCount++
-					if (callCount < 3) {
-						const error: any = new Error("Rate limit exceeded")
-						error.status = 429
-						throw error
-					}
-					yield "success after retries"
-				}
-			}
-
-			const test = new TestClass()
-			const result = []
-			for await (const value of test.failMethod()) {
-				result.push(value)
-			}
-
-			callCount.should.equal(3)
-			setTimeoutSpy.calledOnce.should.be.true
-			const [_, delay] = setTimeoutSpy.getCall(0).args
-			delay?.should.equal(maxDelay)
-
-			result.should.deepEqual(["success after retries"])
-		})
-
-		it("should throw after maxRetries attempts", async () => {
-			let callCount = 0
-			class TestClass {
-				@withRetry({ maxRetries: 2, baseDelay: 10 })
-				async *failMethod() {
-					callCount++
-					const error: any = new Error("Rate limit exceeded")
-					error.status = 429
-					throw error
-				}
-			}
-
-			const test = new TestClass()
-			try {
-				for await (const _ of test.failMethod()) {
-					// Should not reach here
-				}
-				throw new Error("Should have thrown")
-			} catch (error: any) {
-				error.message.should.equal("Rate limit exceeded")
-				callCount.should.equal(2) // Initial attempt + 1 retry
-			}
-		})
+		}
+		for await (const _ of new Provider().createMessage()) break
+		sinon.assert.calledOnce(closed)
 	})
 })

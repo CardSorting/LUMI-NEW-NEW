@@ -1,4 +1,5 @@
 import type { ToolParamName, ToolUse } from "@core/assistant-message"
+import { browserActions } from "@shared/ExtensionMessage"
 
 /**
  * Shared constants for tool validation and configuration
@@ -106,7 +107,7 @@ export const PATH_REQUIRED_TOOLS = [
 /**
  * Browser action types for validation
  */
-export const BROWSER_ACTIONS = ["launch", "click", "type", "scroll_down", "scroll_up", "close"] as const
+export const BROWSER_ACTIONS = browserActions
 
 /**
  * Common validation error patterns

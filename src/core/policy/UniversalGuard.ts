@@ -66,7 +66,7 @@ export class UniversalGuard {
 	}
 
 	/**
-	 * Performs all post-execution audits including AST-audit, health-check, and entropy.
+	 * Records completed writes and returns local observations without rewriting files or running checks.
 	 */
 	public async guardPostExecution(block: ToolUse, toolOutput: unknown, prevHash?: string): Promise<PolicyResult> {
 		return this.engine.validatePostExecution(block, toolOutput, prevHash)

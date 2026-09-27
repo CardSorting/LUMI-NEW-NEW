@@ -274,7 +274,7 @@ export interface CommandExecutorCallbacks {
 	 */
 	updateDietCodeMessage: (index: number, updates: { commandCompleted?: boolean; text?: string }) => Promise<void>
 	/** Get dietcode messages array */
-	getDietCodeMessages: () => Array<{ ask?: string; say?: string; text?: string }>
+	getDietCodeMessages: () => Array<{ ts?: number; ask?: string; say?: string; text?: string }>
 	/** Add content to user message for next API request */
 	addToUserMessageContent: (content: { type: string; text: string }) => void
 }
@@ -283,6 +283,10 @@ export interface CommandExecutorCallbacks {
  * Optional per-command execution behavior overrides.
  */
 export interface CommandExecutionOptions {
+	/** Cancellation belongs to this command, including after it continues in the terminal. */
+	signal?: AbortSignal
+	/** When false, stream output without asking whether to continue. */
+	interactive?: boolean
 	/**
 	 * Suppress command interaction/output UI messages (ask/say) for this command execution.
 	 * Command output is still captured and returned as the tool result.
@@ -317,12 +321,14 @@ export type FullCommandExecutorConfig = CommandExecutorConfig
  * Options for command orchestration
  */
 export interface OrchestrationOptions {
+	/** When false, stream output without opening command-output approval prompts. */
+	interactive?: boolean
 	/** The command being executed */
 	command: string
 	/** Optional timeout in seconds */
 	timeoutSeconds?: number
 	/** Whether to show shell integration warning with suggestion */
-	showShellIntegrationSuggestion?: boolean
+	showShellIntegrationSuggestion?: boolean | (() => boolean)
 	/** The type of terminal being used for telemetry tracking. */
 	terminalType?: "vscode"
 	/**

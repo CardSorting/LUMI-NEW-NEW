@@ -75,7 +75,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			// Verify that the continue event was emitted
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
 		})
 
 		it("should execute and capture events from a simple command", async () => {
@@ -97,7 +97,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 			await runPromise
 
 			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
 		})
 
@@ -121,7 +121,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			// Verify that the continue event was emitted
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
 		})
 
 		it("should handle a longer running command", async () => {
@@ -140,7 +140,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			// Verify that the continue and completed events were emitted
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
 
 			// Restore fake timers for other tests
 			sandbox.useFakeTimers()
@@ -165,7 +165,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 			await runPromise
 
 			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
 		})
 
@@ -188,7 +188,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 			await runPromise
 
 			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.equal(Boolean(terminal.shellIntegration?.executeCommand))
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
 		})
 	})
@@ -219,7 +219,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 		// Check that the correct methods were called and events emitted
 		sendTextStub.calledWith("test-command", true).should.be.true()
-		;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+		;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.false()
 		;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
 
 		// This event should be emitted for terminals without shell integration

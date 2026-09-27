@@ -3,7 +3,7 @@
  */
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
-import { applyWorkspaceAuditPolicy } from "@shared/audit/auditGatePolicyLoader"
+import { applyWorkspaceAuditPolicy, resolveCompletionGateOptions } from "@shared/audit/auditGatePolicyLoader"
 import { parsePartialArrayString } from "@/shared/array"
 import { runCompletionAudit } from "@/shared/audit/completionAudit"
 import { DietCodePlanModeResponse, type TaskAuditMetadata } from "@/shared/ExtensionMessage"
@@ -12,7 +12,6 @@ import { DietCodeDefaultTool } from "@/shared/tools"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IPartialBlockHandler, IToolHandler, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
-import { StabilityScribe } from "../utils/StabilityScribe"
 import { getInitialTaskPreview } from "../utils/taskPreview"
 
 const serializePlanPayload = (response: string, options: string[] = []): string =>
@@ -42,47 +41,12 @@ export class PlanModeRespondHandler implements IToolHandler, IPartialBlockHandle
 		const taskProgress: string | undefined = block.params.task_progress
 		const needsMoreExploration: boolean = block.params.needs_more_exploration === "true"
 
-		if (!response) {
+		if (!response?.trim()) {
 			config.taskState.consecutiveMistakeCount++
 			return await config.callbacks.sayAndCreateMissingParamError(block.name, "response")
 		}
 
 		config.taskState.consecutiveMistakeCount = 0
-
-		if (config.mode === "plan") {
-			const universalGuard = config.universalGuard
-			if (universalGuard) {
-				const enforcementResult = await universalGuard.enforceStrategicReviewInPlanMode()
-				if (!enforcementResult.allowed) {
-					return formatResponse.toolResult(enforcementResult.reason || "Strategic review required but incomplete.")
-				}
-			}
-		}
-
-		if (config.strictPlanModeEnabled && config.mode === "plan") {
-			const { content, source } = StabilityScribe.getLatestScratchpadContent(
-				config.messageState.getApiConversationHistory(),
-			)
-			const forensics = config.universalGuard ? config.universalGuard.getForensics() : undefined
-			const scribe = new StabilityScribe(config.cwd, forensics)
-			const audit = await scribe.validate(content, false, undefined, config.messageState.getApiConversationHistory())
-
-			if (!audit.ok && source === "disk" && content === "") {
-				const diagnostics = config.universalGuard ? config.universalGuard.getSystemDiagnostics() : ""
-				return formatResponse.toolResult(
-					`🛑 STRATEGIC REVIEW BLOCK: You are attempting to respond without a valid architectural audit in \`scratchpad.md\`.\n\n` +
-						`💡 I have automatically synthesized your project diagnostics. Please use \`write_to_file\` to initialize your \`scratchpad.md\` with the following template before proceeding:\n\n` +
-						`\`\`\`markdown\n${diagnostics}\n\`\`\``,
-				)
-			}
-
-			if (!audit.ok) {
-				return formatResponse.toolResult(audit.report || "Strategic Review Failed.")
-			}
-			if (audit.synthesis) {
-				config.taskState.sovereignAuditSynthesis = audit.synthesis
-			}
-		}
 
 		if (needsMoreExploration) {
 			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "plan_summary")
@@ -90,12 +54,12 @@ export class PlanModeRespondHandler implements IToolHandler, IPartialBlockHandle
 
 			if (config.taskState.currentTurnExplorationCount > 3) {
 				return formatResponse.toolResult(
-					`⚠️ RECURSIVE EXPLORATION DETECTED: You have requested "more exploration" multiple times in this turn. To avoid an infinite scanning loop, you MUST now synthesize your current findings and present a plan, or use ask_followup_question if you are truly blocked.`,
+					`Exploration has repeated without a plan. Use the evidence already gathered to present an actionable plan. If a specific missing fact prevents action, investigate that fact once or describe the blocker; do not repeat this exploration request.`,
 				)
 			}
 
 			return formatResponse.toolResult(
-				`[You have indicated that you need more exploration. Proceed with calling tools to continue the planning process.]`,
+				`[You have indicated that you need more exploration. Use a tool to resolve the specific missing fact, then present the plan. Do not request permission for routine investigation.]`,
 			)
 		}
 
@@ -109,12 +73,15 @@ export class PlanModeRespondHandler implements IToolHandler, IPartialBlockHandle
 		const payload = serializePlanPayload(response, options)
 
 		let planAuditMetadata: TaskAuditMetadata | undefined
-		try {
-			const taskPreview = getInitialTaskPreview(config) || "plan mode response"
-			planAuditMetadata = await runCompletionAudit(config.taskId, taskPreview, response, taskPreview)
-			planAuditMetadata = await applyWorkspaceAuditPolicy(config.cwd, planAuditMetadata, config)
-		} catch (error) {
-			Logger.warn("[PlanModeRespondHandler] Plan audit metadata generation failed:", error)
+		const gateOptions = await resolveCompletionGateOptions(config, config.cwd)
+		if (gateOptions.gateEnabled && gateOptions.planRegressionGateEnabled) {
+			try {
+				const taskPreview = getInitialTaskPreview(config) || "plan mode response"
+				planAuditMetadata = await runCompletionAudit(config.taskId, taskPreview, response, taskPreview)
+				planAuditMetadata = await applyWorkspaceAuditPolicy(config.cwd, planAuditMetadata, config)
+			} catch (error) {
+				Logger.warn("[PlanModeRespondHandler] Plan audit metadata generation failed:", error)
+			}
 		}
 
 		await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "plan_summary")
@@ -128,65 +95,13 @@ export class PlanModeRespondHandler implements IToolHandler, IPartialBlockHandle
 		if (!switchSuccessful) {
 			Logger.warn("[PlanModeRespondHandler] Failed to auto-switch to ACT MODE after plan presentation")
 			return formatResponse.toolResult(
-				`[Your plan was presented, but automatic transition to ACT MODE failed. Continue with read-only planning tools or retry plan_mode_respond.]`,
+				`[Your plan was presented, but automatic transition to ACT MODE failed. Continue independent read-only work and report the mode transition problem once. Do not repeat this tool call to request the same transition.]`,
 			)
 		}
 
 		config.taskState.didRespondToPlanAskBySwitchingMode = true
 
-		const layerSummary = await this.getLayerPlanningSummary(config)
-		const stabilityHandover = config.strictPlanModeEnabled ? this.getStabilityHandover(config) : ""
-		const architecturalCommitment = layerSummary
-			? `\n\n[ARCHITECTURAL COMMITMENT SEAL]
-You are now in ACT mode. Maintain the integrity of the layers explored:
-- DOMAIN files will remain pure, logic-only, and free of side effects.
-- CORE will coordinate without implementing low-level infrastructure.
-- INFRASTRUCTURE will only implement Domain interfaces via Dependency Inversion.`
-			: ""
-
-		return formatResponse.toolResult(
-			`[Planning complete. Proceed with implementing the plan in ACT MODE.]${layerSummary}${stabilityHandover}${architecturalCommitment}`,
-		)
-	}
-
-	private getStabilityHandover(config: TaskConfig): string {
-		const synthesis = config.taskState.sovereignAuditSynthesis
-		if (!synthesis) return ""
-
-		return `\n\n[STABILITY HANDOVER]
-Your architectural audit resulted in the following hardening synthesis:
-> ${synthesis}
-
-Maintain this commitment throughout the ACT phase.`
-	}
-
-	private async getLayerPlanningSummary(config: TaskConfig): Promise<string> {
-		const { getLayer, getTargetPath } = require("@/utils/joy-zoning")
-		const affectedLayers = new Set<string>()
-
-		const history = config.messageState.getApiConversationHistory()
-		for (const msg of history) {
-			if (msg.role === "assistant" && Array.isArray(msg.content)) {
-				for (const block of msg.content) {
-					if (block.type === "tool_use") {
-						const input = block.input as Record<string, string>
-						const pathParam = getTargetPath(input)
-						if (pathParam) {
-							const layer = getLayer(pathParam)
-							if (layer) affectedLayers.add(layer.toUpperCase())
-						}
-					}
-				}
-			}
-		}
-
-		if (affectedLayers.size === 0) return ""
-
-		return `\n\n[JOY-ZONING PLANNING DIGEST]
-You have explored files in the following layers: **${Array.from(affectedLayers).join(", ")}**.
-Before implementing, ensure your plan explicitly accounts for these boundaries:
-- Domain logic remains pure (no I/O, no UI imports).
-- Infrastructure adapters bridge the Domain to external services.
-- Core coordinates but does not implement low-level logic.`
+		config.taskState.currentTurnExplorationCount = 0
+		return formatResponse.toolResult("[Planning complete. Proceed with implementing the plan in ACT MODE.]")
 	}
 }

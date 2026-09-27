@@ -18,26 +18,16 @@ export const formatResponse = {
 	},
 
 	condense: () =>
-		`The user has accepted the condensed conversation summary you generated. This summary covers important details of the historical conversation with the user which has been truncated.\n<explicit_instructions type="condense_response">It's crucial that you respond by ONLY asking the user what you should work on next. You should NOT take any initiative or make any assumptions about continuing with work. For example you should NOT suggest file changes or attempt to read any files.\nWhen asking the user what you should work on next, you can reference information in the summary which was just generated. However, you should NOT reference information outside of what's contained in the summary for this response. Keep this response CONCISE.</explicit_instructions>`,
+		`The user accepted the condensed conversation summary. Continue the unfinished task from the recorded state, preserving the user's scope, permissions, corrections, and verification results. Take the next authorized action without restarting completed work or asking what to do next. If the task is already complete, report its outcome concisely.`,
 
-	toolDenied: () => `The user denied this operation.`,
+	toolDenied: () =>
+		`The user denied this operation. Do not resubmit the same request or rephrase it to evade the denial. Continue independent authorized work, or explain the specific blocker if this action is required.`,
 
 	toolError: (error?: string) =>
-		`The tool execution failed with the following error:\n<error>\n${error}\n</error>\n\n💡 SOVEREIGN NUDGE: If you are hitting a systemic block or recursive error, perform a # SOVEREIGN BREATH or # SOVEREIGN AUDIT in \`scratchpad.md\` to recalibrate and justify your next move.`,
+		`The tool execution failed:\n<error>\n${error}\n</error>\n\nUse the error to choose a concrete recovery step. Retry only after changing the relevant input or resolving the cause. If blocked, continue independent authorized work and report the limitation once.`,
 
 	architecturalCorrection: (error: string) =>
-		`🏗️ ARCHITECTURAL SOVEREIGNTY CHALLENGE` +
-		`\n\n<error>\n${error}\n</error>\n\n` +
-		`Your previous tool execution was REJECTED by the Substrate. To clear metabolic interdiction, you MUST align this code with the current architectural mandate.\n\n` +
-		`Resilience Directives:\n` +
-		`1. **Respect Layer Purity**: Every source must declare a [LAYER] tag.\n` +
-		`2. **Observe Geographic Boundaries**: Files must reside in their assigned directory.\n` +
-		`3. **Reduce Entropy**: Follow remediation hints to restore structural order.\n\n` +
-		`💡 **Healing Strategy**:\n` +
-		`- Check Metabolic Pressure in the header.\n` +
-		`- Utilize Restoration Tokens for build-critical repairs.\n` +
-		`- Address the specific violations listed below.\n\n` +
-		`Your write was NOT applied. Please heal the substrate and retry.`,
+		`Workspace policy blocked this change\n\n<error>\n${error}\n</error>\n\nThe write was not applied. Address the specific violations reported by the active workspace policy before retrying. Do not expand the task into an unrelated architectural audit. If the policy prevents an authorized repair, report the concrete conflict and continue independent work.`,
 
 	postExecutionSummary: (
 		telemetry: {

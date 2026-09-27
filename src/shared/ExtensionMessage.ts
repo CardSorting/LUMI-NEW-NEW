@@ -272,11 +272,22 @@ export type HookOutputStreamMeta = {
 }
 
 // must keep in sync with system prompt
-export const browserActions = ["launch", "click", "type", "scroll_down", "scroll_up", "close"] as const
+export const browserActions = [
+	"launch",
+	"navigate",
+	"refresh",
+	"inspect",
+	"click",
+	"type",
+	"scroll_down",
+	"scroll_up",
+	"close",
+] as const
 export type BrowserAction = (typeof browserActions)[number]
 
 export interface DietCodeSayBrowserAction {
 	action: BrowserAction
+	url?: string
 	coordinate?: string
 	text?: string
 }
@@ -329,6 +340,7 @@ export interface DietCodeSaySubagentStatus {
 }
 
 export type BrowserActionResult = {
+	error?: string
 	screenshot?: string
 	logs?: string
 	currentUrl?: string

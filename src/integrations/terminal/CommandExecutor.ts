@@ -29,11 +29,12 @@ export class CommandExecutor {
 	private terminalManager: ITerminalManager
 	private callbacks: CommandExecutorCallbacks
 
-	// Track the currently executing foreground process for cancellation
-	private currentProcess: TerminalProcessResultPromise | null = null
-
-	// Flag to track if the current command was cancelled externally
-	private wasCancelledExternally = false
+	// Processes remain owned until terminal completion, even after a timed wait returns.
+	private readonly activeProcesses = new Map<
+		TerminalProcessResultPromise,
+		{ command: string; detached: boolean; cancelled: boolean; cancel: () => void }
+	>()
+	private launchQueue: Promise<void> = Promise.resolve()
 
 	// Track shell integration warnings to determine when to show the stronger troubleshooting suggestion
 	private shellIntegrationWarningTracker: ShellIntegrationWarningTracker = {
@@ -68,37 +69,84 @@ export class CommandExecutor {
 		const manager = this.terminalManager
 		Logger.info(`Executing command in VS Code terminal: ${command}`)
 
-		// Get terminal and run command
-		const terminalInfo = await manager.getOrCreateTerminal(this.cwd)
-		terminalInfo.terminal.show()
-		const process = manager.runCommand(terminalInfo, command)
-
-		// Reset cancellation flag and track the current process
-		this.wasCancelledExternally = false
-		this.currentProcess = process
-		const clearCurrentProcess = () => {
-			this.currentProcess = null
+		// Only terminal acquisition/start is serialized. Once runCommand marks its
+		// terminal busy, independent commands can execute concurrently in other terminals.
+		const previousLaunch = this.launchQueue
+		let releaseLaunch!: () => void
+		this.launchQueue = new Promise<void>((resolve) => {
+			releaseLaunch = resolve
+		})
+		let process: TerminalProcessResultPromise
+		await previousLaunch
+		try {
+			options?.signal?.throwIfAborted()
+			const terminalInfo = await manager.getOrCreateTerminal(this.cwd)
+			options?.signal?.throwIfAborted()
+			if (!options?.suppressUserInteraction) terminalInfo.terminal.show()
+			process = manager.runCommand(terminalInfo, command)
+		} finally {
+			releaseLaunch()
 		}
-		process.once("completed", clearCurrentProcess)
-		process.once("error", clearCurrentProcess)
+
+		const state = {
+			command,
+			detached: false,
+			cancelled: false,
+			cancel: () => {
+				if (state.cancelled || !this.activeProcesses.has(process)) return
+				state.cancelled = true
+				if (process.terminate) {
+					Promise.resolve()
+						.then(() => process.terminate!())
+						.catch((error) => Logger.warn("Command termination failed:", error))
+				}
+			},
+		}
+		this.activeProcesses.set(process, state)
+		const clearProcess = () => {
+			this.activeProcesses.delete(process)
+			options?.signal?.removeEventListener("abort", state.cancel)
+			process.removeListener("completed", clearProcess)
+			process.removeListener("error", clearProcess)
+			try {
+				this.callbacks.updateBackgroundCommandState(this.activeProcesses.size > 0)
+			} catch (error) {
+				Logger.warn("Command status display unavailable; process ownership released:", error)
+			}
+		}
+		process.once("completed", clearProcess)
+		process.once("error", clearProcess)
+		void process.catch(clearProcess)
+		options?.signal?.addEventListener("abort", state.cancel, { once: true })
+		if (options?.signal?.aborted) state.cancel()
 
 		// Use shared orchestration logic.
-		const result = await orchestrateCommandExecution(process, manager, this.callbacks, {
-			command,
-			timeoutSeconds,
-			suppressUserInteraction: options?.suppressUserInteraction,
-			showShellIntegrationSuggestion: this.shouldShowBackgroundTerminalSuggestion(),
-			terminalType: "vscode",
-		})
+		const result = await orchestrateCommandExecution(
+			process,
+			manager,
+			{
+				...this.callbacks,
+				updateBackgroundCommandState: () => this.callbacks.updateBackgroundCommandState(this.activeProcesses.size > 0),
+			},
+			{
+				command,
+				timeoutSeconds,
+				suppressUserInteraction: options?.suppressUserInteraction,
+				interactive: options?.interactive,
+				showShellIntegrationSuggestion: () => this.shouldShowBackgroundTerminalSuggestion(),
+				terminalType: "vscode",
+			},
+		)
+		state.detached = !result.completed
 
 		// If the command was cancelled externally (via cancel button), return a clear cancellation message
 		// This ensures the AI agent knows the command was cancelled by the user
-		if (this.wasCancelledExternally) {
+		if (state.cancelled) {
 			const outputSoFar =
 				result.outputLines.length > 0
 					? `\nOutput captured before cancellation:\n${manager.processOutput(result.outputLines)}`
 					: ""
-			return [true, `Command was cancelled by the user.${outputSoFar}`]
+			return [true, `Command execution was cancelled.${outputSoFar}`]
 		}
 
 		return [result.userRejected, result.result]
@@ -112,14 +160,11 @@ export class CommandExecutor {
 	async cancelBackgroundCommand(): Promise<boolean> {
 		let cancelled = false
 
-		// Cancel the current foreground process if the host process supports termination.
-		if (this.currentProcess && typeof (this.currentProcess as any).terminate === "function") {
-			// Set flag so execute() knows the command was cancelled externally
-			this.wasCancelledExternally = true
-			;(this.currentProcess as any).terminate()
-			this.currentProcess = null
-			cancelled = true
-			Logger.info("Cancelled foreground command")
+		for (const [process, state] of this.activeProcesses) {
+			if (process.terminate && !state.cancelled) {
+				state.cancel()
+				cancelled = true
+			}
 		}
 
 		// Update UI state and notify user by modifying existing message
@@ -127,21 +172,21 @@ export class CommandExecutor {
 		// to avoid interfering with any pending ask() dialogs (which would cause
 		// "Current ask promise was ignored" errors)
 		if (cancelled) {
-			this.callbacks.updateBackgroundCommandState(false)
+			try {
+				this.callbacks.updateBackgroundCommandState(this.activeProcesses.size > 0)
 
-			// Wait for terminal buffers to flush before updating the message
-			// This prevents the cancellation notice from appearing in the middle of output
-			await new Promise((resolve) => setTimeout(resolve, 300))
-
-			// Find the last command_output message and update it
-			const messages = this.callbacks.getDietCodeMessages()
-			const lastCommandOutputIndex = findLastIndex(messages, (m) => m.ask === "command_output")
-			if (lastCommandOutputIndex !== -1) {
-				const existingText = messages[lastCommandOutputIndex].text || ""
-				const cancellationNotice = "\n\nCommand(s) cancelled by user."
-				await this.callbacks.updateDietCodeMessage(lastCommandOutputIndex, {
-					text: existingText + cancellationNotice,
-				})
+				// Find the last command_output message and update it
+				const messages = this.callbacks.getDietCodeMessages()
+				const lastCommandOutputIndex = findLastIndex(messages, (m) => m.ask === "command_output")
+				if (lastCommandOutputIndex !== -1) {
+					const existingText = messages[lastCommandOutputIndex].text || ""
+					const cancellationNotice = "\n\nCommand(s) cancelled by user."
+					await this.callbacks.updateDietCodeMessage(lastCommandOutputIndex, {
+						text: existingText + cancellationNotice,
+					})
+				}
+			} catch (error) {
+				Logger.warn("Cancellation display unavailable; cancellation requests retained:", error)
 			}
 		}
 
@@ -152,14 +197,17 @@ export class CommandExecutor {
 	 * Check if any detached background commands are active.
 	 */
 	hasActiveBackgroundCommand(): boolean {
-		return false
+		return [...this.activeProcesses.values()].some((state) => state.detached)
 	}
 
 	/**
 	 * Get a summary of detached background commands for environment details.
 	 */
 	getBackgroundCommandSummary(): string | undefined {
-		return undefined
+		const running = [...this.activeProcesses.values()].filter((state) => state.detached)
+		return running.length
+			? `Commands still running in existing terminals (do not relaunch):\n${running.map((state) => `- ${state.command}`).join("\n")}`
+			: undefined
 	}
 
 	/**

@@ -22,6 +22,8 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 	}
 
 	async handlePartialBlock(block: ToolUse, uiHelpers: StronglyTypedUIHelpers): Promise<void> {
+		const config = uiHelpers.getConfig()
+		if (config.yoloModeToggled || config.isSubagentExecution) return
 		const question = block.params.question || ""
 		const optionsRaw = block.params.options || "[]"
 		const sharedMessage = {
@@ -33,7 +35,7 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
-		const question: string | undefined = block.params.question
+		const question = block.params.question?.trim()
 		const optionsRaw: string | undefined = block.params.options
 
 		// Validate required parameter
@@ -43,16 +45,14 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 		}
 		config.taskState.consecutiveMistakeCount = 0
 
-		// In yolo mode, don't wait for user input - instruct AI to use tools instead
-		if (config.yoloModeToggled) {
-			// Log the question that was asked but auto-respond
-			await config.callbacks.say(
-				"info",
-				`[YOLO MODE] Auto-responding to question: "${question.substring(0, 100)}${question.length > 100 ? "..." : ""}"`,
-			)
-
+		if (config.yoloModeToggled || config.isSubagentExecution) {
+			await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "followup")
 			return formatResponse.toolResult(
-				`[YOLO MODE: User input is not available in non-interactive mode. You must use available tools (read_file, list_files, search_files, etc.) to gather the information you need instead of asking the user. Proceed with using tools to find the answer to your question: "${question}"]`,
+				`No user answer was requested. Use existing context and your judgment for routine, reversible decisions within the task. ` +
+					`If a relevant fact can be found with a targeted check, check it once; otherwise state a reasonable assumption and proceed. ` +
+					`Do not invent credentials, required facts, or authorization. If those are essential, report the specific blocker once ` +
+					`${config.isSubagentExecution ? "in your handoff to the parent" : "to the user"} and continue independent work. ` +
+					`Do not repeat this question or scan for a personal preference that is not in the workspace. Question: "${question}"`,
 			)
 		}
 
@@ -77,6 +77,8 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 			images,
 			files: followupFiles,
 		} = await config.callbacks.ask("followup", JSON.stringify(sharedMessage), false)
+
+		if (config.taskState.abort) return formatResponse.toolResult("Question cancelled.")
 
 		// Check if options contains the text response
 		if (optionsRaw && text && options.includes(text)) {
@@ -113,6 +115,6 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 			fileContentString = await processFilesIntoText(followupFiles)
 		}
 
-		return formatResponse.toolResult(`<answer>\n${text}\n</answer>`, images, fileContentString)
+		return formatResponse.toolResult(`<answer>\n${text ?? "No text answer provided."}\n</answer>`, images, fileContentString)
 	}
 }

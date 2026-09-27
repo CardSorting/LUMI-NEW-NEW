@@ -272,6 +272,7 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 
 			// For each file: prepare, get approval, then save
 			for (const message of messages) {
+				config.taskState.abortSignal.throwIfAborted()
 				const messagePath = message.path
 				if (!messagePath) {
 					continue
@@ -306,8 +307,11 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 				}
 
 				// Save the changes for this file after approval
+				config.taskState.abortSignal.throwIfAborted()
 				const fileResult = await this.saveFileChange(change, operationPath)
 				if (fileResult) {
+					config.taskState.didEditFile = true
+					config.taskState.workspaceRevision++
 					// For move operations, we need to handle both old and new paths
 					if (change.type === PatchActionType.UPDATE && change.movePath) {
 						applyResults[change.movePath] = fileResult
@@ -341,7 +345,6 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 
 			for (const [path, result] of Object.entries(applyResults)) {
 				if (result.deleted) {
-					config.taskState.didEditFile = true
 					responseLines.push(`\n${path}: [deleted]`)
 				} else {
 					// Format response similar to WriteToFileToolHandler

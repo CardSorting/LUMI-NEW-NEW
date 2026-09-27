@@ -1,4 +1,14 @@
 import { nanoid } from "nanoid"
+import { Logger } from "./Logger"
+
+/** Session statistics are observational and must never turn a completed action into a retry. */
+export function observeSession(observe: (session: Session) => void): void {
+	try {
+		observe(Session.get())
+	} catch (error) {
+		Logger.warn("Session observation unavailable; continuing execution:", error)
+	}
+}
 
 export interface ToolCallRecord {
 	name: string

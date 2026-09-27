@@ -1,15 +1,16 @@
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import { DietCodeAsk, DietCodeAskUseMcpServer } from "@shared/ExtensionMessage"
-import { telemetryService } from "@/services/telemetry"
-import { truncateContent } from "@/shared/content-limits"
 import { DietCodeDefaultTool } from "@/shared/tools"
 import { executor } from "../../ActionExecutor"
-import { showNotificationForApproval } from "../../utils"
+import { shouldAutoApproveMcp } from "../autoApprove"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
+import { McpToolDisplay } from "../utils/McpToolDisplay"
+import { formatMcpRequestFailure, formatMcpToolResult } from "../utils/mcpResult"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
+import { reportToolUsage } from "../utils/toolTelemetry"
 
 export class UseMcpToolHandler implements IFullyManagedTool {
 	readonly name = DietCodeDefaultTool.MCP_USE
@@ -32,7 +33,7 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 
 		// Check if tool should be auto-approved using MCP-specific logic
 		const config = uiHelpers.getConfig()
-		const shouldAutoApprove = config.callbacks.shouldAutoApproveTool(block.name)
+		const shouldAutoApprove = shouldAutoApproveMcp(config, block.name, server_name, tool_name)
 
 		if (shouldAutoApprove) {
 			await uiHelpers.removeLastPartialMessageIfExistsWithType("ask", "use_mcp_server")
@@ -44,6 +45,8 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
+		config.taskState.abortSignal.throwIfAborted()
+		const display = new McpToolDisplay(config)
 		const server_name: string | undefined = block.params.server_name
 		const tool_name: string | undefined = block.params.tool_name
 		const mcp_arguments: string | undefined = block.params.arguments
@@ -68,12 +71,14 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 		let parsedArguments: Record<string, unknown> | undefined
 		if (mcp_arguments) {
 			try {
-				parsedArguments = JSON.parse(mcp_arguments)
+				const parsed: unknown = JSON.parse(mcp_arguments)
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+					throw new Error("MCP arguments must be an object")
+				parsedArguments = parsed as Record<string, unknown>
 			} catch (_error) {
 				config.taskState.consecutiveMistakeCount++
-				await config.callbacks.say(
-					"error",
-					`DietCode tried to use ${tool_name} with an invalid JSON argument. Retrying...`,
+				await display.observe(() =>
+					config.callbacks.say("error", `Invalid arguments for ${tool_name}: expected a JSON object.`),
 				)
 				return formatResponse.toolError(formatResponse.invalidMcpToolArgumentError(server_name, tool_name))
 			}
@@ -89,17 +94,13 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 			arguments: mcp_arguments,
 		} satisfies DietCodeAskUseMcpServer)
 
-		const isToolAutoApproved = config.services.mcpHub.connections
-			?.find((conn: any) => conn.server.name === server_name)
-			?.server.tools?.find((tool: any) => tool.name === tool_name)?.autoApprove
-
-		if (config.callbacks.shouldAutoApproveTool(block.name) || isToolAutoApproved) {
+		if (shouldAutoApproveMcp(config, block.name, server_name, tool_name)) {
 			// Auto-approval flow
-			await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "use_mcp_server")
-			await config.callbacks.say("use_mcp_server", completeMessage, undefined, undefined, false)
+			await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "use_mcp_server"))
+			await display.observe(() => config.callbacks.say("use_mcp_server", completeMessage, undefined, undefined, false))
 
 			// Capture telemetry
-			telemetryService.captureToolUsage(
+			reportToolUsage(
 				config.ulid,
 				block.name,
 				config.api.getModel().id,
@@ -114,13 +115,16 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 			const notificationMessage = `DietCode wants to use ${tool_name || "unknown tool"} on ${server_name || "unknown server"}`
 
 			// Show notification
-			showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
+			await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("say", "use_mcp_server"))
 
-			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "use_mcp_server")
-
-			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("use_mcp_server", completeMessage, config)
+			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+				"use_mcp_server",
+				completeMessage,
+				config,
+				notificationMessage,
+			)
 			if (!didApprove) {
-				telemetryService.captureToolUsage(
+				reportToolUsage(
 					config.ulid,
 					block.name,
 					config.api.getModel().id,
@@ -132,7 +136,7 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 				)
 				return formatResponse.toolDenied()
 			}
-			telemetryService.captureToolUsage(
+			reportToolUsage(
 				config.ulid,
 				block.name,
 				config.api.getModel().id,
@@ -143,6 +147,8 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 				block.isNativeToolCall,
 			)
 		}
+
+		config.taskState.abortSignal.throwIfAborted()
 
 		// Run PreToolUse hook after approval but before execution
 		try {
@@ -156,68 +162,21 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 			throw error
 		}
 
-		// Show MCP request started message
-		await config.callbacks.say("mcp_server_request_started")
-
+		config.taskState.abortSignal.throwIfAborted()
+		await display.observe(() => config.callbacks.say("mcp_server_request_started"))
+		await display.notifications(server_name)
 		try {
-			// Check for any pending notifications before the tool call
-			const notificationsBefore = config.services.mcpHub.getPendingNotifications()
-			for (const notification of notificationsBefore) {
-				await config.callbacks.say("mcp_notification", `[${notification.serverName}] ${notification.message}`)
-			}
-
-			// Execute the MCP tool with reliability wrapper
-			const toolResult = await executor.execute(
+			const result = await executor.execute(
 				config.ulid,
-				() => config.services.mcpHub.callTool(server_name, tool_name, parsedArguments, config.ulid),
-				{ concurrencyGroup: "mcp" },
+				(signal) => config.services.mcpHub.callTool(server_name, tool_name, parsedArguments, config.ulid, signal),
+				{ concurrencyGroup: `mcp:${server_name}`, signal: config.taskState.abortSignal },
 			)
-
-			// Check for any pending notifications after the tool call
-			const notificationsAfter = config.services.mcpHub.getPendingNotifications()
-			for (const notification of notificationsAfter) {
-				await config.callbacks.say("mcp_notification", `[${notification.serverName}] ${notification.message}`)
-			}
-
-			// Process tool result
-			const toolResultImages =
-				toolResult?.content
-					.filter((item: any) => item.type === "image")
-					.map((item: any) => `data:${item.mimeType};base64,${item.data}`) || []
-
-			let toolResultText =
-				(toolResult?.isError ? "Error:\n" : "") +
-					toolResult?.content
-						.map((item: any) => {
-							if (item.type === "text") {
-								return item.text
-							}
-							if (item.type === "resource") {
-								const { blob: _blob, ...rest } = item.resource
-								return JSON.stringify(rest, null, 2)
-							}
-							return ""
-						})
-						.filter(Boolean)
-						.join("\n\n") || "(No response)"
-
-			// webview extracts images from the text response to display in the UI
-			const toolResultToDisplay = toolResultText + toolResultImages?.map((image: any) => `\n\n${image}`).join("")
-			await config.callbacks.say("mcp_server_response", toolResultToDisplay)
-
-			// Handle model image support
-			const supportsImages = config.api.getModel().info.supportsImages ?? false
-			if (toolResultImages.length > 0 && !supportsImages) {
-				toolResultText += `\n\n[${toolResultImages.length} images were provided in the response, and while they are displayed to the user, you do not have the ability to view them.]`
-			}
-
-			// Truncate response if it exceeds 400KB to prevent context overflow
-			toolResultText = truncateContent(toolResultText)
-
-			// Return formatted result (only pass images if model supports them)
-			return formatResponse.toolResult(toolResultText, supportsImages ? toolResultImages : undefined)
+			const formatted = formatMcpToolResult(result, config.api.getModel().info.supportsImages ?? false)
+			await display.notifications(server_name)
+			await display.observe(() => config.callbacks.say("mcp_server_response", formatted.displayText))
+			return formatted.content
 		} catch (error) {
-			return `Error executing MCP tool: ${(error as Error)?.message}`
+			return formatMcpRequestFailure(error, true)
 		}
 	}
 }

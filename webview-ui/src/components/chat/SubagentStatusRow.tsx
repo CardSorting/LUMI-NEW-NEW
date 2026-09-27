@@ -16,7 +16,7 @@ import {
 	LoaderCircleIcon,
 	NetworkIcon,
 } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useId, useMemo, useRef, useState } from "react"
 import MarkdownBlock from "../common/MarkdownBlock"
 import ExpandHandle from "./ExpandHandle"
 import { ParentAuditGateBadge } from "./ParentAuditGateBadge"
@@ -154,7 +154,7 @@ function SubagentPromptText({ prompt, isExpanded, onToggle }: SubagentPromptText
 		observer.observe(element)
 
 		return () => observer.disconnect()
-	}, [isExpanded])
+	}, [isExpanded, prompt])
 
 	return (
 		<div>
@@ -168,7 +168,8 @@ function SubagentPromptText({ prompt, isExpanded, onToggle }: SubagentPromptText
 	)
 }
 
-export default function SubagentStatusRow({ message, isLast, lastModifiedMessage }: SubagentStatusRowProps) {
+export default function SubagentStatusRow({ message, lastModifiedMessage }: SubagentStatusRowProps) {
+	const outputId = useId()
 	const [expandedItems, setExpandedItems] = useState<Record<number, boolean>>({})
 	const [expandedPrompts, setExpandedPrompts] = useState<Record<number, boolean>>({})
 	const data = useMemo(() => parseSubagentRowData(message), [message])
@@ -177,18 +178,15 @@ export default function SubagentStatusRow({ message, isLast, lastModifiedMessage
 		return <div className="text-foreground opacity-80">Couldn't show helper status just now.</div>
 	}
 
-	const resumedBeforeNextVisibleMessage =
-		isLast && lastModifiedMessage?.say === "api_req_started" && (lastModifiedMessage.ts ?? 0) > message.ts
-
 	const wasCancelled =
 		data.status === "running" &&
-		(!isLast ||
-			lastModifiedMessage?.ask === "resume_task" ||
+		(lastModifiedMessage?.ts ?? 0) > message.ts &&
+		(lastModifiedMessage?.ask === "resume_task" ||
 			lastModifiedMessage?.ask === "resume_completed_task" ||
-			resumedBeforeNextVisibleMessage)
+			lastModifiedMessage?.say === "api_req_started")
 
 	const singular = data.items.length === 1
-	const title = singular ? "I could use a little extra help here:" : "A few helpers could explore this together:"
+	const title = singular ? "Helper progress" : "Helpers progress"
 	const isPromptConstructionRow = message.ask === "use_subagents" || message.say === "use_subagents"
 	const toggleItem = (index: number) => {
 		setExpandedItems((prev) => ({
@@ -231,6 +229,10 @@ export default function SubagentStatusRow({ message, isLast, lastModifiedMessage
 							<div className="flex items-start gap-2">
 								{statusIcon(displayStatus)}
 								<div className="min-w-0 flex-1">
+									<div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+										<span className="font-medium">{entry.name || `Helper ${index + 1}`}</span>
+										<span className="text-description capitalize">{displayStatus}</span>
+									</div>
 									<SubagentPromptText
 										isExpanded={expandedPrompts[entry.index] === true}
 										onToggle={() => togglePrompt(entry.index)}
@@ -265,8 +267,10 @@ export default function SubagentStatusRow({ message, isLast, lastModifiedMessage
 							)}
 							{shouldShowStats && hasDetails && (
 								<button
+									aria-controls={`${outputId}-${entry.index}`}
+									aria-expanded={isExpanded}
 									aria-label={isExpanded ? "Hide subagent output" : "Show subagent output"}
-									className="mt-1 text-[11px] opacity-80 flex items-center gap-1 bg-transparent border-0 p-0 cursor-pointer text-left text-foreground w-full"
+									className="mt-1 text-xs flex items-center gap-1 bg-transparent border-0 p-1 cursor-pointer text-left text-foreground w-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--vscode-focusBorder)]"
 									onClick={() => toggleItem(entry.index)}
 									type="button">
 									{isExpanded ? (
@@ -280,14 +284,16 @@ export default function SubagentStatusRow({ message, isLast, lastModifiedMessage
 							{shouldShowStats && !hasDetails && latestToolCallText && (
 								<div className="mt-1 text-[10px] opacity-70 min-w-0 truncate font-mono">{latestToolCallText}</div>
 							)}
-							{isExpanded && entry.result && entry.status === "completed" && (
-								<div className="mt-2 text-xs opacity-80 wrap-anywhere overflow-hidden">
-									<MarkdownBlock markdown={entry.result} />
-								</div>
-							)}
-							{isExpanded && entry.error && entry.status === "failed" && (
-								<div className="mt-2 text-xs text-error whitespace-pre-wrap break-words">{entry.error}</div>
-							)}
+							<div hidden={!isExpanded} id={`${outputId}-${entry.index}`}>
+								{entry.result && entry.status === "completed" && (
+									<div className="mt-2 text-xs opacity-80 wrap-anywhere overflow-hidden">
+										<MarkdownBlock markdown={entry.result} />
+									</div>
+								)}
+								{entry.error && entry.status === "failed" && (
+									<div className="mt-2 text-xs text-error whitespace-pre-wrap break-words">{entry.error}</div>
+								)}
+							</div>
 						</div>
 					)
 				})}

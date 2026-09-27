@@ -13,7 +13,7 @@ CRITICAL REQUIREMENTS (MUST FOLLOW)
 - You can use EXACTLY ONE tool per assistant message. NO parallel tool calls. Never emit two or more tool calls in the same message.
 - Tool calls MUST be XML ONLY. You are STRICTLY FORBIDDEN from using OpenAI/JSON tool calling or <tool_call> blocks.
 - When you call a tool, your entire assistant message must contain ONLY the XML tool call (no extra text, no markdown).
-- After every tool call, you MUST wait for the user's response/tool result before continuing.
+- After every tool call, inspect its result before continuing. Do not request additional user confirmation for successful authorized work.
 - Never assume a tool worked unless the user/tool result confirms it.
 - If the user's request is vague, you MUST use ask_followup_question first to clarify before using read_file, search_files, or other tools. Do not read files or propose changes until you have clarified.
 - Do NOT repeat the same tool with the same or similar parameters once you have results. Use the result to take the next step: pick one match, use read_file on that file, then take the next action; do not search again in a loop.
@@ -59,8 +59,8 @@ const TRINITY_RULES_TEMPLATE = (context: SystemPromptContext) => `RULES
 - When using the replace_in_file tool, you must include complete lines in your SEARCH blocks, not partial lines. The system requires exact line matches and cannot match partial lines. For example, if you want to match a line containing "const x = 5;", your SEARCH block must include the entire line, not just "x = 5" or other fragments.
 - When using the replace_in_file tool, if you use multiple SEARCH/REPLACE blocks, list them in the order they appear in the file. For example if you need to make changes to both line 10 and line 50, first include the SEARCH/REPLACE block for line 10, followed by the SEARCH/REPLACE block for line 50.
 - When using the replace_in_file tool, Do NOT add extra characters to the markers (e.g., ------- SEARCH> is INVALID). Do NOT forget to use the closing +++++++ REPLACE marker. Do NOT modify the marker format in any way. Malformed XML will cause complete tool failure and break the entire editing process.
-- It is critical you wait for the user's response after each tool use, in order to confirm the success of the tool use. For example, if asked to make a todo app, you would create a file, wait for the user's response it was created successfully, then create another file if needed, wait for the user's response it was created successfully, etc.{{BROWSER_WAIT_RULES}}
-- MCP operations should be used one at a time, similar to other tool usage. Wait for confirmation of success before proceeding with additional operations.
+- Inspect tool results before dependent work, then continue within the user's authorized scope. A successful tool result is sufficient confirmation; do not ask the user to reconfirm routine actions. Honor approval prompts, denials, and stop requests.{{BROWSER_WAIT_RULES}}
+- Apply the same dependency and approval rules to MCP tools: inspect results and continue authorized work without extra confirmation.
 - You are STRICTLY FORBIDDEN from using any format other than XML for tool calls.
   WRONG: {"tool": "read_file", "path": "main.py"} or tool: read_file, path: main.py or <tool_call>{"name": "read_file"}</tool_call>
   CORRECT: <read_file><path>main.py</path></read_file>

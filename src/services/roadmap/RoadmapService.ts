@@ -19,6 +19,7 @@ import { clearLastError, formatWatchReport, readCurrentProgress, readLastError, 
 import {
 	bootstrapSkeleton,
 	findBootstrapPlaceholders,
+	getSectionBody,
 	HEALTH_STATUSES,
 	REQUIRED_SECTIONS,
 	RoadmapValidation,
@@ -1236,11 +1237,7 @@ async function assessCodeSoup(workspace: string, heavy: HeavyScanResult): Promis
 
 // Helpers for parsing date, counting items
 function countSectionItems(content: string, sectionTitle: string): number {
-	const escaped = sectionTitle.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")
-	const regex = new RegExp(`^##\\s+${escaped}\\s*$[\\r\\n]([\\s\\S]*?)(?=^##\\s+|\\Z)`, "mi")
-	const match = regex.exec(content)
-	if (!match) return 0
-	const body = match[1]
+	const body = getSectionBody(content, sectionTitle)
 	const subMatches = body.match(/^###\s+\d+\.\s+/gm)
 	return subMatches ? subMatches.length : 0
 }
@@ -1277,7 +1274,7 @@ function parseRoadmapText(content: string, pathStr: string): any {
 	}
 
 	let health_status: string | null = null
-	const healthMatch = /##\s+2\.\s+Roadmap Health[\s\S]*?\*\*Status:\*\*\s*([A-Za-z]+)/i.exec(content)
+	const healthMatch = /\*\*Status:\*\*\s*([A-Za-z]+)/i.exec(getSectionBody(content, "2. Roadmap Health"))
 	if (healthMatch) {
 		const candidate = healthMatch[1].trim()
 		for (const status of HEALTH_STATUSES) {
@@ -1298,7 +1295,7 @@ function parseRoadmapText(content: string, pathStr: string): any {
 	}
 
 	let recent_checkpoint_date: string | null = null
-	const checkpointMatch = /##\s+11\.\s+Recent Checkpoint[\s\S]*?\*\*Date:\*\*\s*(\d{4}-\d{2}-\d{2})/i.exec(content)
+	const checkpointMatch = /\*\*Date:\*\*\s*(\d{4}-\d{2}-\d{2})/i.exec(getSectionBody(content, "11. Recent Checkpoint"))
 	if (checkpointMatch) {
 		recent_checkpoint_date = checkpointMatch[1]
 	}
@@ -2847,16 +2844,16 @@ function agentInstructions(phase: string, evidence: any): string[] {
 	const instructions = [
 		"Create or evolve ROADMAP.md at the workspace root only.",
 		"Keep Now to 1–5 actionable items; archive stale work instead of appending endlessly.",
-		"Section 9 (Centralization & Code Soup Audit) is mandatory on every pass.",
+		"Review section 9 when architecture or risk changes; preserve unchanged assessments.",
 		"Use code_soup_pre_audit signals when writing section 9.",
 		"Mark uncertainty explicitly when evidence is missing.",
-		"Finish with roadmap(action='validate') before returning the checkpoint summary.",
+		"Validate once after the final ROADMAP.md edit. Rerun only after fixing an error or receiving new evidence; then return the checkpoint summary.",
 	]
 	if (fp.steering_brief) {
 		instructions.push(`Project identity: ${fp.steering_brief}`)
 	}
 	if (fp.project_archetype) {
-		instructions.push(`Archetype: ${fp.project_archetype} — tailor center of gravity and anti-goals to this shape.`)
+		instructions.push(`Archetype: ${fp.project_archetype} — use this as context; record only evidence-backed non-goals.`)
 	}
 	if (fp.test_frameworks) {
 		instructions.push(

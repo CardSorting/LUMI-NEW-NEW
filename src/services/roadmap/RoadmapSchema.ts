@@ -98,7 +98,9 @@ export function findBootstrapPlaceholders(content: string): ValidationIssue[] {
 
 export function getSectionBody(content: string, sectionTitle: string): string {
 	const escaped = sectionTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-	const regex = new RegExp(`^##\\s+${escaped}\\s*$[\\r\\n]([\\s\\S]*?)(?=^##\\s+|\\Z)`, "m")
+	// JavaScript has no \\Z anchor. Match the real end of input, including a final
+	// section without a trailing newline, rather than treating a literal Z as EOF.
+	const regex = new RegExp(`^##[ \\t]+${escaped}[ \\t]*\\r?$(?:\\n|$)([\\s\\S]*?)(?=^##[ \\t]+|(?![\\s\\S]))`, "m")
 	const match = regex.exec(content)
 	return match ? match[1] : ""
 }
@@ -194,11 +196,12 @@ export function validateRoadmapContent(content: string): RoadmapValidation {
 	}
 
 	const cogBody = getSectionBody(content, "1. Project Center of Gravity")
-	if (schema_complete && !cogBody.toLowerCase().includes("must not become")) {
+	if (schema_complete && !/must not become|anti[- ]goals|non[- ]goals|out of scope/i.test(cogBody)) {
 		issues.push({
-			severity: "error",
+			severity: "warning",
 			code: "missing_anti_goals",
-			message: "Section 1 must include **What This Project Must Not Become:**",
+			message:
+				"Optional: document known non-goals or out-of-scope work in section 1. Do not invent constraints to pass validation.",
 			section: "1. Project Center of Gravity",
 		})
 	}

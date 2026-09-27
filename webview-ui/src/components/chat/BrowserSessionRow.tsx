@@ -107,8 +107,15 @@ const BrowserSessionRow = memo((props: BrowserSessionRowProps) => {
 	}, [lastModifiedMessage?.ask])
 
 	const isBrowsing = useMemo(() => {
-		return isLast && messages.some((m) => m.say === "browser_action_result") && !isLastApiReqInterrupted // after user approves, browser_action_result with "" is sent to indicate that the session has started
-	}, [isLast, messages, isLastApiReqInterrupted])
+		const closed = messages.some((m) => m.say === "browser_action" && JSON.parse(m.text || "{}").action === "close")
+		return (
+			isLast &&
+			messages.some((m) => m.say === "browser_action_result") &&
+			!closed &&
+			!isLastMessageResume &&
+			!isLastApiReqInterrupted
+		)
+	}, [isLast, messages, isLastApiReqInterrupted, isLastMessageResume])
 
 	// Organize messages into pages with current state and next action
 	const pages = useMemo(() => {
@@ -206,9 +213,9 @@ const BrowserSessionRow = memo((props: BrowserSessionRowProps) => {
 		return launchMessage?.text || ""
 	}, [messages])
 
-	const isAutoApproved = useMemo(() => {
+	const isAwaitingApproval = useMemo(() => {
 		const launchMessage = messages.find((m) => m.ask === "browser_action_launch" || m.say === "browser_action_launch")
-		return launchMessage?.say === "browser_action_launch"
+		return launchMessage?.ask === "browser_action_launch" && !messages.some((m) => m.say === "browser_action_result")
 	}, [messages])
 
 	// const lastCheckpointMessageTs = useMemo(() => {
@@ -271,7 +278,7 @@ const BrowserSessionRow = memo((props: BrowserSessionRowProps) => {
 					setMaxActionHeight={setMaxActionHeight}
 				/>
 			))}
-			{!isBrowsing && messages.some((m) => m.say === "browser_action_result") && currentPageIndex === 0 && (
+			{initialUrl && !isBrowsing && messages.some((m) => m.say === "browser_action_result") && currentPageIndex === 0 && (
 				<BrowserActionBox action={"launch"} text={initialUrl} />
 			)}
 		</div>,
@@ -332,7 +339,9 @@ const BrowserSessionRow = memo((props: BrowserSessionRowProps) => {
 				) : (
 					<VscIcon className="" name="inspect" style={browserIconStyle} />
 				)}
-				<span className="text-xs font-medium">{isAutoApproved ? "Browsing" : APPROVAL.browser}</span>
+				<span className="text-xs font-medium">
+					{isAwaitingApproval ? APPROVAL.browser : isBrowsing ? "Browsing" : "Browser"}
+				</span>
 			</div>
 			<div
 				style={{
@@ -515,6 +524,7 @@ const BrowserSessionRowContent = memo(
 								action={browserAction.action}
 								coordinate={browserAction.coordinate}
 								text={browserAction.text}
+								url={browserAction.url}
 							/>
 						)
 
@@ -532,11 +542,27 @@ const BrowserSessionRowContent = memo(
 	deepEqual,
 )
 
-const BrowserActionBox = ({ action, coordinate, text }: { action: BrowserAction; coordinate?: string; text?: string }) => {
+const BrowserActionBox = ({
+	action,
+	coordinate,
+	text,
+	url,
+}: {
+	action: BrowserAction
+	coordinate?: string
+	text?: string
+	url?: string
+}) => {
 	const getBrowserActionText = (action: BrowserAction, coordinate?: string, text?: string) => {
 		switch (action) {
 			case "launch":
 				return `Launch browser at ${text}`
+			case "navigate":
+				return `Navigate to ${url}`
+			case "refresh":
+				return "Refresh page"
+			case "inspect":
+				return "Inspect current page"
 			case "click":
 				return `Click (${coordinate?.replace(",", ", ")})`
 			case "type":

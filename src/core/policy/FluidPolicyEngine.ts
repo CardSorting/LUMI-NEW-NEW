@@ -289,29 +289,17 @@ export class FluidPolicyEngine {
 	public async validatePreExecution(block: ToolUse): Promise<PolicyResult> {
 		const result: PolicyResult = { success: true }
 
-		// Step -2: Plan Mode Write Restriction (V290)
-		// In PLAN mode, modifying the filesystem (except scratchpad.md) is strictly prohibited.
 		const isModifying =
 			block.name === DietCodeDefaultTool.FILE_NEW ||
 			block.name === DietCodeDefaultTool.FILE_EDIT ||
+			block.name === DietCodeDefaultTool.NEW_RULE ||
 			block.name === DietCodeDefaultTool.APPLY_PATCH ||
 			block.name === DietCodeDefaultTool.BASH
 
-		if (this.mode === "plan" && isModifying) {
-			const targetPath = (block.params as { path?: string })?.path
-			const isScratchpad = targetPath?.endsWith("scratchpad.md")
-
-			if (!isScratchpad) {
-				return {
-					success: false,
-					error:
-						`🛑 PLAN MODE RESTRICTION: You are attempting to modify \`${targetPath}\` while in PLAN mode.\n\n` +
-						`💡 WORKFLOW GUIDANCE: You MUST NOT edit source code, documentation, changelogs, or wikis until your plan is finalized.\n\n` +
-						`✅ ALLOWED ACTIONS:\n` +
-						`1. Update \`scratchpad.md\` with your architectural analysis.\n` +
-						`2. Use \`plan_mode_respond\` to present your final plan to the user.\n` +
-						`3. The system will automatically transition to ACT mode after your plan is finalized.`,
-				}
+		if (this.mode === "plan" && isModifying && this.stateManager?.getGlobalSettingsKey("strictPlanModeEnabled")) {
+			return {
+				success: false,
+				error: "Strict Plan mode is enabled. Finalize the plan with plan_mode_respond to switch to Act before running commands or changing files. Read-only file and search tools remain available.",
 			}
 		}
 
@@ -345,7 +333,7 @@ export class FluidPolicyEngine {
 			const forensicReport = `📊 [ENVIRONMENT]\n${substrateContext}\n\n🛠️ [TOOLCHAIN]\n${toolchainContext}\n\n🔋 [ACTIVITY]\n${stabilityContext}`
 
 			// V191 Hardening: Physical Blockade
-			if (lease.details?.diskSpaceGB && Number.parseFloat(lease.details.diskSpaceGB) < 0.5) {
+			if (isModifying && lease.details?.diskSpaceGB && Number.parseFloat(lease.details.diskSpaceGB) < 0.5) {
 				return {
 					success: false,
 					error:
@@ -405,7 +393,7 @@ export class FluidPolicyEngine {
 				(lease.details?.diskSpaceGB && Number.parseFloat(lease.details.diskSpaceGB) < 0.5) ||
 				lease.error?.includes("Permission Denied")
 
-			if (isCriticalPhysicalResource) {
+			if (isModifying && isCriticalPhysicalResource) {
 				return {
 					success: false,
 					error: `🛑 ENVIRONMENT ALERT [GATEKEEPER]\n\nCritical physical environment requirements not met.\n\n❌ ISSUE: ${lease.error || "Substrate health critical"}\n\n${forensicReport}\n\n${shellWarning}💡 WHY THIS MATTERS: Attempting to modify code without disk space or permissions causes data loss.\n\n🛠️ GUIDED SETUP:\n${guidedSetup}\n\n⚙️ I will re-probe the environment on your next attempt.`,
@@ -416,6 +404,10 @@ export class FluidPolicyEngine {
 				(result.warning ? `${result.warning}\n` : "") +
 				`⚠️ [ADVISORY] Environment Toolchain issues detected:\n${lease.error}\n\n${guidedSetup}`
 		}
+
+		// Architectural coaching is opt-in. Required command, workspace, and tool
+		// policies are enforced by their handlers regardless of this preference.
+		if (!this.stateManager?.getGlobalSettingsKey("auditActModeAdvisoryEnabled")) return result
 
 		if (this.streamId && !this.stateRestored) {
 			// V189: Unified Environment handles activity state
@@ -438,13 +430,9 @@ export class FluidPolicyEngine {
 		) {
 			const isTargetingAudit = (block.params as { path?: string })?.path?.endsWith("scratchpad.md")
 			if (!isTargetingAudit) {
-				const auditTemplate = IntegrityProtocol.generateAuditTemplate("Agentic Failure Recovery")
 				result.warning =
 					(result.warning ? `${result.warning}\n` : "") +
-					`🛑 [ADVISORY] STRATEGIC FOCUS BREAK: Repetitive activity detected.\n` +
-					`You appear to be in a loop (repeated investigation without changes).\n\n` +
-					`💡 STEPS: To move forward, please perform a # STRATEGIC REVIEW in \`scratchpad.md\` to refine your plan.\n\n` +
-					`\`\`\`markdown\n${auditTemplate}\n\`\`\``
+					"Repeated investigation detected. Use the evidence already collected to make the next concrete change, or report the specific missing input. This advisory does not block execution."
 				return result // Total Deblocking: No longer blocking
 			}
 		}
@@ -481,13 +469,7 @@ export class FluidPolicyEngine {
 			hasAudit = scratchpadContent.includes(IntegrityProtocol.HEADERS.AUDIT)
 			hasBreath = scratchpadContent.includes(IntegrityProtocol.HEADERS.BREATH)
 		} catch (_e) {
-			// V27 Agent Success: Auto-heal if we're trending towards a block
-			const cooldown = this.stabilityMonitor.getCooldownStatus()
-			if (cooldown.active || this.buildAlarmActive) {
-				const healing = await this.ensureScratchpadIntegrity("Activity Stabilization")
-				scratchpadContent = healing.content
-				hasAudit = scratchpadContent.includes(IntegrityProtocol.HEADERS.AUDIT)
-			}
+			// Missing optional notes must not cause preflight to write workspace files.
 
 			// V28: Virtual Substrate Fallback (Search history if disk is empty)
 			if (!hasAudit && !hasBreath && this.streamId) {
@@ -543,17 +525,9 @@ export class FluidPolicyEngine {
 						return result
 					}
 
-					const auditTemplate = IntegrityProtocol.generateAuditTemplate("Cognitive Recovery")
-					const breathTemplate = IntegrityProtocol.generateBreathTemplate("Stability Reset", cooldown.reason)
-
 					result.warning =
 						(result.warning ? `${result.warning}\n` : "") +
-						`⚠️ [ADVISORY] ACTIVITY COOLDOWN: ${cooldown.reason}\n` +
-						`The project foundation has reached a high level of activity. Consider a planning pause.\n\n` +
-						`📝 OPTION A: [Strategic Review]\n` +
-						`\`\`\`markdown\n${auditTemplate}\n\`\`\`\n\n` +
-						`📝 OPTION B: [Stability Break]\n` +
-						`\`\`\`markdown\n${breathTemplate}\n\`\`\`\n`
+						`Activity advisory: ${cooldown.reason}. Continue the scoped repair and check its result. No planning pause or extra artifact is required.`
 					return result // Total Deblocking: No longer blocking
 				}
 			}
@@ -657,9 +631,7 @@ export class FluidPolicyEngine {
 				if (status.active && !hasOverride && !hasBreath && !this.commitSeal) {
 					result.warning =
 						(result.warning ? `${result.warning}\n` : "") +
-						`⚠️ [ADVISORY] STABILITY SAFETY GUARD: \`${path.basename(targetPath)}\` is changing very rapidly right now (${status.reason}).\n` +
-						`💡 STEPS: To continue, please simplify your change or provide a justification in \`scratchpad.md\` to unlock a restoration token.\n` +
-						`Alternatively, you can use \`[STABILITY_EXCEPTION: Safety Guard Override]\` in your edit.`
+						`Activity advisory: \`${path.basename(targetPath)}\` is changing frequently (${status.reason}). Keep the next edit focused and validate the affected behavior. Execution can continue.`
 					return result // Total Deblocking: No longer blocking
 				}
 			}
@@ -671,16 +643,7 @@ export class FluidPolicyEngine {
 				const axiomViolations = this.axiomEngine.validateAxioms(filePath, content, this.spiderEngine)
 				const errors = axiomViolations.filter((v) => v.severity === "ERROR")
 
-				// PRODUCTION HARDENING: Auto-healing for specific axioms (e.g. STATELESSNESS)
-				// This significantly improves agent success rate by fixing minor issues automatically.
-				const statelessnessViolation = axiomViolations.find((v) => v.axiom === "STATELESSNESS")
-				if (statelessnessViolation && block.name === DietCodeDefaultTool.APPLY_PATCH) {
-					Logger.info(`[FluidPolicyEngine] Auto-healing STATELESSNESS for ${filePath}`)
-					await this.refactorHealer.healStatelessness(filePath)
-					// Remove from errors list to allow continuation if it was the only error
-					const index = errors.indexOf(statelessnessViolation)
-					if (index !== -1) errors.splice(index, 1)
-				}
+				// Axiom findings are advisory; do not perform a separate repair here.
 
 				if (errors.length > 0 && !this.commitSeal) {
 					// v10 HARDENING: Aromatic Extraction Sensing.
@@ -707,7 +670,7 @@ export class FluidPolicyEngine {
 						warning:
 							`⚠️ LOGIC CONSISTENCY WARNING: Logic Integrity has been compromised.\n` +
 							`${errors.map((v) => `  - [AXIOM: ${v.axiom}] ${v.message}`).join("\n")}\n\n` +
-							`💡 You must split this logic or maintain purity before the substrate will accept these changes.${directive}`,
+							`💡 Consider splitting this logic if it helps the requested change. This finding is advisory.${directive}`,
 					}
 				}
 			}
@@ -748,19 +711,6 @@ export class FluidPolicyEngine {
 						`💡 Fix these structural issues in the source before moving, or use a Commit Seal to bypass.${healingHint}`,
 				}
 			}
-
-			// V8: Automated Re-linking after successful move
-			if (sim.safe) {
-				Logger.info(`[FluidPolicyEngine] Scheduling post-move import healing for ${oldPath} -> ${newPath}`)
-				// Post-move import healing is handled by RefactorHealer.healImports()
-				// during validatePostExecution(), ensuring all dependent imports are re-linked.
-			}
-		}
-
-		// V40: Pre-flight Sweep (Stability cleanup)
-		if (this.stabilityMonitor.getCooldownStatus().active && block.params?.path) {
-			Logger.warn(`[FluidPolicyEngine] High Activity Pressure detected. Running Pre-flight Sweep on ${block.params.path}`)
-			await this.garbageCollector.sweep([this.normalize(block.params.path)])
 		}
 
 		// V70: Sovereign Refactor Window Detection
@@ -1156,6 +1106,7 @@ export class FluidPolicyEngine {
 		this.spiderEngine.updateNode(absolutePath, content)
 		await this.stalenessTracker.recordRead(absolutePath, content)
 		this.stabilityMonitor.recordRead(absolutePath, content)
+		if (!this.stateManager?.getGlobalSettingsKey("auditActModeAdvisoryEnabled")) return content
 
 		// V189: Neural Forensic Extraction
 		const symbolRegex = /(?:class|function|interface)\s+([a-zA-Z0-9_$]+)/g
@@ -1247,19 +1198,9 @@ export class FluidPolicyEngine {
 			header += `\n⚠️ HIGH WORKLOAD DETECTED (Ratio: ${SafeNumber.format(doubt, 1)}, Cooldown: ${cooldown.active})\n`
 		}
 
-		// V28: Proactive Recovery Template Injection
-		let scratchpadExists = false
-		try {
-			await fs.access(path.join(this.cwd, "scratchpad.md"))
-			scratchpadExists = true
-		} catch (_) {}
-
-		if (!scratchpadExists && (doubt > 5 || cooldown.active)) {
-			const template = this.getSystemDiagnostics()
+		if (doubt > 5 || cooldown.active) {
 			header +=
-				`⚠️ HEAVY INVESTIGATION DETECTED: Your activity suggests a plan update is needed.\n` +
-				`💡 I have synthesized a recovery template for you. Initialize \`scratchpad.md\` NOW to proceed:\n\n` +
-				`\`\`\`markdown\n${template}\n\`\`\`\n`
+				"\nInvestigation advisory: use the findings so far to implement the next scoped change. Continue without creating extra review documents.\n"
 		}
 
 		// V33: Refactor awareness for diagnostic injection
@@ -1329,268 +1270,39 @@ export class FluidPolicyEngine {
 	/**
 	 * Validates the outcome of a tool execution.
 	 */
-	public async validatePostExecution(block: ToolUse, toolOutput: unknown, prevResultHash?: string): Promise<PolicyResult> {
+	public async validatePostExecution(block: ToolUse, toolOutput: unknown, _prevResultHash?: string): Promise<PolicyResult> {
 		const result: PolicyResult = { success: true }
-
-		// V190: Reactive Environment Lease Revocation
-		// If a bash command fails with code 127 (not found), revoke the environmental lease.
 		if (block.name === DietCodeDefaultTool.BASH) {
 			const output = toolOutput as { exitCode?: number }
-			if (output?.exitCode === 127 || output?.exitCode === 126) {
-				this.envIntegrity.revokeLease()
-			}
+			if (output?.exitCode === 127 || output?.exitCode === 126) this.envIntegrity.revokeLease()
 		}
 
-		// Build Integrity: Run Sweeping Garbage Collector (Real-time cleanup)
-		const isHealingIntent = this.verification.detectHealingIntent(block) !== null
-		const isRefactoringIntent = this.refactorTurnsRemaining > 0 || isHealingIntent
-
-		// Build Integrity: Run Sweeping Garbage Collector (Real-time cleanup)
+		// Observers record the completed operation. They never run a compiler, rewrite
+		// source files, acquire a mutation lock, or turn successful work into a new gate.
 		if (
-			block.name === DietCodeDefaultTool.FILE_NEW ||
-			block.name === DietCodeDefaultTool.FILE_EDIT ||
-			block.name === DietCodeDefaultTool.APPLY_PATCH
+			[
+				DietCodeDefaultTool.FILE_NEW,
+				DietCodeDefaultTool.FILE_EDIT,
+				DietCodeDefaultTool.APPLY_PATCH,
+				DietCodeDefaultTool.NEW_RULE,
+			].includes(block.name)
 		) {
-			const params = block.params as { path?: string; target_file?: string }
-			const filePath = params?.path || params?.target_file
+			const filePath = block.params.path || (block.params as { target_file?: string }).target_file
 			if (filePath) {
-				const absPath = path.resolve(this.cwd, filePath)
-				try {
-					const normPath = this.normalize(absPath)
-
-					// 0. Update Session Awareness (V71)
-					this.spiderEngine.setSessionBuffer(this.sessionFiles)
-
-					// 0.1: Acquire Stability Lock (V190: Industrial Integrity)
-					const lockId = await this.spiderEngine.acquireStabilityLock("AGENT_MUTATION")
-					if (!lockId) {
-						result.success = false
-						result.error = "Stability Lock collision: Transaction denied by another agentic process."
-						return result
-					}
-
-					try {
-						// 0.2: Create Structural Checkpoint (V200: Resilience Insurance)
-						this.spiderEngine.createCheckpoint()
-
-						// 1. Run the Sweep (Auto-fix lint/imports/pruning)
-						const sweepResult = await this.garbageCollector.sweep([normPath])
-
-						// 2. Synchronize Graph
-						const content = await fs.readFile(absPath, "utf-8")
-						const lastIntegrity = this.spiderEngine.nodes.get(normPath)?.namingScore || 1.0
-
-						// 2.1: System Consistency Snapshot (V187)
-						const lastAxioms = this.axiomEngine.validateAxioms(normPath, content, this.spiderEngine)
-
-						this.spiderEngine.updateNode(normPath, content)
-						const currentIntegrity = this.spiderEngine.nodes.get(normPath)?.namingScore || 1.0
-						const currentAxioms = this.axiomEngine.validateAxioms(normPath, content, this.spiderEngine)
-						const axiomaticResult = this.axiomEngine.compareAxiomSessions(lastAxioms, currentAxioms)
-
-						// 2.2: Sync Status Tracking (V186)
-						const merkle = this.spiderEngine.computeMerkleRoot()
-						if (this.streamId) {
-							await orchestrator.storeMemory(this.streamId, "sync_status", merkle)
-						}
-
-						this.stabilityMonitor.recordWrite(normPath, content, 0, 0, this.streamId)
-
-						// 2.2: Structural & Axiomatic Gain Enforcement
-						if (axiomaticResult.status === "POSITIVE" && lastAxioms.length > currentAxioms.length) {
-							result.warning =
-								(result.warning ? `${result.warning}\n` : "") +
-								`✨ AXIOMATIC ALIGNMENT: Fundamental structural contradictions resolved in ${path.basename(filePath)}. Double down on this concept!`
-						} else if (axiomaticResult.status === "NEGATIVE") {
-							result.warning =
-								(result.warning ? `${result.warning}\n` : "") +
-								`⚠️ AXIOMATIC DECAY: This change introduced new structural violations. [INDUSTRIAL_ROLLBACK] suggested if build fails.`
-						} else if (currentIntegrity > lastIntegrity) {
-							result.warning =
-								(result.warning ? `${result.warning}\n` : "") +
-								`✨ STRUCTURAL GAIN: Identifier casing integrity improved in ${path.basename(filePath)}. Double down on this concept!`
-						} else if (currentAxioms.length < lastAxioms.length) {
-							result.warning = `${result.warning ? `${result.warning}\n` : ""}✨ AXIOMATIC GAIN: Structural purity improved.`
-						}
-
-						// 3. Report remaining errors
-						if (sweepResult.remainingErrors.length > 0) {
-							const attempts = (this.gracePeriods.get(normPath) || 0) + 1
-							this.gracePeriods.set(normPath, attempts)
-
-							if (isRefactoringIntent && attempts === 1) {
-								// V100: GC Soft-Lock Grace Period
-								result.success = true // Proceed with warning
-								result.warning = `🩹 GC SOFT-LOCK ACTIVE: Minor build regressions remain after Sweep. Proceeding with caution. FIX IN NEXT TURN:\n${sweepResult.remainingErrors.map((e) => `  - ${e}`).join("\n")}`
-								Logger.warn(`[FluidPolicyEngine] Soft-Lock Grace Period utilized for ${path.basename(filePath)}`)
-							} else {
-								// PFH: Instead of hard-failing, we allow it but inject a MANDATORY repair directive
-								result.success = true
-								result.buildErrors = sweepResult.remainingErrors
-								result.warning =
-									`⚠️ [PFH ALERT] Build/Lint issues persist after Sweep:\n` +
-									`${sweepResult.remainingErrors.map((e) => `  - ${e}`).join("\n")}\n\n` +
-									`🩹 **Supportive Healing Advisory**\n` +
-									`The Garbage Collector could not auto-resolve these errors. Manual intervention is recommended to heal this file (Deterministic PFH).\n\n` +
-									`${this.generateIntegrityAdvisor([normPath])}`
-
-								// Passive Circuit Breaker: If build health is critical, force an audit
-								if (this.lastBuildHealth < 60) {
-									const auditTemplate = IntegrityProtocol.generateAuditTemplate("Substrate Recovery", {
-										buildHealth: this.lastBuildHealth,
-										workloadLevel: "Critical",
-										buildErrors: sweepResult.remainingErrors,
-										lintWarnings: [],
-										hotspots: [filePath],
-										suggestedRepairs: [normPath],
-									})
-									result.warning +=
-										`\n\n🛑 **CRITICAL HEALTH BREACH**: System health is at ${this.lastBuildHealth}%. ` +
-										`I have prepared a Strategic Review template for you. Please update \`scratchpad.md\` before proceeding:\n\n` +
-										`\`\`\`markdown\n${auditTemplate}\n\`\`\``
-								}
-							}
-						}
-
-						// V200: Mission Drift Suppression (Yak Shaving Interdiction)
-						// If build health is low and the current edit is in a peripheral file, encourage healing first.
-						const drift = this.stabilityMonitor.getTaskDrift(isRefactoringIntent)
-						const layer = this.getCachedLayer(filePath)
-						if (drift.warning && this.lastBuildHealth < 75 && !layer.match(/domain|core/i)) {
-							result.success = true // V201: Soft-Lock (Allow but Mandate)
-							result.warning =
-								`The substrate has enabled an Integrity Advisory. You are encouraged to return focus to healing the core logic violations before proceed with this new logic.\n\n` +
-								`🩹 **Supportive Healing Advisory**\n` +
-								`${this.generateIntegrityAdvisor([filePath])}`
-							return result
-						}
-
-						if (sweepResult.fixedCount > 0) {
-							Logger.info(
-								`[FluidPolicyEngine] Sweep fixed ${sweepResult.fixedCount} issues in ${path.basename(filePath)}.`,
-							)
-						}
-					} finally {
-						this.spiderEngine.releaseStabilityLock("AGENT_MUTATION", lockId)
-					}
-				} catch (e) {
-					Logger.error(`[FluidPolicyEngine] Garbage Collection failed for ${filePath}:`, e)
-				}
+				const absolutePath = path.resolve(this.cwd, filePath)
+				const content = await fs.readFile(absolutePath, "utf-8")
+				const normalized = this.normalize(absolutePath)
+				this.sessionFiles.set(normalized, content)
+				this.spiderEngine.setSessionBuffer(this.sessionFiles)
+				this.spiderEngine.updateNode(normalized, content)
+				this.stabilityMonitor.recordWrite(normalized, content, 0, 0, this.streamId)
+				result.violations = this.spiderEngine
+					.getViolations()
+					.filter((violation) => violation.path === normalized)
+					.map((violation) => violation.message)
 			}
 		}
-
-		// V42: Active Move Synthesis (Project-wide re-linking)
-		if (block.name === DietCodeDefaultTool.MOVE || block.name === DietCodeDefaultTool.RENAME) {
-			const params = block.params as { path?: string; oldPath?: string; destination?: string; newPath?: string }
-			const oldPath = params.path || params.oldPath
-			const newPath = params.destination || params.newPath
-
-			if (oldPath && newPath) {
-				Logger.info(`[FluidPolicyEngine] MOVE detected. Synthesizing substrate imports for ${oldPath} -> ${newPath}`)
-				const updateCount = await this.refactorHealer.healImports(oldPath, newPath, this.spiderEngine)
-				if (updateCount > 0) {
-					result.warning =
-						(result.warning ? `${result.warning}\n` : "") +
-						`✨ [MOVE SYNTHESIS]: Automatically re-linked ${updateCount} imports project-wide to maintain integrity.`
-				}
-			}
-		}
-
-		// Stability Policy: Entropy Detection
-		if (prevResultHash) {
-			const resultStr = typeof toolOutput === "string" ? toolOutput : JSON.stringify(toolOutput)
-			const currentHash = crypto.createHash("sha256").update(resultStr).digest("hex")
-
-			if (currentHash !== prevResultHash) {
-				const entropyReport = this.spiderEngine.computeEntropy()
-				const latestSnapshot = await this.spiderEngine.getLatestSnapshot()
-				const delta = latestSnapshot ? this.spiderEngine.compareWith(latestSnapshot) : 0
-
-				if (this.streamId) {
-					await orchestrator.storeMemory(this.streamId, "last_entropy_score", entropyReport.score.toString())
-					if (delta > 0.01) {
-						await orchestrator.storeMemory(this.streamId, "entropy_decay", delta.toString())
-					}
-				}
-
-				result.warning =
-					(result.warning ? `${result.warning}\n` : "") +
-					`⚠️ ENTROPY WARNING: Tool output has diverged. Structural health: ${SafeNumber.formatPercent(entropyReport.score, 1)}% decay.` +
-					(delta > 0.01 ? `\n🕷️ DECAY SINCE LAST SNAPSHOT: +${SafeNumber.formatPercent(delta, 1)}%` : "")
-				result.entropyScore = entropyReport.score
-			}
-
-			// Take a snapshot if successful and divergence is low
-			if (result.success && result.entropyScore !== undefined && result.entropyScore < 0.2) {
-				await this.spiderEngine.takeSnapshot()
-			}
-		}
-
-		const currentEntropy = this.spiderEngine.computeEntropy()
-		const currentViolations = this.spiderEngine.getViolations()
-		const health = this.computeBuildHealth(currentViolations.map((v) => v.message))
-
-		// V80: Karma-Based Strike Pardon (Structural Reward)
-		const entropyDiscovery = this.lastEntropyScore - currentEntropy.score
-		const karmaEarned = entropyDiscovery > 0.05 // 5% improvement in structural purity
-
-		const recoveryDetected =
-			(this.lastBuildHealth < 70 && health > 90) || currentViolations.length < this.lastViolationCount || karmaEarned
-
-		if (recoveryDetected) {
-			const oldHealth = this.lastBuildHealth
-			this.lastViolationCount = currentViolations.length
-			this.lastBuildHealth = health
-			this.lastEntropyScore = currentEntropy.score
-
-			const params = block.params as { path?: string }
-			const filePath = params.path
-			if (filePath) {
-				const norm = this.normalize(path.resolve(this.cwd, filePath))
-				this.stabilityMonitor.resetFileActivity(norm)
-			}
-
-			this.stabilityMonitor.resetStabilityPressure()
-
-			// V45: Sovereign Success Reinforcement
-			if (karmaEarned) {
-				const earned = Math.floor(entropyDiscovery * 1000)
-				this.karma += earned
-				result.warning =
-					(result.warning ? `${result.warning}\n` : "") +
-					`✨ [KARMA EARNED]: Your high-quality refactor has reduced structural entropy by ${SafeNumber.formatPercent(entropyDiscovery, 1)}% (+${earned} Karma).\n` +
-					`Sovereign strikes have been pardoned. Substrate health is recovering.`
-				Logger.info(
-					`[FluidPolicyEngine] Karma Pardon triggered: Entropy drop ${SafeNumber.formatPercent(entropyDiscovery, 1)}% (+${earned} Karma)`,
-				)
-			} else if (oldHealth < 70 && health > 90) {
-				result.warning =
-					(result.warning ? `${result.warning}\n` : "") +
-					`🌟 [SOVEREIGN PRAISE]: You have successfully stabilized the substrate (Health: ${oldHealth}% -> ${health}%).\n` +
-					`Activity pressure has been reset. Stability is maintained.`
-				Logger.info(`[FluidPolicyEngine] Success Reinforcement triggered: ${oldHealth} -> ${health}`)
-
-				// V200: Resilience Insurance - Automatic Checkpoint on Recovery
-				this.spiderEngine.createCheckpoint()
-			} else {
-				Logger.info(`[FluidPolicyEngine] Activity Forgiveness applied (Structural Improvement Detected).`)
-			}
-			const errorCount = currentViolations.filter((v) => v.severity === "ERROR").length
-			if (errorCount > 0) {
-				const warnCount = currentViolations.filter((v) => v.severity === "WARN").length
-				const deltaMsg = `Distance to Green: ${errorCount} errors and ${warnCount} warnings remaining.`
-				result.warning = `${result.warning ? `${result.warning}\n` : ""}🔍 [STABILIZATION DELTA]: ${deltaMsg}`
-			}
-		}
-
-		// V70: Sovereign Refactor Window Decay
-		if (this.refactorTurnsRemaining > 0) {
-			this.refactorTurnsRemaining--
-			if (this.refactorTurnsRemaining === 0) {
-				Logger.info("[FluidPolicyEngine] Sovereign Refactor Window closed. Strict enforcement restored.")
-			}
-		}
-
+		if (this.refactorTurnsRemaining > 0) this.refactorTurnsRemaining--
 		return result
 	}
 

@@ -14,11 +14,11 @@ import { arePathsEqual } from "@utils/path"
 import { telemetryService } from "@/services/telemetry"
 import { DietCodeDefaultTool } from "@/shared/tools"
 import { executor } from "../../ActionExecutor"
-import { showNotificationForApproval } from "../../utils"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
+import { recordExecutionEvidence } from "../utils/executionEvidence"
 import { applyModelContentFixes } from "../utils/ModelContentProcessor"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
 import { getInitialTaskPreview } from "../utils/taskPreview"
@@ -51,15 +51,12 @@ export function resolveCommandTimeoutSeconds(
 	timeoutParam: string | undefined,
 	useManagedTimeout: boolean,
 ): number | undefined {
-	if (!useManagedTimeout) {
-		return undefined
-	}
-
-	const parsed = timeoutParam ? Number.parseInt(timeoutParam, 10) : Number.NaN
+	const parsed = timeoutParam?.trim() ? Number(timeoutParam) : Number.NaN
 	if (Number.isFinite(parsed) && parsed > 0) {
-		return parsed
+		// Node timers overflow above this range and would otherwise return almost immediately.
+		return Math.min(parsed, 2_147_483_647 / 1000)
 	}
-
+	if (!useManagedTimeout) return undefined
 	return isLikelyLongRunningCommand(command) ? LONG_RUNNING_COMMAND_TIMEOUT_SECONDS : DEFAULT_COMMAND_TIMEOUT_SECONDS
 }
 
@@ -95,9 +92,9 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
 		let command: string | undefined = block.params.command
 		const requiresApprovalRaw: string | undefined = block.params.requires_approval
-		const requiresApprovalPerLLM = requiresApprovalRaw?.toLowerCase() === "true"
+		// Missing or unrecognized model annotations defer to configured authority, not another model round-trip.
+		const requiresApprovalPerLLM = requiresApprovalRaw?.toLowerCase() !== "false"
 		const timeoutParam: string | undefined = block.params.timeout
-		let timeoutSeconds: number | undefined
 
 		// Extract provider using the proven pattern from ReportBugHandler
 		const apiConfig = config.services.stateManager.getApiConfiguration()
@@ -105,20 +102,12 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 		const provider = (currentMode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider) as string
 
 		// Validate required parameters
-		if (!command) {
+		if (!command?.trim()) {
 			config.taskState.consecutiveMistakeCount++
 			return await config.callbacks.sayAndCreateMissingParamError(this.name, "command")
 		}
 
-		if (!requiresApprovalRaw) {
-			config.taskState.consecutiveMistakeCount++
-			return await config.callbacks.sayAndCreateMissingParamError(this.name, "requires_approval")
-		}
-
 		config.taskState.consecutiveMistakeCount = 0
-
-		// Handling of timeout while in yolo mode
-		timeoutSeconds = resolveCommandTimeoutSeconds(command, timeoutParam, config.yoloModeToggled)
 
 		// Pre-process command for certain models
 		if (config.api.getModel().id.includes("gemini")) {
@@ -223,6 +212,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 
 		if (
 			config.isSubagentExecution ||
+			config.autoApprover?.shouldAutoApproveCommand?.(actualCommand) ||
 			(!requiresApprovalPerLLM && autoApproveSafe) ||
 			(requiresApprovalPerLLM && autoApproveSafe && autoApproveAll)
 		) {
@@ -244,15 +234,11 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 			)
 		} else {
 			// Manual approval flow
-			showNotificationForApproval(
-				`DietCode wants to execute a command: ${actualCommand}`,
-				config.autoApprovalSettings.enableNotifications,
-			)
-
 			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
 				"command",
 				`${actualCommand}${autoApproveSafe && requiresApprovalPerLLM ? COMMAND_REQ_APP_STRING : ""}`,
 				config,
+				`DietCode wants to execute a command: ${actualCommand}`,
 			)
 			if (!didApprove) {
 				telemetryService.captureToolUsage(
@@ -291,6 +277,9 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 			throw error
 		}
 
+		// Automatic approvals and helpers need the same bounded foreground wait as autonomous mode.
+		const timeoutSeconds = resolveCommandTimeoutSeconds(actualCommand, timeoutParam, didAutoApprove || config.yoloModeToggled)
+
 		// Setup timeout notification for long-running auto-approved commands
 		let timeoutId: NodeJS.Timeout | undefined
 		if (didAutoApprove && config.autoApprovalSettings.enableNotifications && !config.isSubagentExecution) {
@@ -311,18 +300,26 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 			finalCommand = `cd "${executionDir}" && ${actualCommand}`
 		}
 
-		const [userRejected, result] = await executor.execute(
-			config.ulid,
-			() => config.callbacks.executeCommandTool(finalCommand, timeoutSeconds),
-			{ concurrencyGroup: "shell" },
-		)
-
-		if (timeoutId) {
-			clearTimeout(timeoutId)
-		}
+		const [userRejected, result] = await executor
+			.execute(
+				config.ulid,
+				() =>
+					config.callbacks.executeCommandTool(
+						finalCommand,
+						timeoutSeconds,
+						didAutoApprove ? { interactive: false } : undefined,
+					),
+				{
+					concurrencyGroup: "shell",
+					signal: config.taskState.abortSignal,
+				},
+			)
+			.finally(() => clearTimeout(timeoutId))
 
 		if (userRejected) {
 			config.taskState.didRejectTool = true
+		} else {
+			recordExecutionEvidence(config.taskState, "command", [executionDir, actualCommand], result)
 		}
 
 		if (!userRejected && config.auditToolOutputAdvisoryEnabled && !config.isSubagentExecution) {

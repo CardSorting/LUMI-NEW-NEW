@@ -1,4 +1,3 @@
-import { buildApiHandler } from "@core/api"
 import type { IController as Controller } from "@core/controller/types"
 import { Empty } from "@shared/proto/dietcode/common"
 import { UpdateApiConfigurationPartialRequest } from "@shared/proto/dietcode/models"
@@ -44,7 +43,7 @@ export async function updateApiConfigurationPartial(
 		controller.stateManager.setApiConfiguration(updatedConfig)
 		if (controller.task) {
 			const currentMode = controller.stateManager.getGlobalSettingsKey("mode")
-			controller.task.api = buildApiHandler({ ...updatedConfig, ulid: controller.task.ulid }, currentMode)
+			controller.task.updateApiHandler({ ...updatedConfig, ulid: controller.task.ulid }, currentMode)
 		}
 
 		// Notify webview

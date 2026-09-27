@@ -36,9 +36,9 @@ describe("RoadmapGates", () => {
 		assert.doesNotMatch(rec.command, /^\/roadmap/)
 	})
 
-	it("fail_closed_completion_gates defaults true", () => {
+	it("roadmap evaluation errors are advisory by default", () => {
 		setRoadmapConfigOverride(null)
-		assert.strictEqual(getRoadmapConfig().fail_closed_completion_gates, true)
-		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.fail_closed_completion_gates, true)
+		assert.strictEqual(getRoadmapConfig().fail_closed_completion_gates, false)
+		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.fail_closed_completion_gates, false)
 	})
 })

@@ -21,6 +21,7 @@ function createHandlerForProvider(
 		case "openrouter":
 			return new OpenRouterHandler({
 				onRetryAttempt: options.onRetryAttempt,
+				getRetrySignal: options.getRetrySignal,
 				openRouterApiKey: options.openRouterApiKey,
 				openRouterModelId: mode === "plan" ? options.planModeOpenRouterModelId : options.actModeOpenRouterModelId,
 				openRouterModelInfo: mode === "plan" ? options.planModeOpenRouterModelInfo : options.actModeOpenRouterModelInfo,
@@ -32,6 +33,7 @@ function createHandlerForProvider(
 		case "openai-codex":
 			return new OpenAiCodexHandler({
 				onRetryAttempt: options.onRetryAttempt,
+				getRetrySignal: options.getRetrySignal,
 				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
 			})
@@ -39,6 +41,7 @@ function createHandlerForProvider(
 		case "claude-subscription-directsdk-experimental":
 			return new ClaudeSubscriptionDirectSdkHandler({
 				onRetryAttempt: options.onRetryAttempt,
+				getRetrySignal: options.getRetrySignal,
 				claudeSubscriptionDirectSdkModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
 				claudeSubscriptionDirectSdkPythonPath: options.claudeSubscriptionDirectSdkPythonPath,
 				claudeSubscriptionDirectSdkCommand: options.claudeSubscriptionDirectSdkCommand,
@@ -49,6 +52,7 @@ function createHandlerForProvider(
 		case "cloudflare":
 			return new CloudflareHandler({
 				onRetryAttempt: options.onRetryAttempt,
+				getRetrySignal: options.getRetrySignal,
 				cloudflareAccountId: options.cloudflareAccountId,
 				cloudflareApiToken: options.cloudflareApiToken,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
@@ -56,12 +60,14 @@ function createHandlerForProvider(
 		case "nousResearch":
 			return new NousResearchHandler({
 				onRetryAttempt: options.onRetryAttempt,
+				getRetrySignal: options.getRetrySignal,
 				nousResearchApiKey: options.nousResearchApiKey,
 				apiModelId: mode === "plan" ? options.planModeNousResearchModelId : options.actModeNousResearchModelId,
 			})
 		default:
 			return new OpenRouterHandler({
 				onRetryAttempt: options.onRetryAttempt,
+				getRetrySignal: options.getRetrySignal,
 				openRouterApiKey: options.openRouterApiKey,
 				openRouterModelId: mode === "plan" ? options.planModeOpenRouterModelId : options.actModeOpenRouterModelId,
 				openRouterModelInfo: mode === "plan" ? options.planModeOpenRouterModelInfo : options.actModeOpenRouterModelInfo,

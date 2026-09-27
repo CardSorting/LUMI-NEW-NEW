@@ -1,9 +1,11 @@
 import { resolveWorkspacePath } from "@core/workspace"
 import { isMultiRootEnabled } from "@core/workspace/multi-root-utils"
 import { DietCodeDefaultTool } from "@shared/tools"
+import { matchesTrustedCommand } from "@/core/permissions/trustedCommands"
 import { StateManager } from "@/core/storage/StateManager"
 import { HostProvider } from "@/hosts/host-provider"
 import { getCwd, getDesktopDir, isLocatedInPath, isLocatedInWorkspace } from "@/utils/path"
+import type { TaskConfig } from "./types/TaskConfig"
 
 export class AutoApprove {
 	private stateManager: StateManager
@@ -41,15 +43,7 @@ export class AutoApprove {
 	 * Check if a command is persistently trusted
 	 */
 	public shouldAutoApproveCommand(command: string): boolean {
-		const trustedCommands = this.stateManager.getTrustedCommands()
-		const commandPrefix = command.trim().split(" ")[0]
-		return trustedCommands.some((trusted) => {
-			// Exact match or prefix match if the trusted entry ends with *
-			if (trusted.endsWith("*")) {
-				return command.startsWith(trusted.slice(0, -1))
-			}
-			return commandPrefix === trusted || command === trusted
-		})
+		return matchesTrustedCommand(command, this.stateManager.getTrustedCommands())
 	}
 
 	// Check if the tool should be auto-approved based on the settings
@@ -61,111 +55,28 @@ export class AutoApprove {
 			return [true, true]
 		}
 
-		if (this.stateManager.getGlobalSettingsKey("yoloModeToggled")) {
-			switch (toolName) {
-				case DietCodeDefaultTool.FILE_READ:
-				case DietCodeDefaultTool.LIST_FILES:
-				case DietCodeDefaultTool.LIST_CODE_DEF:
-				case DietCodeDefaultTool.SEARCH:
-				case DietCodeDefaultTool.NEW_RULE:
-				case DietCodeDefaultTool.FILE_NEW:
-				case DietCodeDefaultTool.FILE_EDIT:
-				case DietCodeDefaultTool.APPLY_PATCH:
-				case DietCodeDefaultTool.BASH:
-				case DietCodeDefaultTool.USE_SUBAGENTS:
-				case DietCodeDefaultTool.RENAME:
-				case DietCodeDefaultTool.MOVE:
-				case DietCodeDefaultTool.DELETE:
-					return [true, true]
-
-				case DietCodeDefaultTool.BROWSER:
-				case DietCodeDefaultTool.WEB_FETCH:
-				case DietCodeDefaultTool.WEB_SEARCH:
-				case DietCodeDefaultTool.MCP_ACCESS:
-				case DietCodeDefaultTool.MCP_USE:
-				case DietCodeDefaultTool.MCP_DOCS:
-				case DietCodeDefaultTool.PROJECT_MAP:
-				case DietCodeDefaultTool.MEM_QUERY:
-				case DietCodeDefaultTool.MEM_SNAPSHOT:
-				case DietCodeDefaultTool.MEM_LINK:
-				case DietCodeDefaultTool.MEM_MERGE:
-				case DietCodeDefaultTool.MEM_REFRESH:
-				case DietCodeDefaultTool.MEM_CONTEXT:
-				case DietCodeDefaultTool.MEM_BLAST:
-				case DietCodeDefaultTool.MEM_CHOKE:
-				case DietCodeDefaultTool.MEM_HEAL:
-				case DietCodeDefaultTool.MEM_FORECAST:
-				case DietCodeDefaultTool.MEM_CENTRALITY:
-				case DietCodeDefaultTool.MEM_SUBGRAPH:
-				case DietCodeDefaultTool.MEM_APPEND_SHARED:
-				case DietCodeDefaultTool.MEM_GET_SHARED:
-				case DietCodeDefaultTool.MEM_BUNDLE:
-				case DietCodeDefaultTool.MEM_BLAME:
-				case DietCodeDefaultTool.MEM_CHANGELOG:
-				case DietCodeDefaultTool.MEM_CLAIM:
-				case DietCodeDefaultTool.MEM_RELEASE:
-				case DietCodeDefaultTool.MEM_HUBS:
-				case DietCodeDefaultTool.USE_SKILL:
-				case DietCodeDefaultTool.TODO:
-				case DietCodeDefaultTool.CONDENSE:
-				case DietCodeDefaultTool.SUMMARIZE_TASK:
-				case DietCodeDefaultTool.REPORT_BUG:
-				case DietCodeDefaultTool.GENERATE_EXPLANATION:
-					return true
-			}
-		}
-
-		if (this.stateManager.getGlobalSettingsKey("autoApproveAllToggled")) {
-			switch (toolName) {
-				case DietCodeDefaultTool.FILE_READ:
-				case DietCodeDefaultTool.LIST_FILES:
-				case DietCodeDefaultTool.LIST_CODE_DEF:
-				case DietCodeDefaultTool.SEARCH:
-				case DietCodeDefaultTool.NEW_RULE:
-				case DietCodeDefaultTool.FILE_NEW:
-				case DietCodeDefaultTool.FILE_EDIT:
-				case DietCodeDefaultTool.APPLY_PATCH:
-				case DietCodeDefaultTool.BASH:
-				case DietCodeDefaultTool.USE_SUBAGENTS:
-				case DietCodeDefaultTool.RENAME:
-				case DietCodeDefaultTool.MOVE:
-				case DietCodeDefaultTool.DELETE:
-					return [true, true]
-				case DietCodeDefaultTool.BROWSER:
-				case DietCodeDefaultTool.WEB_FETCH:
-				case DietCodeDefaultTool.WEB_SEARCH:
-				case DietCodeDefaultTool.MCP_ACCESS:
-				case DietCodeDefaultTool.MCP_USE:
-				case DietCodeDefaultTool.MCP_DOCS:
-				case DietCodeDefaultTool.PROJECT_MAP:
-				case DietCodeDefaultTool.MEM_QUERY:
-				case DietCodeDefaultTool.MEM_SNAPSHOT:
-				case DietCodeDefaultTool.MEM_LINK:
-				case DietCodeDefaultTool.MEM_MERGE:
-				case DietCodeDefaultTool.MEM_REFRESH:
-				case DietCodeDefaultTool.MEM_CONTEXT:
-				case DietCodeDefaultTool.MEM_BLAST:
-				case DietCodeDefaultTool.MEM_CHOKE:
-				case DietCodeDefaultTool.MEM_HEAL:
-				case DietCodeDefaultTool.MEM_FORECAST:
-				case DietCodeDefaultTool.MEM_CENTRALITY:
-				case DietCodeDefaultTool.MEM_SUBGRAPH:
-				case DietCodeDefaultTool.MEM_APPEND_SHARED:
-				case DietCodeDefaultTool.MEM_GET_SHARED:
-				case DietCodeDefaultTool.MEM_BUNDLE:
-				case DietCodeDefaultTool.MEM_BLAME:
-				case DietCodeDefaultTool.MEM_CHANGELOG:
-				case DietCodeDefaultTool.MEM_CLAIM:
-				case DietCodeDefaultTool.MEM_RELEASE:
-				case DietCodeDefaultTool.MEM_HUBS:
-				case DietCodeDefaultTool.USE_SKILL:
-				case DietCodeDefaultTool.TODO:
-				case DietCodeDefaultTool.CONDENSE:
-				case DietCodeDefaultTool.SUMMARIZE_TASK:
-				case DietCodeDefaultTool.REPORT_BUG:
-				case DietCodeDefaultTool.GENERATE_EXPLANATION:
-					return true
-			}
+		if (
+			this.stateManager.getGlobalSettingsKey("yoloModeToggled") ||
+			this.stateManager.getGlobalSettingsKey("autoApproveAllToggled")
+		) {
+			// Autonomous authority covers every exposed tool, including newly registered tools.
+			// Path/command policy and tool availability remain the handler's responsibility.
+			const hasNestedSettings = [
+				DietCodeDefaultTool.FILE_READ,
+				DietCodeDefaultTool.LIST_FILES,
+				DietCodeDefaultTool.LIST_CODE_DEF,
+				DietCodeDefaultTool.SEARCH,
+				DietCodeDefaultTool.NEW_RULE,
+				DietCodeDefaultTool.FILE_NEW,
+				DietCodeDefaultTool.FILE_EDIT,
+				DietCodeDefaultTool.APPLY_PATCH,
+				DietCodeDefaultTool.BASH,
+				DietCodeDefaultTool.USE_SUBAGENTS,
+				DietCodeDefaultTool.RENAME,
+				DietCodeDefaultTool.MOVE,
+				DietCodeDefaultTool.DELETE,
+			].includes(toolName)
+			return hasNestedSettings ? [true, true] : true
 		}
 
 		const autoApprovalSettings = this.stateManager.getGlobalSettingsKey("autoApprovalSettings")
@@ -272,7 +183,6 @@ export class AutoApprove {
 				DietCodeDefaultTool.LIST_FILES,
 				DietCodeDefaultTool.LIST_CODE_DEF,
 				DietCodeDefaultTool.SEARCH,
-				DietCodeDefaultTool.NEW_RULE,
 				DietCodeDefaultTool.PROJECT_MAP,
 				DietCodeDefaultTool.MEM_QUERY,
 				DietCodeDefaultTool.MEM_CONTEXT,
@@ -330,4 +240,27 @@ export class AutoApprove {
 		}
 		return false
 	}
+}
+
+/** Resolve tool-wide approval; path-scoped tools must still check their target path. */
+export function isToolAutoApproved(approval: boolean | [boolean, boolean]): boolean {
+	return Array.isArray(approval) ? approval[0] : approval
+}
+
+/** Use the same persisted trust decision for MCP previews and execution. */
+export function shouldAutoApproveMcp(
+	config: TaskConfig,
+	name: DietCodeDefaultTool,
+	serverName?: string,
+	toolName?: string,
+): boolean {
+	const approval = config.callbacks.shouldAutoApproveTool(name)
+	if (isToolAutoApproved(approval)) return true
+	if (serverName && config.services.stateManager.getTrustedMcpServers().includes(serverName)) return true
+	return !!(
+		toolName &&
+		config.services.mcpHub.connections
+			?.find((connection) => connection.server.name === serverName)
+			?.server.tools?.find((tool) => tool.name === toolName)?.autoApprove
+	)
 }

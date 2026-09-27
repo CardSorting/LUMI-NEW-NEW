@@ -5,7 +5,7 @@ import type { ComponentFunction } from "../types"
 
 export const getRoadmapSteeringSection: ComponentFunction = async (_variant, context) => {
 	const cfg = getRoadmapConfig()
-	if (!cfg.enabled || !context.cwd) {
+	if (!cfg.enabled || !context.cwd || context.isSubagentRun) {
 		return ""
 	}
 
@@ -15,7 +15,7 @@ export const getRoadmapSteeringSection: ComponentFunction = async (_variant, con
 	}
 
 	const identity = brief.project_identity_line || brief.steering_brief || "this project"
-	const nextCall = brief.agent_next_call || brief.first_call || "roadmap(action='guide')"
+	const nextCall = brief.agent_next_call || brief.first_call || "Continue the assigned task; no roadmap call is needed."
 
 	return `=== ${SystemPromptSection.ROADMAP_STEERING} ===
 
@@ -28,9 +28,11 @@ ROADMAP.md at the workspace root is the long-horizon steering surface — not a 
 **Health:** ${brief.health_status || "unknown"}
 **Prime directive:** Did the latest work strengthen or weaken the project's center of gravity?
 
-The system auto-bootstraps ROADMAP.md from workspace evidence when missing. After editing ROADMAP.md, run \`roadmap(action='validate')\` before \`attempt_completion\`.
+Roadmap advice does not expand the user's task. Anti-goals, template placeholders, and checkpoint age are advisory by default. Only explicitly configured blocking gates require repair. Do not repeat audits, tests, or unchanged validation to improve advisory status.
 
-**Recommended next call:** ${nextCall}
+After editing ROADMAP.md, run \`roadmap(action='validate')\` once after the final edit. Stop when relevant checks pass; rerun only after a repair or new evidence.
+
+**Roadmap suggestion (only when relevant):** ${nextCall}
 
 Tool actions (all return _roadmap_operator_hints + project_identity_line):
 - \`/roadmap cockpit\` — operator one-screen summary (runs synchronously in chat)

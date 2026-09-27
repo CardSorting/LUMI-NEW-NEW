@@ -38,9 +38,14 @@ export const SubagentHandoffStrip = memo(({ summary, className, embedded = false
 					</span>
 				)}
 				{summary.hasParentGateBlocked && (
-					<span className="text-[8px] font-medium text-amber-700 dark:text-amber-400">Waiting on earlier check</span>
+					<span className="text-xs font-medium text-description">Parent check needs attention</span>
 				)}
 			</div>
+			{summary.hasParentGateBlocked && (
+				<p className="my-1 text-xs text-description">
+					Helpers can return their findings while the parent resolves its checks.
+				</p>
+			)}
 			<ul className="list-disc list-inside space-y-0.5 text-description/85">
 				{labels.map((label) => (
 					<li className="break-words" key={label}>

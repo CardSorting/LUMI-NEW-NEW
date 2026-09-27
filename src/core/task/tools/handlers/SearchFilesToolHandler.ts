@@ -10,7 +10,6 @@ import { telemetryService } from "@/services/telemetry"
 import { DietCodeSayTool } from "@/shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { showNotificationForApproval } from "../../utils"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
@@ -341,11 +340,14 @@ export class SearchFilesToolHandler implements IFullyManagedTool {
 			const notificationMessage = `DietCode wants to search files for ${regex}`
 
 			// Show notification
-			showNotificationForApproval(notificationMessage, config.autoApprovalSettings.enableNotifications)
-
 			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "tool")
 
-			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback("tool", completeMessage, config)
+			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
+				"tool",
+				completeMessage,
+				config,
+				notificationMessage,
+			)
 			if (!didApprove) {
 				telemetryService.captureToolUsage(
 					config.ulid,

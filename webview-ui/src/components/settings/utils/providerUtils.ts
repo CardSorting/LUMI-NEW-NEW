@@ -146,47 +146,76 @@ export function normalizeApiConfiguration(
  * @returns Object containing mode-specific field values for clean destructuring
  */
 export function getModeSpecificFields(apiConfiguration: ApiConfiguration | undefined, mode: Mode) {
-	if (!apiConfiguration) {
-		return {
-			// Core fields
-			apiProvider: undefined,
-			apiModelId: undefined,
-
-			// Provider-specific model IDs
-			openRouterModelId: undefined,
-			nousResearchModelId: undefined,
-
-			// Model info objects
-			openRouterModelInfo: undefined,
-
-			// Other mode-specific fields
-			thinkingBudgetTokens: undefined,
-			reasoningEffort: undefined,
-		}
-	}
-
-	const openRouterModelId =
-		mode === "plan" ? apiConfiguration.planModeOpenRouterModelId : apiConfiguration.actModeOpenRouterModelId
-	const openRouterModelInfo =
-		mode === "plan" ? apiConfiguration.planModeOpenRouterModelInfo : apiConfiguration.actModeOpenRouterModelInfo
-
 	return {
-		// Core fields
-		apiProvider: mode === "plan" ? apiConfiguration.planModeApiProvider : apiConfiguration.actModeApiProvider,
-		apiModelId: mode === "plan" ? apiConfiguration.planModeApiModelId : apiConfiguration.actModeApiModelId,
-
-		// Provider-specific model IDs
-		openRouterModelId,
+		aihubmixModelId: mode === "plan" ? apiConfiguration?.planModeAihubmixModelId : apiConfiguration?.actModeAihubmixModelId,
+		aihubmixModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeAihubmixModelInfo : apiConfiguration?.actModeAihubmixModelInfo,
+		apiModelId: mode === "plan" ? apiConfiguration?.planModeApiModelId : apiConfiguration?.actModeApiModelId,
+		apiProvider: mode === "plan" ? apiConfiguration?.planModeApiProvider : apiConfiguration?.actModeApiProvider,
+		awsBedrockCustomModelBaseId:
+			mode === "plan"
+				? apiConfiguration?.planModeAwsBedrockCustomModelBaseId
+				: apiConfiguration?.actModeAwsBedrockCustomModelBaseId,
+		awsBedrockCustomSelected:
+			mode === "plan"
+				? apiConfiguration?.planModeAwsBedrockCustomSelected
+				: apiConfiguration?.actModeAwsBedrockCustomSelected,
+		basetenModelId: mode === "plan" ? apiConfiguration?.planModeBasetenModelId : apiConfiguration?.actModeBasetenModelId,
+		basetenModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeBasetenModelInfo : apiConfiguration?.actModeBasetenModelInfo,
+		dietcodeModelId: mode === "plan" ? apiConfiguration?.planModeDietCodeModelId : apiConfiguration?.actModeDietCodeModelId,
+		dietcodeModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeDietCodeModelInfo : apiConfiguration?.actModeDietCodeModelInfo,
+		fireworksModelId:
+			mode === "plan" ? apiConfiguration?.planModeFireworksModelId : apiConfiguration?.actModeFireworksModelId,
+		groqModelId: mode === "plan" ? apiConfiguration?.planModeGroqModelId : apiConfiguration?.actModeGroqModelId,
+		groqModelInfo: mode === "plan" ? apiConfiguration?.planModeGroqModelInfo : apiConfiguration?.actModeGroqModelInfo,
+		hicapModelId: mode === "plan" ? apiConfiguration?.planModeHicapModelId : apiConfiguration?.actModeHicapModelId,
+		hicapModelInfo: mode === "plan" ? apiConfiguration?.planModeHicapModelInfo : apiConfiguration?.actModeHicapModelInfo,
+		huaweiCloudMaasModelId:
+			mode === "plan" ? apiConfiguration?.planModeHuaweiCloudMaasModelId : apiConfiguration?.actModeHuaweiCloudMaasModelId,
+		huaweiCloudMaasModelInfo:
+			mode === "plan"
+				? apiConfiguration?.planModeHuaweiCloudMaasModelInfo
+				: apiConfiguration?.actModeHuaweiCloudMaasModelInfo,
+		huggingFaceModelId:
+			mode === "plan" ? apiConfiguration?.planModeHuggingFaceModelId : apiConfiguration?.actModeHuggingFaceModelId,
+		huggingFaceModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeHuggingFaceModelInfo : apiConfiguration?.actModeHuggingFaceModelInfo,
+		liteLlmModelId: mode === "plan" ? apiConfiguration?.planModeLiteLlmModelId : apiConfiguration?.actModeLiteLlmModelId,
+		liteLlmModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeLiteLlmModelInfo : apiConfiguration?.actModeLiteLlmModelInfo,
+		lmStudioModelId: mode === "plan" ? apiConfiguration?.planModeLmStudioModelId : apiConfiguration?.actModeLmStudioModelId,
 		nousResearchModelId:
-			mode === "plan" ? apiConfiguration.planModeNousResearchModelId : apiConfiguration.actModeNousResearchModelId,
-
-		// Model info objects
-		openRouterModelInfo,
-
-		// Other mode-specific fields
+			mode === "plan" ? apiConfiguration?.planModeNousResearchModelId : apiConfiguration?.actModeNousResearchModelId,
+		ocaModelId: mode === "plan" ? apiConfiguration?.planModeOcaModelId : apiConfiguration?.actModeOcaModelId,
+		ocaModelInfo: mode === "plan" ? apiConfiguration?.planModeOcaModelInfo : apiConfiguration?.actModeOcaModelInfo,
+		ocaReasoningEffort:
+			mode === "plan" ? apiConfiguration?.planModeOcaReasoningEffort : apiConfiguration?.actModeOcaReasoningEffort,
+		ollamaModelId: mode === "plan" ? apiConfiguration?.planModeOllamaModelId : apiConfiguration?.actModeOllamaModelId,
+		openAiModelId: mode === "plan" ? apiConfiguration?.planModeOpenAiModelId : apiConfiguration?.actModeOpenAiModelId,
+		openAiModelInfo: mode === "plan" ? apiConfiguration?.planModeOpenAiModelInfo : apiConfiguration?.actModeOpenAiModelInfo,
+		openRouterModelId:
+			mode === "plan" ? apiConfiguration?.planModeOpenRouterModelId : apiConfiguration?.actModeOpenRouterModelId,
+		openRouterModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeOpenRouterModelInfo : apiConfiguration?.actModeOpenRouterModelInfo,
+		reasoningEffort: mode === "plan" ? apiConfiguration?.planModeReasoningEffort : apiConfiguration?.actModeReasoningEffort,
+		requestyModelId: mode === "plan" ? apiConfiguration?.planModeRequestyModelId : apiConfiguration?.actModeRequestyModelId,
+		requestyModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeRequestyModelInfo : apiConfiguration?.actModeRequestyModelInfo,
+		sapAiCoreDeploymentId:
+			mode === "plan" ? apiConfiguration?.planModeSapAiCoreDeploymentId : apiConfiguration?.actModeSapAiCoreDeploymentId,
 		thinkingBudgetTokens:
-			mode === "plan" ? apiConfiguration.planModeThinkingBudgetTokens : apiConfiguration.actModeThinkingBudgetTokens,
-		reasoningEffort: mode === "plan" ? apiConfiguration.planModeReasoningEffort : apiConfiguration.actModeReasoningEffort,
+			mode === "plan" ? apiConfiguration?.planModeThinkingBudgetTokens : apiConfiguration?.actModeThinkingBudgetTokens,
+		togetherModelId: mode === "plan" ? apiConfiguration?.planModeTogetherModelId : apiConfiguration?.actModeTogetherModelId,
+		vercelAiGatewayModelId:
+			mode === "plan" ? apiConfiguration?.planModeVercelAiGatewayModelId : apiConfiguration?.actModeVercelAiGatewayModelId,
+		vercelAiGatewayModelInfo:
+			mode === "plan"
+				? apiConfiguration?.planModeVercelAiGatewayModelInfo
+				: apiConfiguration?.actModeVercelAiGatewayModelInfo,
+		vsCodeLmModelSelector:
+			mode === "plan" ? apiConfiguration?.planModeVsCodeLmModelSelector : apiConfiguration?.actModeVsCodeLmModelSelector,
 	}
 }
 

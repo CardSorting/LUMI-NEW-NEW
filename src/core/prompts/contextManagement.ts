@@ -113,6 +113,5 @@ export const continuationPrompt = (summaryText: string) => `
 This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:
 ${summaryText}.
 
-Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on. Pay special attention to the most recent user message when responding rather than the initial task message, if applicable.
-If the most recent user's message starts with "/newtask", "/smol", "/compact", "/newrule", or "/reportbug", you should indicate to the user that they will need to run this command again.
+Continue the unfinished task from this summary. Preserve the user's objective, accepted scope changes, constraints, permissions, completed work, and verification evidence. Treat later messages as steering unless the user explicitly replaced or cancelled the task. Take the next authorized action without restarting completed work or asking for permission already granted. Ask only when a required decision or missing input cannot be resolved from context. Context compaction is bookkeeping: it does not complete the task or require the user to repeat a command that has already run.
 `

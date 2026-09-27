@@ -99,6 +99,9 @@ enum BrowserAction {
   SCROLL_DOWN = 3;
   SCROLL_UP = 4;
   CLOSE = 5;
+  NAVIGATE = 6;
+  REFRESH = 7;
+  INSPECT = 8;
 }
 
 // Enum for MCP server request types
@@ -136,6 +139,7 @@ message DietCodeSayBrowserAction {
   BrowserAction action = 1;
   string coordinate = 2;
   string text = 3;
+  string url = 4;
 }
 
 // Message for BrowserActionResult
@@ -144,6 +148,7 @@ message BrowserActionResult {
   string logs = 2;
   string current_url = 3;
   string current_mouse_position = 4;
+  string error = 5;
 }
 
 // Message for DietCodeAskUseMcpServer

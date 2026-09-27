@@ -9,7 +9,7 @@ import {
 	DietCodeAssistantToolUseBlock,
 	DietCodeReasoningDetailParam,
 } from "@/shared/messages/content"
-import { Session } from "@/shared/services/Session"
+import { observeSession } from "@/shared/services/Session"
 import { DietCodeDefaultTool } from "@/shared/tools"
 
 export interface PendingToolUse {
@@ -157,6 +157,20 @@ class ToolUseHandler {
 		return results
 	}
 
+	assertCompleteToolUses(): void {
+		for (const pending of this.pendingToolUses.values()) {
+			let input: unknown
+			try {
+				input = JSON.parse(pending.input)
+			} catch {
+				throw new Error(`Incomplete arguments for tool ${pending.name || pending.id}; the call was not executed.`)
+			}
+			if (!pending.name || input === null || typeof input !== "object" || Array.isArray(input)) {
+				throw new Error(`Invalid arguments for tool ${pending.name || pending.id}; expected a JSON object.`)
+			}
+		}
+	}
+
 	hasToolUse(id: string): boolean {
 		return this.pendingToolUses.has(id)
 	}
@@ -198,6 +212,7 @@ class ToolUseHandler {
 					partial: true,
 					isNativeToolCall: true,
 					call_id: pending.call_id,
+					tool_use_id: pending.id,
 				})
 			} else {
 				const params: Record<string, string> = {}
@@ -213,6 +228,7 @@ class ToolUseHandler {
 					partial: true,
 					isNativeToolCall: true,
 					call_id: pending.call_id,
+					tool_use_id: pending.id,
 				})
 			}
 		}
@@ -246,7 +262,7 @@ class ToolUseHandler {
 
 		this.pendingToolUses.set(id, pending)
 		// Initialize tool call in session tracking
-		Session.get().updateToolCall(pending.call_id, pending.name)
+		observeSession((session) => session.updateToolCall(pending.call_id, pending.name))
 
 		return pending
 	}

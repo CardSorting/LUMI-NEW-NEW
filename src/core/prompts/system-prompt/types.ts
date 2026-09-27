@@ -43,7 +43,7 @@ export interface DietCodeToolSpecParameter {
 	 * The type of the parameter. Default to string if not provided.
 	 * Supported types: string, boolean, integer, array, object
 	 */
-	type?: "string" | "boolean" | "integer" | "array" | "object"
+	type?: "string" | "boolean" | "integer" | "number" | "array" | "object"
 	/**
 	 * For array types, this defines the schema of array items
 	 */
