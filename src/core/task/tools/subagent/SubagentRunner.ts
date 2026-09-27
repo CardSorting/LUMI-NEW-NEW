@@ -74,7 +74,7 @@ function getSubagentGateConfig(baseConfig: TaskConfig): TaskConfig {
 	} as TaskConfig
 }
 
-export type SubagentRunStatus = "completed" | "failed"
+export type SubagentRunStatus = "completed" | "failed" | "cancelled"
 
 export interface SubagentRunResult {
 	status: SubagentRunStatus
@@ -95,7 +95,7 @@ interface SubagentProgressUpdate {
 	stats?: SubagentRunStats
 	latestToolCall?: string
 	activity?: SubagentActivity
-	status?: "running" | "completed" | "failed"
+	status?: "running" | SubagentRunStatus
 	result?: string
 	error?: string
 	activeSignals?: string[]
@@ -377,6 +377,17 @@ export class SubagentRunner {
 		if (this.shouldAbort()) throw new Error("Subagent run cancelled.")
 	}
 
+	private waitForActiveOperation<T>(operation: () => Promise<T>): Promise<T> {
+		this.throwIfAborted()
+		return pTimeout(
+			Promise.resolve().then(() => {
+				this.throwIfAborted()
+				return operation()
+			}),
+			{ milliseconds: Number.POSITIVE_INFINITY, signal: this.abortController.signal },
+		)
+	}
+
 	private checkBudget(): void {
 		const { maxTokens, maxCost, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens, totalCost } = this.stats
 		if (
@@ -632,12 +643,7 @@ export class SubagentRunner {
 				return { status: "failed", error, stats }
 			}
 
-			if (this.shouldAbort()) {
-				await this.abort()
-				const error = "Subagent run cancelled."
-				onProgress({ status: "failed", error, stats: { ...stats } })
-				return { status: "failed", error, stats }
-			}
+			this.throwIfAborted()
 
 			const workspaceMetadataEnvironmentBlock = await this.getWorkspaceMetadataEnvironmentBlock()
 			const conversation: DietCodeStorageMessage[] = [
@@ -855,7 +861,9 @@ export class SubagentRunner {
 						// accept it as the completion result instead of discarding it!
 						if (assistantText.trim().length > 0) {
 							const directResult = assistantText.trim()
-							const gateError = await validateSubagentCompletionGates(subagentConfig, directResult)
+							const gateError = await this.waitForActiveOperation(() =>
+								validateSubagentCompletionGates(subagentConfig, directResult),
+							)
 							if (gateError) throw new Error(gateError)
 							this.throwIfAborted()
 							onProgress({
@@ -936,13 +944,16 @@ export class SubagentRunner {
 
 						let gateError: string | null = null
 						try {
-							gateError = await validateSubagentCompletionGates(
-								subagentConfig,
-								completionResult,
-								typeof toolCallParams?.task_progress === "string" ? toolCallParams.task_progress : undefined,
-								typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
+							gateError = await this.waitForActiveOperation(() =>
+								validateSubagentCompletionGates(
+									subagentConfig,
+									completionResult,
+									typeof toolCallParams?.task_progress === "string" ? toolCallParams.task_progress : undefined,
+									typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
+								),
 							)
 						} catch (err) {
+							this.throwIfAborted()
 							Logger.warn("[SubagentRunner] Subagent completion gate check error:", err)
 							const error = "Helper completion checks could not run. Return this failure to the parent for review."
 							throw new Error(error)
@@ -1021,7 +1032,11 @@ export class SubagentRunner {
 									toolName === DietCodeDefaultTool.FILE_EDIT ||
 									toolName === DietCodeDefaultTool.APPLY_PATCH)
 							) {
-								const collision = await orchestrator.checkCollision(this.streamId, [toolCallParams.path])
+								const streamId = this.streamId
+								const targetPath = toolCallParams.path
+								const collision = await this.waitForActiveOperation(() =>
+									orchestrator.checkCollision(streamId, [targetPath]),
+								)
 								if (collision) {
 									toolResult = formatResponse.toolError(
 										`[COLLISION] ${collision} Wait for the other agent to finish or coordinate elsewhere.`,
@@ -1034,7 +1049,9 @@ export class SubagentRunner {
 								// Ensure subagent actions are recorded in the shared StabilityMonitor
 								const guard = this.baseConfig.universalGuard
 								if (guard) {
-									const preExecResult = await guard.guardPreExecution(toolCallBlock)
+									const preExecResult = await this.waitForActiveOperation(() =>
+										guard.guardPreExecution(toolCallBlock),
+									)
 									if (!preExecResult.success) {
 										toolResult = formatResponse.toolError(
 											preExecResult.error || "Subagent action denied by policy.",
@@ -1135,7 +1152,12 @@ export class SubagentRunner {
 					})
 
 					const serializedToolResult = serializeToolResult(toolResult)
-					const toolDescription = handler?.getDescription(toolCallBlock) || `[${toolName}]`
+					let toolDescription = `[${toolName}]`
+					try {
+						toolDescription = handler?.getDescription(toolCallBlock) || toolDescription
+					} catch (error) {
+						Logger.warn("[SubagentRunner] Tool description unavailable; result retained:", error)
+					}
 					pushSubagentToolResultBlock(
 						toolResultBlocks,
 						call,
@@ -1180,7 +1202,7 @@ export class SubagentRunner {
 			if (this.shouldAbort()) {
 				const cancelledError = "Subagent run cancelled."
 				onProgress({
-					status: "failed",
+					status: "cancelled",
 					error: cancelledError,
 					result: partialResult(),
 					stats: { ...stats },
@@ -1189,7 +1211,7 @@ export class SubagentRunner {
 					durationMs,
 				})
 				return {
-					status: "failed",
+					status: "cancelled",
 					error: cancelledError,
 					result: partialResult(),
 					isPartial: completedResults.length > 0,

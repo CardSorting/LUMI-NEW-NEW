@@ -6,7 +6,6 @@ import { getEditingFilesSection } from "./editing_files"
 import { getEnvironmentStateSection } from "./environment_state"
 import { getFeedbackSection } from "./feedback"
 import { getForensicToolsSection } from "./forensic_tools"
-import { getIntegrityDraftingSection } from "./integrity_drafting"
 import { getIntegrityWikiSection } from "./integrity_wiki"
 import { getJoyZoningSection } from "./joy_zoning"
 import { getMcp } from "./mcp"
@@ -38,7 +37,6 @@ export function getSystemPromptComponents() {
 		{ id: SystemPromptSection.OBJECTIVE, fn: getObjectiveSection },
 		{ id: SystemPromptSection.RULES, fn: getRulesSection },
 		{ id: SystemPromptSection.SKILLS, fn: getSkillsSection },
-		{ id: SystemPromptSection.INTEGRITY_DRAFTING, fn: getIntegrityDraftingSection },
 		{ id: SystemPromptSection.INTEGRITY_WIKI, fn: getIntegrityWikiSection },
 		{ id: SystemPromptSection.FORENSIC_TOOLS, fn: getForensicToolsSection },
 		{ id: SystemPromptSection.SYSTEM_INFO, fn: getSystemInfo },

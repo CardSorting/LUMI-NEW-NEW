@@ -95,12 +95,6 @@ export const config = createVariant(ModelFamily.NATIVE_GPT_5)
 	.overrideComponent(SystemPromptSection.TOOL_USE, {
 		template: GPT_5_TEMPLATE_OVERRIDES.TOOL_USE,
 	})
-	.overrideComponent(SystemPromptSection.ACT_VS_PLAN, {
-		template: GPT_5_TEMPLATE_OVERRIDES.ACT_VS_PLAN,
-	})
-	.overrideComponent(SystemPromptSection.OBJECTIVE, {
-		template: GPT_5_TEMPLATE_OVERRIDES.OBJECTIVE,
-	})
 	.overrideComponent(SystemPromptSection.FEEDBACK, {
 		template: GPT_5_TEMPLATE_OVERRIDES.FEEDBACK,
 	})

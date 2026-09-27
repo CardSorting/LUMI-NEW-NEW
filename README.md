@@ -18,11 +18,11 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/version-21.0.0-green" alt="Version" /></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/version-21.2.2-green" alt="Version" /></a>
   <img src="https://img.shields.io/badge/VS%20Code-%5E1.84.0-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code" />
   <img src="https://img.shields.io/badge/extension-CardSorting.lumi--vscode-purple" alt="VS Marketplace ID" />
   <img src="https://img.shields.io/badge/Open%20VSX-CardSorting.lumi-blue" alt="Open VSX ID" />
-  <img src="https://img.shields.io/badge/tools-62-orange" alt="Tools" />
+  <img src="https://img.shields.io/badge/tools-64-orange" alt="Tools" />
   <img src="https://img.shields.io/badge/providers-4-blue" alt="Providers" />
   <a href="https://github.com/CardSorting/DietCodeMarie"><img src="https://img.shields.io/github/stars/CardSorting/DietCodeMarie?style=social" alt="GitHub" /></a>
 </p>
@@ -31,9 +31,9 @@
   <img src="assets/docs/demo.gif" alt="LUMI demo — chat, approval, and file edits in VS Code" width="720" />
 </p>
 
-> **Human-in-the-loop by default:** diff before write, checkpoint after tool use, completion gates before “done.” Auto-approve and YOLO mode exist — pair them with [checkpoints](docs/core-workflows/checkpoints.mdx).
+> **Autonomous execution by default:** new configurations start in Act with YOLO enabled. The agent implements, observes, repairs, and verifies within your configured permissions. [Checkpoints](docs/core-workflows/checkpoints.mdx) preserve rollback.
 
-> **Doctrine:** User expresses intent → Controller holds session → Task runs the loop → Tools execute with approval → Checkpoints preserve rollback → Completion is earned through gates.
+> **HEAV3NS mandate:** User expresses intent → Agent directs execution → Tools return evidence → Agent adapts and verifies → Requested outcome is delivered. The [reusable mandate skill](optional-skills/dietcode/heav3ns-mandate/SKILL.md) describes the doctrine built into every model family's prompt.
 
 <p align="center">
   <a href="#install"><strong>Install</strong></a> ·
@@ -95,7 +95,7 @@ npm run package:vsix && code --install-extension dist/*.vsix
 
 ## Overview
 
-**LUMI** (VS Marketplace: `CardSorting.lumi-vscode`, Open VSX: `CardSorting.lumi`) is a VS Code extension that acts as an agentic pair programmer: it reads your workspace, plans changes, runs terminal commands, uses a browser, connects MCP servers, and edits files — with **explicit approval at every mutating step**.
+**LUMI** (VS Marketplace: `CardSorting.lumi-vscode`, Open VSX: `CardSorting.lumi`) is a VS Code extension that acts as an agentic pair programmer: it reads your workspace, plans changes, runs terminal commands, uses a browser, connects MCP servers, and edits files — with **execution governed by your configured approval policy**.
 
 Task history and cognitive memory use **BroccoliDB** (`@noorm/broccolidb`) locally. The sidebar UX is designed for **long sessions** without alert fatigue.
 
@@ -118,8 +118,8 @@ Workspace-verified metrics: [docs/papers/companion-brief.md](docs/papers/compani
 
 | Metric | Value |
 |--------|-------|
-| Typed tools | **62** (`src/shared/tools.ts`) |
-| Read-only tools | **12** (`READ_ONLY_TOOLS`) |
+| Typed tools | **64** (`src/shared/tools.ts`) |
+| Read-only tools | **14** (`READ_ONLY_TOOLS`) |
 | Wired providers | **4** (`providers.json`) |
 | Slash commands | **10** |
 | Hook kinds | **8** |
@@ -134,7 +134,7 @@ Four design pillars — each maps to code, not marketing copy. Full treatment: [
 | Pillar | What it means in practice |
 |--------|---------------------------|
 | **Calm agency** | Sidebar stays readable; you approve mutating work on your schedule |
-| **Typed tools** | 62 enum values in `src/shared/tools.ts` → dedicated handlers — no ad-hoc shell |
+| **Typed tools** | 64 enum values in `src/shared/tools.ts` → dedicated handlers — no ad-hoc shell |
 | **Plan before mutate** | Plan mode + `plan_mode_respond` before Act mode file changes |
 | **Provable finish** | `attempt_completion` runs through `completionGatePipeline.ts` — “done” is gated |
 
@@ -146,13 +146,13 @@ BroccoliDB handles **substrate truth** (structure, snapshots, Spider). LUMI hand
 
 | Persona | LUMI fit |
 |---------|----------|
-| **Solo developer** | Pair program in-editor with approval gates and checkpoints |
+| **Solo developer** | Autonomous implementation in-editor with configurable approvals and checkpoints |
 | **Tech lead** | Roadmap steering, hooks, `.dietcoderules/` for team guardrails |
 | **Agent integrator** | MCP servers, subagents, typed tool surface to extend |
 | **Substrate engineer** | BroccoliDB package for durable context — [broccolidb/README.md](broccolidb/README.md) |
 | **Doc contributor** | Measured papers + [docs/MAINTAINER.md](docs/MAINTAINER.md) CI guardrails |
 
-Not a fit: fully autonomous unattended agents (LUMI assumes a human approver in the loop).
+Choose automatic execution or selective approvals in settings. Existing user selections are preserved; the agent continues authorized work without repeated confirmation.
 
 ---
 
@@ -160,11 +160,11 @@ Not a fit: fully autonomous unattended agents (LUMI assumes a human approver in 
 
 | Typical autonomous agent | LUMI |
 |--------------------------|------|
-| Runs until stopped | **Approval gate** per mutating tool call |
+| Runs until stopped | **Verified outcome** defines when to finish; Stop remains available |
 | Opaque file changes | **Diff view** before write lands |
 | Hard to undo | **Checkpoints** — shadow Git after each tool use |
-| “Done” when model says so | **Completion pipeline** + roadmap gates |
-| Generic shell access | **62 typed tools** with dedicated handlers |
+| “Done” when model says so | **Relevant verification**, unfinished-work checks, and optional completion audits |
+| Generic shell access | **64 typed tools** with dedicated handlers |
 | External memory app | **BroccoliDB** integrated locally |
 
 ---
@@ -242,7 +242,7 @@ Per-project files LUMI reads from your workspace (primary root in multi-root set
 | [`.dietcoderules/hooks/`](docs/customization/hooks.mdx) | Lifecycle hook scripts (`TaskStart`, `PreToolUse`, …) |
 | [`.dietcodeignore`](docs/customization/dietcodeignore.mdx) | Exclude paths from agent scanning |
 | `.dietcodeworkflows/` | Custom slash-command workflows |
-| `ROADMAP.md` | Roadmap steering + completion gates ([settings](#key-vs-code-settings)) |
+| `ROADMAP.md` | Advisory roadmap context and maintenance ([settings](#key-vs-code-settings)) |
 
 **First setup:** add `.dietcodeignore` early — largest impact on speed and focus. Tutorial: [your-first-project](docs/getting-started/your-first-project.mdx).
 
@@ -356,15 +356,15 @@ Model selection guide: [docs/core-features/model-selection-guide.mdx](docs/core-
 
 | Capability | Detail |
 |------------|--------|
-| **62 typed tools** | `DietCodeDefaultTool` enum → `ToolExecutorCoordinator` handlers |
-| **Plan & Act modes** | Plan before mutating; Act executes with approval |
+| **64 typed tools** | `DietCodeDefaultTool` enum → `ToolExecutorCoordinator` handlers |
+| **Plan & Act modes** | Act executes by default; Plan supports focused exploration before implementation |
 | **Checkpoints** | Shadow Git snapshot after each tool use — compare or restore |
 | **10 slash commands** | `/compact`, `/newtask`, `/roadmap`, … — see below |
 | **MCP** | External tool servers via `McpHub` (`src/services/mcp/`) |
 | **Subagents** | Parallel delegation via dynamic subagent tools |
 | **8 hook kinds** | Lifecycle scripts — see [Lifecycle hooks](#lifecycle-hooks) |
 | **Project rules** | `.dietcoderules/` loaded into every request |
-| **Roadmap steering** | `ROADMAP.md` + five `lumi.roadmap.*` VS Code settings |
+| **Roadmap steering** | Advisory `ROADMAP.md` context and explicit maintenance tools |
 | **BroccoliDB memory** | Cognitive memory tools + Spider structural audit |
 | **Spider policy layer** | Forensic audit via `src/core/policy/spider/` — [architecture doc](docs/architecture/spider-v20-forensic-engine.md) |
 
@@ -379,9 +379,9 @@ LUMI runs in **`plan`** or **`act`** mode (`src/shared/storage/types.ts`). Each 
 | Mode | Response tool | Behavior |
 |------|---------------|----------|
 | **Plan** | `plan_mode_respond` | Strategy, exploration, read-only tools |
-| **Act** | `act_mode_respond` | Implementation — mutating tools with approval |
+| **Act** | `act_mode_respond` | Implementation and verification within configured authority |
 
-Typical flow: gather context in Plan → user approves direction → Act executes writes → `attempt_completion` through completion gates.
+New configurations start in Act. Inspect the relevant context, implement, observe results, repair failures, and verify before `attempt_completion`. When using Plan, `plan_mode_respond` automatically transitions to Act; no scratchpad audit or mandatory planning artifact is required.
 
 Configure independently in **LUMI Settings → API Configuration** (Plan / Act tabs). Guide: [docs/core-workflows/plan-and-act.mdx](docs/core-workflows/plan-and-act.mdx).
 
@@ -434,10 +434,10 @@ Published under **LUMI** in VS Code Settings (`package.json` `contributes.config
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `lumi.roadmap.enabled` | `true` | Master switch for ROADMAP.md steering |
-| `lumi.roadmap.autoBootstrap` | `true` | Create `ROADMAP.md` from workspace evidence |
+| `lumi.roadmap.autoBootstrap` | `true` | Allow explicit bootstrap to create `ROADMAP.md` from evidence |
 | `lumi.roadmap.autoBootstrapFill` | `true` | Autofill roadmap after bootstrap |
-| `lumi.roadmap.blockKanbanOnValidationPending` | `true` | Block completion when roadmap changed since validate |
-| `lumi.roadmap.failClosedCompletionGates` | `true` | Block completion when gate evaluation fails |
+| `lumi.roadmap.blockKanbanOnValidationPending` | `false` | Retired; roadmap validation never blocks completion |
+| `lumi.roadmap.failClosedCompletionGates` | `false` | Retired; unavailable diagnostics never block completion |
 
 Details: [docs/features/roadmap-steering.mdx](docs/features/roadmap-steering.mdx).
 
@@ -460,14 +460,16 @@ sequenceDiagram
   C->>T: Run agent loop
   T->>L: buildApiHandler stream
   L-->>T: Tool call proposal
-  T->>W: Approval card + diff
-  U->>W: Approve / Reject
-  W->>T: User response
+  opt Configured policy requires approval
+    T->>W: Approval card + diff
+    U->>W: Approve / Reject
+    W->>T: User response
+  end
   T->>H: ToolExecutorCoordinator
   H->>V: Host bridge (files, terminal, browser)
   V-->>T: Result
   T->>T: Checkpoint commit (shadow Git)
-  T->>L: Next turn until completion gate
+  T->>L: Observe, adapt, verify until outcome is complete
 ```
 
 Deep dive: [docs/architecture/current.md](docs/architecture/current.md) · [docs/papers/whitepaper.md](docs/papers/whitepaper.md).
@@ -479,11 +481,11 @@ Deep dive: [docs/architecture/current.md](docs/architecture/current.md) · [docs
 ```mermaid
 flowchart LR
   A[User intent] --> B[Controller + Task loop]
-  B --> C{Mutating tool?}
-  C -->|No| D[Execute read-only tool]
-  C -->|Yes| E[Approval UI + diff]
+  B --> C{Configured authority covers action?}
+  C -->|Yes| F[Tool handler]
+  C -->|No| E[Approval UI + diff]
   E -->|Reject| B
-  E -->|Approve| F[Tool handler]
+  E -->|Approve| F
   F --> G[Host bridge I/O]
   G --> H[Checkpoint snapshot]
   H --> B
@@ -493,7 +495,7 @@ flowchart LR
   J -->|Fail| B
 ```
 
-Layers: [docs/SECURITY_BEST_PRACTICES.md](docs/SECURITY_BEST_PRACTICES.md) · Hooks · `.dietcodeignore` · roadmap gates.
+Layers: [docs/SECURITY_BEST_PRACTICES.md](docs/SECURITY_BEST_PRACTICES.md) · Configured permissions · Hooks · `.dietcodeignore`.
 
 ---
 
@@ -622,7 +624,7 @@ Substrate papers: [broccolidb/docs/papers/](broccolidb/docs/papers/) — separat
 | `src/core/task/tools/` | `ToolExecutorCoordinator` + 55 handler files |
 | `src/integrations/checkpoints/` | Shadow Git checkpoint system |
 | `src/services/mcp/McpHub.ts` | MCP server connections |
-| `src/shared/tools.ts` | `DietCodeDefaultTool` enum (62 values) |
+| `src/shared/tools.ts` | `DietCodeDefaultTool` enum (64 values) |
 | `webview-ui/` | React sidebar — chat, settings, diffs |
 | `broccolidb/` | BroccoliDB package (`@noorm/broccolidb`) |
 | `docs/` | LUMI user and architecture documentation |
@@ -702,7 +704,7 @@ Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md).
 | Slow on large repos | Add [`.dietcodeignore`](docs/customization/dietcodeignore.mdx); disable checkpoints temporarily |
 | Provider auth errors | Re-open LUMI Settings → re-enter API key or re-auth OAuth provider |
 | MCP server won't connect | Check [MCP config](docs/mcp/adding-and-configuring-servers.mdx); verify server logs in Output panel |
-| Completion blocked unexpectedly | Run `/roadmap validate`; check `lumi.roadmap.*` settings |
+| Completion blocked unexpectedly | Inspect reported unfinished work, active executions, or enabled completion audits; roadmap findings are advisory |
 | Build fails from source | Run `npm run protos` before first `npm run dev`; use Node **20+** |
 | Reset extension state | Close VS Code; remove `~/.dietcode/data/` (backs up secrets/settings); reload window |
 | Uninstall cleanly | Uninstall extension; optionally delete `~/.dietcode/data/` and workspace `dietcode.db` |
@@ -719,7 +721,7 @@ Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md).
 | **Security (private)** | [SECURITY.md](SECURITY.md) → security@dietcode.bot |
 | **Walkthrough** | Command palette → `LUMI: Open Walkthrough` (`lumi.openWalkthrough`) |
 
-Include VS Code version, LUMI **21.0.0**, provider used, and steps to reproduce.
+Include VS Code version, LUMI **21.2.2**, provider used, and steps to reproduce.
 
 ---
 
@@ -727,12 +729,12 @@ Include VS Code version, LUMI **21.0.0**, provider used, and steps to reproduce.
 
 | Boundary | Enforcement |
 |----------|-------------|
-| **No silent writes** | Tool approval + diff view before files change |
+| **Execution authority** | Configured auto-approval, trusted tools, and explicit approvals when required |
 | **Scoped context** | `.dietcodeignore` → `DietCodeIgnoreController` |
-| **Completion gates** | `completionGatePipeline.ts` before task finish |
+| **Completion checks** | Required result and unfinished-work checks; completion audits are opt-in |
 | **Hook interception** | 8 lifecycle hook kinds on tool/session events |
 | **MCP isolation** | Per-server credentials; per-tool auto-approve lists |
-| **Roadmap fail-closed** | `lumi.roadmap.failClosedCompletionGates` setting |
+| **User control** | Explicit denials and Stop remain authoritative during autonomous execution |
 
 Details: [docs/SECURITY_BEST_PRACTICES.md](docs/SECURITY_BEST_PRACTICES.md) · Report vulnerabilities: [SECURITY.md](SECURITY.md) → security@dietcode.bot
 

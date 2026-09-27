@@ -5,7 +5,6 @@ import {
 	COMPLETION_GATE_BLOCK_HISTORY_MAX,
 	COMPLETION_GATE_STATUS_SCHEMA_VERSION,
 	COMPLETION_GATE_WARN_THRESHOLD,
-	COMPLETION_RESULT_MAX_LENGTH,
 	MAX_COMPLETION_GATE_BLOCK_COUNT,
 } from "@shared/audit/gatePolicy"
 import { DietCodeDefaultTool } from "@shared/tools"
@@ -47,7 +46,6 @@ import {
 	checkCompletionGateCircuitBreaker,
 	classifyCompletionPreflightReason,
 	detectDuplicateCompletionSubmission,
-	extractFocusChainItemLabels,
 	formatCompletionToolError,
 	getCompletionGateCircuitBreakerError,
 	getCompletionGateOperationalState,
@@ -77,16 +75,10 @@ import {
 	syncCompletionGateObservabilityCache,
 	validateCompletionAttemptCooldown,
 	validateCompletionDemoCommand,
-	validateCompletionPreflightQualityBundle,
-	validateCompletionResultExcludesChecklist,
-	validateCompletionResultMaxLength,
-	validateCompletionResultMinLength,
 	validateCompletionResultQuality,
 	validateCompletionResultTone,
 	validateCompletionTaskProgress,
-	validateCompletionTaskProgressRequired,
 	validateFocusChainComplete,
-	validateTaskProgressAlignsWithFocusChain,
 } from "../attemptCompletionUtils"
 import type { TaskConfig } from "../types/TaskConfig"
 
@@ -196,26 +188,6 @@ describe("attemptCompletionUtils", () => {
 		})
 	})
 
-	describe("validateCompletionPreflightQualityBundle", () => {
-		it("chains quality, checklist, and min-length validators", () => {
-			expectErrorMessage(validateCompletionPreflightQualityBundle("   "), "empty")
-			expectErrorMessage(validateCompletionPreflightQualityBundle("Done.\n- [x] item"), "must not contain checklist")
-		})
-	})
-
-	describe("validateCompletionResultMinLength", () => {
-		it("rejects summaries shorter than the minimum length", () => {
-			expectErrorMessage(validateCompletionResultMinLength("Done."), "result is too brief")
-		})
-	})
-
-	describe("validateCompletionResultMaxLength", () => {
-		it("rejects summaries longer than the maximum length", () => {
-			const tooLong = "x".repeat(COMPLETION_RESULT_MAX_LENGTH + 1)
-			expectErrorMessage(validateCompletionResultMaxLength(tooLong), "exceeds maximum length")
-		})
-	})
-
 	describe("mapCompletionReasonToPreflightStage", () => {
 		it("maps block reasons to pipeline stage names", () => {
 			mapCompletionReasonToPreflightStage("result_too_long").should.equal("max_length")
@@ -229,10 +201,10 @@ describe("attemptCompletionUtils", () => {
 
 	describe("buildCompletionGatePlaybook", () => {
 		it("returns numbered runbook steps for recoverable reasons", () => {
-			const playbook = buildCompletionGatePlaybook("result_too_long")
+			const playbook = buildCompletionGatePlaybook("audit_gate")
 			playbook.should.containEql("Recovery playbook")
 			playbook.should.containEql("1.")
-			playbook.should.containEql("task_progress")
+			playbook.should.containEql("fix root causes")
 			buildCompletionGatePlaybook("circuit_breaker").should.containEql("Retry in this task")
 		})
 	})
@@ -281,7 +253,8 @@ describe("attemptCompletionUtils", () => {
 	describe("getRemainingCompletionGateStages", () => {
 		it("returns downstream stages after a failure", () => {
 			const remaining = getRemainingCompletionGateStages("quality")
-			remaining.should.containEql("checklist_in_result")
+			remaining.should.containEql("task_progress_complete")
+			remaining.should.not.containEql("checklist_in_result")
 			remaining.should.containEql("audit")
 		})
 	})
@@ -325,7 +298,8 @@ describe("attemptCompletionUtils", () => {
 		it("marks failed stage and downstream skipped stages", () => {
 			const block = buildCompletionGateStageProgressBlock("quality")
 			block.should.containEql('<stage name="quality" status="failed"')
-			block.should.containEql('<stage name="checklist_in_result" status="skipped"')
+			block.should.containEql('<stage name="task_progress_complete" status="skipped"')
+			block.should.not.containEql('<stage name="checklist_in_result"')
 		})
 	})
 
@@ -363,10 +337,10 @@ describe("attemptCompletionUtils", () => {
 
 	describe("buildCompletionGateNextStagesBlock", () => {
 		it("lists downstream stages with hints", () => {
-			recordCompletionBlockReason(configWithState(taskState), "result_too_long")
+			recordCompletionBlockReason(configWithState(taskState), "task_progress_incomplete")
 			const block = buildCompletionGateNextStagesBlock(configWithState(taskState))
 			block.should.containEql("<completion_gate_next_stages")
-			block.should.containEql('failed_at="max_length"')
+			block.should.containEql('failed_at="task_progress_complete"')
 		})
 	})
 
@@ -470,14 +444,17 @@ describe("attemptCompletionUtils", () => {
 		it("returns a unified envelope for gate errors", () => {
 			taskState.completionGateBlockCount = 1
 			taskState.lastGateBlockCheckpointHash = "prior"
-			recordCompletionBlockReason(configWithState(taskState), "result_too_long")
+			recordCompletionBlockReason(configWithState(taskState), "task_progress_incomplete")
 			const config = {
 				...configWithState(taskState),
 				messageState: {
 					getDietCodeMessages: () => [{ lastCheckpointHash: "current" }],
 				},
 			} as TaskConfig
-			const context = buildCompletionGateStructuredContext("Completion rejected: result exceeds maximum length", config)
+			const context = buildCompletionGateStructuredContext(
+				"Completion rejected: task_progress has 1 incomplete item",
+				config,
+			)
 			context.should.containEql("<completion_gate_envelope")
 			context.should.containEql("<completion_gate_stages")
 			context.should.containEql("<completion_gate_problem")
@@ -516,7 +493,7 @@ describe("attemptCompletionUtils", () => {
 			envelope.should.containEql("<completion_gate_playbook")
 			envelope.should.containEql("<completion_gate_problem")
 			envelope.should.containEql('reason="result_too_long"')
-			envelope.should.containEql("Shorten the result")
+			envelope.should.containEql("completion gate has been retired")
 		})
 	})
 
@@ -607,13 +584,13 @@ describe("attemptCompletionUtils", () => {
 
 	describe("recordCompletionGateBlockEvent", () => {
 		it("increments block count, records reason, fingerprint, and block timestamp", () => {
-			recordCompletionGateBlockEvent(configWithState(taskState), "result_too_brief", {
-				result: "too short",
+			recordCompletionGateBlockEvent(configWithState(taskState), "audit_gate", {
+				result: "Audit identified an unresolved required check.",
 				checkpointHash: "abc",
 			})
 			should.equal(taskState.completionGateBlockCount, 1)
-			should.equal(taskState.lastCompletionBlockReason, "result_too_brief")
-			should.equal(taskState.lastCompletionFailedStage, "min_length")
+			should.equal(taskState.lastCompletionBlockReason, "audit_gate")
+			should.equal(taskState.lastCompletionFailedStage, "audit")
 			should.equal(taskState.completionGatePressureLevel, "stable")
 			should.exist(taskState.lastCompletionAttemptAt)
 			should.exist(taskState.lastBlockedCompletionResultFingerprint)
@@ -656,31 +633,6 @@ describe("attemptCompletionUtils", () => {
 		})
 	})
 
-	describe("validateCompletionResultExcludesChecklist", () => {
-		it("rejects checklist content in the result summary", () => {
-			expectErrorMessage(
-				validateCompletionResultExcludesChecklist("Done.\n- [x] item one\n- [x] item two"),
-				"must not contain checklist",
-			)
-		})
-	})
-
-	describe("validateTaskProgressAlignsWithFocusChain", () => {
-		it("rejects task_progress with fewer items than the focus chain", () => {
-			taskState.currentFocusChainChecklist = "- [x] one\n- [ ] two\n- [ ] three"
-			expectErrorMessage(
-				validateTaskProgressAlignsWithFocusChain(configWithState(taskState), "- [x] one"),
-				"focus chain has 3",
-			)
-		})
-	})
-
-	describe("extractFocusChainItemLabels", () => {
-		it("strips checkbox markers from checklist lines", () => {
-			extractFocusChainItemLabels("- [x] done\n- [ ] pending").should.deepEqual(["done", "pending"])
-		})
-	})
-
 	describe("proactive completion guidance", () => {
 		it("emits advisory when approaching the gate circuit breaker", () => {
 			taskState.completionGateBlockCount = COMPLETION_GATE_WARN_THRESHOLD - 1
@@ -704,16 +656,6 @@ describe("attemptCompletionUtils", () => {
 			getCompletionRetryCooldownMs(2).should.equal(4000)
 			getCompletionRetryCooldownMs(5).should.equal(30_000)
 			getCompletionRetryCooldownMs(10).should.equal(30_000)
-		})
-	})
-
-	describe("validateCompletionTaskProgressRequired", () => {
-		it("requires task_progress when focus chain has checklist items", () => {
-			taskState.currentFocusChainChecklist = "- [x] done\n- [ ] pending"
-			expectErrorMessage(
-				validateCompletionTaskProgressRequired(configWithState(taskState), undefined),
-				"task_progress is required",
-			)
 		})
 	})
 

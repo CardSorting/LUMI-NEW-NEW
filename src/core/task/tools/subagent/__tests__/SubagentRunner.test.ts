@@ -176,6 +176,7 @@ describe("SubagentRunner", () => {
 	})
 	it("preserves command workspace options and links caller cancellation to the helper", async () => {
 		const config = createTaskConfig(true)
+		sinon.stub(coreApi, "buildApiHandler").returns(config.api as never)
 		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
 		const helper = (runner as any).createSubagentTaskConfig() as TaskConfig
 		const controller = new AbortController()
@@ -192,6 +193,7 @@ describe("SubagentRunner", () => {
 	})
 	it("forwards command observation to the same owner with helper cancellation", async () => {
 		const config = createTaskConfig(true)
+		sinon.stub(coreApi, "buildApiHandler").returns(config.api as never)
 		const read = sinon.stub().resolves({ execution_id: "run", status: "background" })
 		config.callbacks.readCommandOutput = read
 		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
@@ -329,8 +331,9 @@ describe("SubagentRunner", () => {
 				})
 				sinon.stub(skills, "discoverSkills").resolves([])
 				sinon.stub(skills, "getAvailableSkills").returns([])
-				if (checkFailure)
-					sinon.stub(completionGates, "validateSubagentCompletionGates").rejects(new Error("check unavailable"))
+				const validateCompletion = sinon.stub(completionGates, "validateSubagentCompletionGates")
+				if (checkFailure) validateCompletion.rejects(new Error("check unavailable"))
+				else validateCompletion.resolves("Required verification is still unavailable.")
 				stubApiHandler(createMessage)
 				initializeHostProvider()
 				const config = createTaskConfig(true)
@@ -376,7 +379,7 @@ describe("SubagentRunner", () => {
 			return "Saved the change once."
 		})
 		const result = await runner.run("Edit files", () => {})
-		assert.equal(result.status, "failed")
+		assert.equal(result.status, "cancelled")
 		assert.equal(result.isPartial, true)
 		assert.match(result.result!, /Saved the change once/)
 		assert.deepEqual(result.filesModified, ["saved.ts"])
@@ -398,6 +401,7 @@ describe("SubagentRunner", () => {
 		}))
 		const { runner, execute } = prepareProgressRun(createMessage)
 		const result = await runner.run("Read files", () => {})
+		assert.equal(result.status, "cancelled")
 		assert.match(result.error!, /cancelled/)
 		sinon.assert.notCalled(execute)
 		sinon.assert.calledOnce(createMessage)
@@ -415,6 +419,7 @@ describe("SubagentRunner", () => {
 				}),
 		)
 		const result = await runner.run("Read files", () => {})
+		assert.equal(result.status, "cancelled")
 		assert.match(result.error!, /cancelled/)
 		sinon.assert.notCalled(createMessage)
 	})
@@ -427,6 +432,81 @@ describe("SubagentRunner", () => {
 		assert.equal(result.status, "failed")
 		assert.match(result.error!, /policy unavailable/)
 		sinon.assert.notCalled(createMessage)
+	})
+
+	for (const phase of ["collision", "guard", "completion"] as const) {
+		it(`settles cancellation while ${phase} validation is still pending`, async () => {
+			let turns = 0
+			const createMessage = sinon.stub().callsFake(async function* () {
+				yield ++turns === 1
+					? callChunk(turns, DietCodeDefaultTool.FILE_NEW, { path: "saved.ts", content: "saved" })
+					: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			})
+			const { config, runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+			let started!: () => void
+			const entered = new Promise<void>((resolve) => {
+				started = resolve
+			})
+			let release!: (value: unknown) => void
+			const pending = sinon.stub().callsFake(() => {
+				started()
+				return new Promise<unknown>((resolve) => {
+					release = resolve
+				})
+			})
+			if (phase === "collision") sinon.stub(orchestrator, "checkCollision").callsFake(pending)
+			if (phase === "guard") config.universalGuard = { guardPreExecution: pending } as never
+			if (phase === "completion") sinon.stub(completionGates, "validateSubagentCompletionGates").callsFake(pending)
+			const statuses: Array<string | undefined> = []
+			const running = runner.run(
+				"Create saved.ts",
+				(update) => statuses.push(update.status),
+				phase === "collision" ? "child" : undefined,
+			)
+			let settled: Awaited<typeof running> | undefined
+			void running.then((result) => {
+				settled = result
+			})
+			await entered
+			await runner.abort()
+			await new Promise<void>((resolve) => setImmediate(resolve))
+			const resultAtCancellation = settled
+			// Allow the ignored dependency to settle too, so it cannot leak into another test.
+			release(phase === "guard" ? { success: true } : null)
+			await running
+			assert.ok(resultAtCancellation, "Cancellation must settle without waiting for validation")
+			assert.equal(resultAtCancellation.status, "cancelled")
+			assert.match(resultAtCancellation.error ?? "", /cancelled/)
+			assert.equal(statuses.at(-1), "cancelled")
+			assert.equal(execute.callCount, phase === "completion" ? 1 : 0)
+			assert.deepEqual(resultAtCancellation.filesModified, phase === "completion" ? ["saved.ts"] : [])
+			if (phase === "completion") assert.match(resultAtCancellation.result ?? "", /observed content/)
+		})
+	}
+
+	it("retains successful tool results when their description cannot be rendered", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* (_prompt, conversation) {
+			if (++turns === 1) {
+				yield callChunk(turns, DietCodeDefaultTool.FILE_NEW, { path: "saved.ts", content: "saved" })
+			} else {
+				assert.match(JSON.stringify(conversation.at(-1)), /observed content/)
+				assert.doesNotMatch(JSON.stringify(conversation.at(-1)), /description unavailable/)
+				yield callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			}
+		})
+		const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+		;(ToolExecutorCoordinator.prototype.getHandler as sinon.SinonStub).returns({
+			execute,
+			getDescription: () => {
+				throw new Error("description unavailable")
+			},
+		})
+		const result = await runner.run("Create saved.ts", () => {})
+		assert.equal(result.status, "completed", result.error)
+		assert.deepEqual(result.filesModified, ["saved.ts"])
+		assert.equal(createMessage.callCount, 2)
+		sinon.assert.calledOnce(execute)
 	})
 
 	for (const budget of ["maxCost", "maxTokens"] as const) {

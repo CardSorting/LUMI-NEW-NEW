@@ -5,6 +5,7 @@
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
 import type { DietCodeMessage, DietCodeSayBrowserAction, DietCodeSayTool } from "@shared/ExtensionMessage"
+import { parseSubagentStatusPayload } from "@shared/subagents"
 import { FileIcon, FolderOpenDotIcon, FolderOpenIcon, SearchIcon, ShapesIcon, WrenchIcon } from "lucide-react"
 
 /**
@@ -47,11 +48,77 @@ export function processMessages(messages: DietCodeMessage[]): DietCodeMessage[] 
 	return combineApiRequests(combineCommandSequences(messages))
 }
 
+function subagentBatchKey(prompts: unknown, batchId: unknown): string | undefined {
+	if (!Array.isArray(prompts) || prompts.length === 0) return undefined
+	if (!prompts.every((prompt): prompt is string => typeof prompt === "string" && prompt.trim().length > 0)) return undefined
+	if (batchId !== undefined) {
+		if (typeof batchId !== "string" || !batchId.trim()) return undefined
+		return JSON.stringify(["batch", batchId.trim()])
+	}
+	return JSON.stringify(["prompts", prompts.map((prompt) => prompt.trim())])
+}
+
+function supersededSubagentRequests(messages: DietCodeMessage[]): Set<number> {
+	const requestsByBatch = new Map<string, number>()
+	const seenStatusBatches = new Set<string>()
+	const superseded = new Set<number>()
+
+	for (const [index, message] of messages.entries()) {
+		const isRequest = message.ask === "use_subagents" || message.say === "use_subagents"
+		if (!isRequest && !(message.type === "say" && message.say === "subagent")) continue
+
+		let payload: unknown
+		try {
+			payload = JSON.parse(message.text || "")
+		} catch {
+			continue
+		}
+		if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue
+		const batchId = "batchId" in payload ? payload.batchId : undefined
+
+		if (isRequest) {
+			const key = subagentBatchKey("prompts" in payload ? payload.prompts : undefined, batchId)
+			if (key) requestsByBatch.set(key, index)
+			continue
+		}
+
+		const status = parseSubagentStatusPayload(message.text)
+		if (!status || !("items" in payload) || !Array.isArray(payload.items) || payload.items.length !== status.items.length) {
+			continue
+		}
+		const key = subagentBatchKey(
+			status.items.map((item) => item.prompt),
+			batchId,
+		)
+		if (!key) continue
+
+		// Repeated snapshots of the same batch must not hide a new request with identical prompts.
+		const hasStableIds = payload.items.every((item) => typeof item.id === "string" && item.id.trim().length > 0)
+		const statusIdentity =
+			batchId === undefined
+				? JSON.stringify(hasStableIds ? ["items", status.items.map((item) => item.id)] : ["row", message.ts])
+				: key
+		if (seenStatusBatches.has(statusIdentity)) continue
+		seenStatusBatches.add(statusIdentity)
+
+		// Explicit IDs identify native/manual batches. Only unkeyed XML and legacy rows
+		// use the complete ordered prompt list, consuming the nearest preceding request.
+		const requestIndex = requestsByBatch.get(key)
+		if (requestIndex !== undefined) {
+			superseded.add(requestIndex)
+			requestsByBatch.delete(key)
+		}
+	}
+	return superseded
+}
+
 /**
  * Filter messages that should be visible in the chat
  */
 export function filterVisibleMessages(messages: DietCodeMessage[]): DietCodeMessage[] {
-	return messages.filter((message, index, arr) => {
+	const supersededRequests = supersededSubagentRequests(messages)
+	return messages.filter((message, index) => {
+		if (supersededRequests.has(index)) return false
 		switch (message.ask) {
 			case "completion_result":
 				// don't show a chat row for a completion_result ask without text. This specific type of message only occurs if dietcode wants to execute a command as part of its completion result, in which case we interject the completion_result tool with the execute_command tool.
@@ -63,11 +130,6 @@ export function filterVisibleMessages(messages: DietCodeMessage[]): DietCodeMess
 			case "resume_task":
 			case "resume_completed_task":
 				return false
-			case "use_subagents":
-				if (arr.slice(index + 1).some((candidate) => candidate.type === "say" && candidate.say === "subagent")) {
-					return false
-				}
-				break
 		}
 		switch (message.say) {
 			case "api_req_finished": // combineApiRequests removes this from modifiedMessages anyways
@@ -99,11 +161,6 @@ export function filterVisibleMessages(messages: DietCodeMessage[]): DietCodeMess
 				break
 			case "mcp_server_request_started":
 				return false
-			case "use_subagents":
-				if (arr.slice(index + 1).some((candidate) => candidate.type === "say" && candidate.say === "subagent")) {
-					return false
-				}
-				break
 		}
 		return true
 	})

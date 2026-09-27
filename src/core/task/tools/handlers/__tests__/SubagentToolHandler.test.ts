@@ -424,7 +424,7 @@ describe("SubagentToolHandler", () => {
 		taskState.abort = true
 		await clock.tickAsync(100)
 		const result = await pending
-		assert.ok(String(result).includes("Success: 0, Fail: 5"))
+		assert.ok(String(result).includes("Success: 0, Fail: 0, Cancelled: 5"))
 		assert.equal(run.callCount, 3)
 		assert.equal(abort.callCount, 5)
 		const count = callbacks.say.callCount
@@ -453,8 +453,10 @@ describe("SubagentToolHandler", () => {
 			.at(-1)!
 		const payload = JSON.parse(final.args[1])
 		assert.equal(payload.completed, 5)
-		assert.equal(payload.failures, 5)
-		assert.ok(payload.items.every((item: { status: string }) => item.status === "failed"))
+		assert.equal(payload.failures, 0)
+		assert.equal(payload.cancelled, 5)
+		assert.equal(payload.status, "cancelled")
+		assert.ok(payload.items.every((item: { status: string }) => item.status === "cancelled"))
 	})
 
 	it("stops queued helpers when the cumulative budget is reached and preserves reported usage", async () => {
@@ -501,7 +503,7 @@ describe("SubagentToolHandler", () => {
 		})
 		sinon.stub(SubagentRunner.prototype, "abort").resolves()
 		const result = await new UseSubagentsToolHandler().execute(config, batch)
-		assert.match(String(result), /Success: 1, Fail: 4/)
+		assert.match(String(result), /Success: 1, Fail: 0, Cancelled: 4/)
 		assert.match(String(result), /Verified result/)
 		const final = callbacks.say
 			.getCalls()
@@ -546,13 +548,127 @@ describe("SubagentToolHandler", () => {
 		assert.equal(statusWrites, 2)
 		release()
 		await pending
-		assert.equal(statusWrites, 3)
+		assert.equal(statusWrites, 2)
 		const last = callbacks.say
 			.getCalls()
 			.filter((call) => call.args[0] === "subagent")
 			.at(-1)!
 		assert.equal(JSON.parse(last.args[1]).status, "completed")
 		assert.equal(last.args[4], false)
+	})
+
+	it("bounds progress writes even when the UI is fast and flushes completion immediately", async () => {
+		const { config, callbacks } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers()
+		let progress: Parameters<SubagentRunner["run"]>[1] | undefined
+		let finish!: (result: ReturnType<typeof completed>) => void
+		sinon.stub(SubagentRunner.prototype, "run").callsFake((_prompt, onProgress) => {
+			progress = onProgress
+			return new Promise((resolve) => {
+				finish = resolve
+			})
+		})
+		const pending = new UseSubagentsToolHandler().execute(config, { ...batch, params: { prompt_1: "one" } })
+		await clock.tickAsync(0)
+		for (let index = 0; index < 40; index++) {
+			progress?.({ status: "running", stats: { ...completed().stats, outputTokens: index } })
+			await clock.tickAsync(5)
+		}
+		const progressWrites = callbacks.say.getCalls().filter((call) => call.args[0] === "subagent").length
+		finish(completed())
+		await clock.tickAsync(0)
+		await pending
+		assert.ok(progressWrites <= 4, `Expected bounded progress writes, received ${progressWrites}`)
+		const terminal = callbacks.say
+			.getCalls()
+			.filter((call) => call.args[0] === "subagent")
+			.at(-1)
+		assert.ok(terminal)
+		assert.equal(JSON.parse(terminal.args[1]).status, "completed")
+		assert.equal(terminal.args[4], false)
+		assert.equal(clock.countTimers(), 0)
+	})
+
+	it("releases completed stream ownership while independent sibling work is still running", async () => {
+		const { config } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers()
+		;(config as any).getSessionStreamId = () => "parent"
+		sinon.stub(orchestrator, "spawnChildStream").callsFake(async (_parent, focus) => ({ id: focus }) as never)
+		const close = sinon.stub(orchestrator, "completeStream").resolves("")
+		let finish!: (result: ReturnType<typeof completed>) => void
+		sinon.stub(SubagentRunner.prototype, "run").callsFake(async (prompt) => {
+			if (prompt === "two")
+				return new Promise((resolve) => {
+					finish = resolve
+				})
+			return completed()
+		})
+		const pending = new UseSubagentsToolHandler().execute(config, { ...batch, params: { prompt_1: "one", prompt_2: "two" } })
+		await clock.tickAsync(0)
+		const closedBeforeSiblingFinished = close.calledWith("subagent: one", "done")
+		finish(completed())
+		await pending
+		assert.equal(closedBeforeSiblingFinished, true)
+		assert.equal(close.getCalls().filter((call) => call.args[0] === "subagent: one").length, 1)
+	})
+
+	it("persists terminal status while a webview delivery remains unresponsive", async () => {
+		const { config, callbacks } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers()
+		const rows: any[] = []
+		callbacks.postStateToWebview.returns(new Promise(() => {}))
+		config.messageState = {
+			getDietCodeMessages: () => rows,
+			addToDietCodeMessages: async (row: any) => {
+				rows.push(row)
+			},
+			updateDietCodeMessage: async (index: number, update: any) => {
+				Object.assign(rows[index], update)
+			},
+		} as never
+		sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		const pending = new UseSubagentsToolHandler().execute(config, { ...batch, params: { prompt_1: "one" } })
+		await clock.tickAsync(1000)
+		await pending
+		assert.equal(JSON.parse(rows[0].text).status, "completed")
+		assert.equal(rows[0].partial, false)
+		sinon.assert.calledOnce(callbacks.postStateToWebview)
+	})
+
+	it("reports cancellation separately while retaining earlier successes and actual failures", async () => {
+		const { config, callbacks, taskState } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers()
+		const releases: (() => void)[] = []
+		sinon.stub(SubagentRunner.prototype, "run").callsFake(async (prompt) => {
+			if (prompt === "one") return { ...completed(), result: "Saved successful work" }
+			if (prompt === "two") return { ...completed(), status: "failed", error: "Real verification failure" }
+			await new Promise<void>((resolve) => {
+				releases.push(resolve)
+			})
+			return { ...completed(), status: "cancelled", result: "Cancelled partial work" }
+		})
+		sinon.stub(SubagentRunner.prototype, "abort").callsFake(async () => {
+			for (const release of releases) release()
+		})
+		const pending = new UseSubagentsToolHandler().execute(config, batch)
+		await clock.tickAsync(0)
+		taskState.abort = true
+		await clock.tickAsync(0)
+		const result = await pending
+		assert.match(String(result), /Success: 1, Fail: 1, Cancelled: 3/)
+		assert.match(String(result), /Saved successful work/)
+		assert.match(String(result), /Real verification failure/)
+		const terminal = callbacks.say
+			.getCalls()
+			.filter((call) => call.args[0] === "subagent")
+			.at(-1)
+		assert.ok(terminal)
+		const payload = JSON.parse(terminal.args[1])
+		assert.equal(payload.completed, 5)
+		assert.equal(payload.successes, 1)
+		assert.equal(payload.failures, 1)
+		assert.equal(payload.cancelled, 3)
+		assert.equal(clock.countTimers(), 0)
 	})
 
 	it("returns missing parameter error when no prompts are provided", async () => {
@@ -585,6 +701,65 @@ describe("SubagentToolHandler", () => {
 		})
 
 		assert.ok((result as string).includes("Subagents are disabled. Enable them in Settings > Features to use this tool."))
+	})
+
+	it("correlates native partial approvals, full approvals, and status with the same call ID", async () => {
+		const { config, callbacks } = createConfig()
+		const handler = new UseSubagentsToolHandler()
+		const block = { ...batch, call_id: "native-call-1", tool_use_id: "provider-tool-1", isNativeToolCall: true }
+		sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		await handler.handlePartialBlock({ ...block, partial: true }, createUIHelpers(config))
+		await handler.execute(config, block)
+		const approvalCalls = callbacks.ask.getCalls().filter((call) => call.args[0] === "use_subagents")
+		assert.equal(approvalCalls.length, 2)
+		assert.deepEqual(
+			approvalCalls.map((call) => call.args[2]),
+			[true, false],
+		)
+		assert.ok(approvalCalls.every((call) => JSON.parse(call.args[1]).batchId === "native-call-1"))
+		const statusCalls = callbacks.say.getCalls().filter((call) => call.args[0] === "subagent")
+		assert.ok(statusCalls.length > 0)
+		assert.ok(statusCalls.every((call) => JSON.parse(call.args[1]).batchId === "native-call-1"))
+	})
+
+	it("keeps native auto-approved execution keyed without adding a redundant request row", async () => {
+		const { config, callbacks } = createConfig({ autoApproveSafe: true })
+		sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		await new UseSubagentsToolHandler().execute(config, { ...batch, tool_use_id: "native-tool-only", isNativeToolCall: true })
+		sinon.assert.notCalled(callbacks.ask)
+		assert.equal(callbacks.say.getCalls().filter((call) => call.args[0] === "use_subagents").length, 0)
+		const statusCalls = callbacks.say.getCalls().filter((call) => call.args[0] === "subagent")
+		assert.ok(statusCalls.length > 0)
+		assert.ok(statusCalls.every((call) => JSON.parse(call.args[1]).batchId === "native-tool-only"))
+	})
+
+	it("distinguishes repeated identical manual XML batches in approvals and status", async () => {
+		const { config, callbacks } = createConfig()
+		sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		const handler = new UseSubagentsToolHandler()
+		await handler.execute(config, batch)
+		await handler.execute(config, batch)
+		const approvalIds = callbacks.ask.getCalls().map((call) => JSON.parse(call.args[1]).batchId)
+		assert.equal(approvalIds.length, 2)
+		assert.ok(approvalIds.every((id) => typeof id === "string" && id.length > 0))
+		assert.notEqual(approvalIds[0], approvalIds[1])
+		const statusIds = callbacks.say
+			.getCalls()
+			.filter((call) => call.args[0] === "subagent")
+			.map((call) => JSON.parse(call.args[1]).batchId)
+		assert.deepEqual([...new Set(statusIds)], approvalIds)
+	})
+
+	it("does not reopen an identical denied assignment under a new native call ID", async () => {
+		const { config, callbacks } = createConfig({ taskAskResponse: "noButtonClicked" })
+		const run = sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		const handler = new UseSubagentsToolHandler()
+		for (const call_id of ["denied-call-1", "denied-call-2"]) {
+			const result = await handler.execute(config, { ...batch, call_id, isNativeToolCall: true })
+			assert.equal(isToolFailure(result), true)
+		}
+		sinon.assert.calledOnce(callbacks.ask)
+		sinon.assert.notCalled(run)
 	})
 
 	it("streams partial use_subagents approval as ask when not auto-approved", async () => {

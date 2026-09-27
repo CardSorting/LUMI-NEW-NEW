@@ -26,17 +26,12 @@ import {
 	recordCompletionAttemptTime,
 	recordCompletionGateBlockEvent,
 	recordCompletionPreflightFailure,
-	retireRoadmapCompletionState,
+	retireObsoleteCompletionState,
 	validateCompletionAttemptCooldown,
 	validateCompletionDemoCommand,
-	validateCompletionResultExcludesChecklist,
-	validateCompletionResultMaxLength,
-	validateCompletionResultMinLength,
 	validateCompletionResultQuality,
 	validateCompletionTaskProgress,
-	validateCompletionTaskProgressRequired,
 	validateFocusChainComplete,
-	validateTaskProgressAlignsWithFocusChain,
 } from "./attemptCompletionUtils"
 import type { TaskConfig } from "./types/TaskConfig"
 
@@ -130,28 +125,8 @@ export const PREFLIGHT_STAGE_RUNNERS: ReadonlyArray<{
 		validate: (ctx) => ctx.validateQuality(ctx.params.result),
 	},
 	{
-		stage: "checklist_in_result",
-		validate: (ctx) => validateCompletionResultExcludesChecklist(ctx.params.result),
-	},
-	{
-		stage: "min_length",
-		validate: (ctx) => validateCompletionResultMinLength(ctx.params.result),
-	},
-	{
-		stage: "max_length",
-		validate: (ctx) => validateCompletionResultMaxLength(ctx.params.result),
-	},
-	{
-		stage: "task_progress_required",
-		validate: (ctx) => validateCompletionTaskProgressRequired(ctx.config, ctx.params.taskProgress),
-	},
-	{
 		stage: "task_progress_complete",
 		validate: (ctx) => validateCompletionTaskProgress(ctx.params.taskProgress),
-	},
-	{
-		stage: "task_progress_align",
-		validate: (ctx) => validateTaskProgressAlignsWithFocusChain(ctx.config, ctx.params.taskProgress),
 	},
 	{
 		stage: "focus_chain",
@@ -190,9 +165,9 @@ export function evaluateCompletionGateReadiness(
 	},
 	validateQuality: (result: string) => string | null = validateCompletionResultQuality,
 ): CompletionGateReadinessIssue[] {
-	// Readiness is non-mutating, including migration of legacy roadmap-only failures.
+	// Readiness is non-mutating, including migration of retired completion failures.
 	config = { ...config, taskState: { ...config.taskState } } as TaskConfig
-	retireRoadmapCompletionState(config)
+	retireObsoleteCompletionState(config)
 	if (isCompletionGateCircuitBreakerTripped(config)) {
 		const message = getCompletionGateCircuitBreakerError(config)
 		return message ? [{ stage: "circuit_breaker", message }] : []

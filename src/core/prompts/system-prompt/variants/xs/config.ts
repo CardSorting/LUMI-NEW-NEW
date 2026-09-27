@@ -67,14 +67,8 @@ export const config = createVariant(ModelFamily.XS)
 	.overrideComponent(SystemPromptSection.RULES, {
 		template: xsComponentOverrides.RULES,
 	})
-	.overrideComponent(SystemPromptSection.ACT_VS_PLAN, {
-		template: xsComponentOverrides.ACT_VS_PLAN,
-	})
 	.overrideComponent(SystemPromptSection.CAPABILITIES, {
 		template: xsComponentOverrides.CAPABILITIES,
-	})
-	.overrideComponent(SystemPromptSection.OBJECTIVE, {
-		template: xsComponentOverrides.OBJECTIVE,
 	})
 	.overrideComponent(SystemPromptSection.EDITING_FILES, {
 		template: xsComponentOverrides.EDITING_FILES,

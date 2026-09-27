@@ -83,12 +83,6 @@ export const config = createVariant(ModelFamily.NATIVE_NEXT_GEN)
 	.overrideComponent(SystemPromptSection.TOOL_USE, {
 		template: TEMPLATE_OVERRIDES.TOOL_USE,
 	})
-	.overrideComponent(SystemPromptSection.OBJECTIVE, {
-		template: TEMPLATE_OVERRIDES.OBJECTIVE,
-	})
-	.overrideComponent(SystemPromptSection.ACT_VS_PLAN, {
-		template: TEMPLATE_OVERRIDES.ACT_VS_PLAN,
-	})
 	.overrideComponent(SystemPromptSection.FEEDBACK, {
 		template: TEMPLATE_OVERRIDES.FEEDBACK,
 	})

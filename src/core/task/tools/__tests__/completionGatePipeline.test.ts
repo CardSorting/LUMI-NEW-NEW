@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it } from "mocha"
 import "should"
-import { COMPLETION_RESULT_MAX_LENGTH, MAX_COMPLETION_GATE_BLOCK_COUNT } from "@shared/audit/gatePolicy"
+import { MAX_COMPLETION_GATE_BLOCK_COUNT } from "@shared/audit/gatePolicy"
 import * as fs from "fs/promises"
 import * as os from "os"
 import * as path from "path"
@@ -11,9 +11,10 @@ import { TaskState } from "../../TaskState"
 import {
 	COMPLETION_PREFLIGHT_STAGES,
 	classifyCompletionPreflightReason,
+	mapCompletionReasonToPreflightStage,
 	recordCompletionGateBlockEvent,
 	recordCompletionPreflightFailure,
-	retireRoadmapCompletionState,
+	retireObsoleteCompletionState,
 	validateCompletionResultQuality,
 } from "../attemptCompletionUtils"
 import {
@@ -105,18 +106,40 @@ describe("completionGatePipeline", () => {
 		error.should.containEql('reason="invalid_demo_command"')
 	})
 
-	it("rejects result summaries exceeding max length in preflight", async () => {
-		const tooLong = "x".repeat(COMPLETION_RESULT_MAX_LENGTH + 1)
-		const error = await runCompletionPreflightChecks(configWithState(taskState), { result: tooLong }, "Test", {
-			validateQuality: validateCompletionResultQuality,
-			onFailure: recordCompletionPreflightFailure,
-		})
-		should.exist(error)
-		if (error === null) {
-			throw new Error("expected max length error")
+	it("accepts completed results without imposing prose length or checklist placement", async () => {
+		for (const result of ["Fixed.", "Verified the requested fix.\n- [x] Regression test passed", "x".repeat(6001)]) {
+			const config = configWithState(taskState)
+			evaluateCompletionGateReadiness(config, { result }).should.be.empty()
+			const flow = await runCompletionGateFlow(config, { result }, "Test")
+			flow.status.should.equal("passed")
 		}
-		error.should.containEql("exceeds maximum length")
-		error.should.containEql('reason="result_too_long"')
+		;(taskState.completionGateBlockCount ?? 0).should.equal(0)
+	})
+
+	it("finishes a completed focus chain without requiring a duplicate or identically sized checklist", async () => {
+		taskState.currentFocusChainChecklist = "- [x] Implement change\n- [x] Verify regression"
+		const config = { ...configWithState(taskState), focusChainSettings: { enabled: true } } as TaskConfig
+		for (const taskProgress of [undefined, "- [x] Implemented and verified"]) {
+			const params = { result: "Verified the requested fix.", taskProgress }
+			evaluateCompletionGateReadiness(config, params).should.be.empty()
+			const flow = await runCompletionGateFlow(config, params, "Test")
+			flow.status.should.equal("passed")
+		}
+		;(taskState.completionGateBlockCount ?? 0).should.equal(0)
+	})
+
+	it("still identifies explicitly unfinished checklist work", async () => {
+		const config = { ...configWithState(taskState), focusChainSettings: { enabled: true } } as TaskConfig
+		taskState.currentFocusChainChecklist = "- [x] Implement change\n- [ ] Verify regression"
+		const focusError = await runCompletionGateFlow(config, { result: VALID_RESULT }, "Test")
+		focusError.status.should.equal("blocked")
+		if (focusError.status === "blocked") focusError.message.should.containEql("focus chain has 1 incomplete item")
+		taskState.currentFocusChainChecklist = "- [x] Implement change\n- [x] Verify regression"
+		const progressIssues = evaluateCompletionGateReadiness(config, {
+			result: VALID_RESULT,
+			taskProgress: "- [ ] Verify regression",
+		})
+		progressIssues.some((issue) => issue.stage === "task_progress_complete").should.be.true()
 	})
 
 	it("increments block count on preflight quality failure", async () => {
@@ -234,12 +257,60 @@ describe("completionGatePipeline", () => {
 			{ reason: "audit_gate", stage: "audit", at: 2, soft: false, blockCount: 2 },
 		]
 		const config = configWithState(taskState)
-		retireRoadmapCompletionState(config)
+		retireObsoleteCompletionState(config)
 		taskState.completionGateBlockCount.should.equal(1)
 		taskState.lastCompletionBlockReason.should.equal("audit_gate")
 		recordCompletionGateBlockEvent(config, "roadmap_gate").should.equal(1)
 		taskState.completionGateBlockHistory!.length.should.equal(1)
 		classifyCompletionPreflightReason("hardening audit evaluation failed for roadmap code").should.equal("audit_error")
+	})
+
+	for (const reason of [
+		"result_too_brief",
+		"result_too_long",
+		"checklist_in_result",
+		"task_progress_required",
+		"task_progress_align",
+	] as const) {
+		it(`retires historical ${reason} retry loops without requiring new workspace changes`, async () => {
+			taskState.completionGateBlockCount = MAX_COMPLETION_GATE_BLOCK_COUNT
+			taskState.lastCompletionBlockReason = "circuit_breaker"
+			taskState.lastGateBlockWorkspaceRevision = taskState.workspaceRevision
+			taskState.lastBlockedCompletionResultFingerprint = "retired-formatting-result"
+			taskState.completionGateBlockHistory = Array.from({ length: MAX_COMPLETION_GATE_BLOCK_COUNT }, (_, index) => ({
+				reason: index === 0 ? reason : "duplicate_submission",
+				stage: index === 0 ? mapCompletionReasonToPreflightStage(reason) : "duplicate",
+				at: 100 + index,
+				soft: false,
+				blockCount: index + 1,
+			}))
+			const config = configWithState(taskState)
+			evaluateCompletionGateReadiness(config, { result: "Fixed." }).should.be.empty()
+			taskState.completionGateBlockCount.should.equal(MAX_COMPLETION_GATE_BLOCK_COUNT)
+			taskState.lastBlockedCompletionResultFingerprint.should.equal("retired-formatting-result")
+			const flow = await runCompletionGateFlow(config, { result: "Fixed." }, "Test")
+			flow.status.should.equal("passed")
+			should.equal(taskState.completionGateBlockCount, 0)
+			should.deepEqual(taskState.completionGateBlockHistory, [])
+			should.not.exist(taskState.lastBlockedCompletionResultFingerprint)
+		})
+	}
+
+	it("preserves independent audit pressure while retiring formatting failures and their duplicate retries", () => {
+		taskState.completionGateBlockCount = 3
+		taskState.lastCompletionBlockReason = "audit_gate"
+		taskState.completionGateBlockHistory = [
+			{ reason: "result_too_brief", stage: "min_length", at: 1, soft: false, blockCount: 1 },
+			{ reason: "duplicate_submission", stage: "duplicate", at: 2, soft: false, blockCount: 2 },
+			{ reason: "audit_gate", stage: "audit", at: 3, soft: false, blockCount: 3 },
+		]
+		const config = configWithState(taskState)
+		retireObsoleteCompletionState(config)
+		taskState.completionGateBlockCount.should.equal(1)
+		taskState.lastCompletionBlockReason.should.equal("audit_gate")
+		should.equal(taskState.completionGateBlockHistory?.length, 1)
+		recordCompletionGateBlockEvent(config, "result_too_brief").should.equal(1)
+		should.equal(taskState.completionGateBlockHistory?.length, 1)
 	})
 
 	it("evaluateCompletionGateReadinessAsync skips roadmap when disabled", async () => {

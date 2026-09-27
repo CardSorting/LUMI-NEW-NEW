@@ -1,4 +1,5 @@
 import type { DietCodeMessage, DietCodeSaySubagentStatus, SubagentStatusItem } from "@shared/ExtensionMessage"
+import { parseSubagentStatusPayload } from "@shared/subagents"
 
 export type SubagentSwarmStatus = DietCodeSaySubagentStatus["status"]
 
@@ -9,6 +10,7 @@ export interface SubagentAuditSummary {
 	runningCount: number
 	completedCount: number
 	failedCount: number
+	cancelledCount: number
 	pendingCount: number
 	/** Unique parent gate / audit signals propagated to subagents. */
 	parentGateSignals: string[]
@@ -79,25 +81,10 @@ export function isParentGateSignal(signal: string): boolean {
 	return signal.startsWith("GATE:") || signal.startsWith("SIGNAL: PARENT_") || signal.includes("PARENT_")
 }
 
-function parseSubagentStatusPayload(message: DietCodeMessage): DietCodeSaySubagentStatus | undefined {
-	if (message.say !== "subagent" || !message.text) {
-		return undefined
-	}
-	try {
-		const parsed = JSON.parse(message.text) as DietCodeSaySubagentStatus
-		if (!Array.isArray(parsed.items)) {
-			return undefined
-		}
-		return parsed
-	} catch {
-		return undefined
-	}
-}
-
 /** Returns the most recent subagent swarm status payload from chat history. */
 export function getLatestSubagentStatusFromMessages(messages: DietCodeMessage[]): DietCodeSaySubagentStatus | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const payload = parseSubagentStatusPayload(messages[i])
+		const payload = messages[i].say === "subagent" ? parseSubagentStatusPayload(messages[i].text) : undefined
 		if (payload) {
 			return payload
 		}
@@ -127,6 +114,7 @@ export function buildSubagentAuditSummary(messages: DietCodeMessage[]): Subagent
 	const runningCount = latest.items.filter((item) => item.status === "running").length
 	const completedCount = latest.items.filter((item) => item.status === "completed").length
 	const failedCount = latest.items.filter((item) => item.status === "failed").length
+	const cancelledCount = latest.items.filter((item) => item.status === "cancelled").length
 	const pendingCount = latest.items.filter((item) => item.status === "pending").length
 	const parentGateSignals = collectParentGateSignals(latest.items)
 
@@ -136,6 +124,7 @@ export function buildSubagentAuditSummary(messages: DietCodeMessage[]): Subagent
 		runningCount,
 		completedCount,
 		failedCount,
+		cancelledCount,
 		pendingCount,
 		parentGateSignals,
 		hasParentGateBlocked: parentGateSignals.some(
@@ -165,7 +154,7 @@ export function buildSubagentHandoffMarkdown(summary: SubagentAuditSummary): str
 	const lines = ["## Subagent Audit Handoff", ""]
 	lines.push(`- Swarm status: ${summary.swarmStatus ?? "unknown"}`)
 	lines.push(
-		`- Agents: ${summary.totalAgents} (${summary.runningCount} running, ${summary.completedCount} done, ${summary.failedCount} failed)`,
+		`- Agents: ${summary.totalAgents} (${summary.runningCount} running, ${summary.completedCount} done, ${summary.failedCount} failed, ${summary.cancelledCount} cancelled)`,
 	)
 	if (summary.parentGateSignals.length > 0) {
 		lines.push("- Parent gate signals propagated to subagents:")

@@ -7,6 +7,32 @@ import type { DietCodeMessage } from "@shared/ExtensionMessage"
 import { expect } from "chai"
 
 describe("auditSubagentRollup", () => {
+	it("keeps the parent header usable when persisted helper records are malformed", () => {
+		const summary = buildSubagentAuditSummary([
+			{
+				ts: 1,
+				type: "say",
+				say: "subagent",
+				text: JSON.stringify({
+					status: "cancelled",
+					items: [
+						null,
+						{
+							id: "a",
+							prompt: "Check routes",
+							status: "running",
+							criticalSignals: [null, 42],
+						},
+						{ id: "b", prompt: "Check types", status: "completed", criticalSignals: "bad data" },
+					],
+				}),
+			},
+		])!
+		expect(summary).to.include({ totalAgents: 2, runningCount: 0, completedCount: 1, failedCount: 0, cancelledCount: 1 })
+		expect(summary.parentGateSignals).to.deep.equal([])
+		expect(buildSubagentHandoffMarkdown(summary)).to.contain("1 cancelled")
+	})
+
 	it("aggregates parent gate signals from subagent swarm status", () => {
 		const messages = [
 			{

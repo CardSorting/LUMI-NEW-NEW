@@ -9,7 +9,7 @@ const generic: DietCodeToolSpec = {
 	id,
 	name: "use_subagents",
 	description:
-		"Run up to five focused in-process subagents in parallel. Each subagent gets its own prompt and returns a comprehensive research result with tool and token stats. Use this for broad exploration when reading many files would consume the main agent's context window. You do not need to launch multiple subagents every time; using one subagent is valid when it avoids unnecessary context usage for light discovery work.",
+		"Run up to five focused in-process subagents in parallel for independent investigation, implementation, debugging, or verification. Each helper can use its exposed tools to read and edit files, execute commands, and check results within the assigned scope and configured permissions. Give each helper a concrete deliverable and useful context. Use one or more helpers when delegation materially accelerates the task; reconcile their evidence and continue execution without peer-approval ceremonies.",
 	contextRequirements: (context) => context.subagentsEnabled === true && !context.isSubagentRun,
 	parameters: [
 		{

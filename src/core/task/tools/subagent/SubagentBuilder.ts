@@ -1,5 +1,6 @@
 import { buildApiHandler } from "@core/api"
 import { PromptRegistry } from "@core/prompts/system-prompt"
+import { HEAV3NS_MANDATE } from "@core/prompts/system-prompt/components/heav3ns_mandate"
 import { DietCodeToolSet } from "@core/prompts/system-prompt/registry/DietCodeToolSet"
 import type { SystemPromptContext } from "@core/prompts/system-prompt/types"
 import { DietCodeDefaultTool, withExecutionObservation } from "@shared/tools"
@@ -114,7 +115,8 @@ export class SubagentBuilder {
 
 	buildSystemPrompt(generatedSystemPrompt: string): string {
 		const configuredSystemPrompt = this.agentConfig?.systemPrompt?.trim()
-		const systemPrompt = configuredSystemPrompt || generatedSystemPrompt
+		// Generated roles already contain the shared mandate; custom profiles replace those roles.
+		const systemPrompt = configuredSystemPrompt ? `${configuredSystemPrompt}\n\n${HEAV3NS_MANDATE}` : generatedSystemPrompt
 
 		// Nesting depth awareness for the subagent
 		const currentDepth = this.baseConfig.taskState?.recursionDepth || 0

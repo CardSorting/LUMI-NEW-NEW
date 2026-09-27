@@ -8,8 +8,6 @@ import {
 	COMPLETION_GATE_ESCALATION_REMAINING,
 	COMPLETION_GATE_STATUS_SCHEMA_VERSION,
 	COMPLETION_GATE_WARN_THRESHOLD,
-	COMPLETION_RESULT_MAX_LENGTH,
-	COMPLETION_RESULT_MIN_LENGTH,
 	COMPLETION_RETRY_COOLDOWN_MS,
 	COMPLETION_RETRY_MAX_COOLDOWN_MS,
 	DEFAULT_MAX_CONSECUTIVE_MISTAKES,
@@ -45,12 +43,7 @@ export type CompletionPreflightReason =
 export const COMPLETION_PREFLIGHT_STAGES = [
 	"circuit_breaker",
 	"quality",
-	"checklist_in_result",
-	"min_length",
-	"max_length",
-	"task_progress_required",
 	"task_progress_complete",
-	"task_progress_align",
 	"focus_chain",
 	"cooldown",
 	"duplicate",
@@ -59,8 +52,24 @@ export const COMPLETION_PREFLIGHT_STAGES = [
 	"double_check",
 ] as const
 
-// "roadmap" is retained only to decode legacy history; it is not an executable stage.
-export type CompletionPreflightStage = (typeof COMPLETION_PREFLIGHT_STAGES)[number] | "roadmap"
+// Retired stages remain readable in persisted history; they never run as checks.
+export type CompletionPreflightStage =
+	| (typeof COMPLETION_PREFLIGHT_STAGES)[number]
+	| "roadmap"
+	| "checklist_in_result"
+	| "min_length"
+	| "max_length"
+	| "task_progress_required"
+	| "task_progress_align"
+
+const RETIRED_COMPLETION_REASONS = new Set<string>([
+	"roadmap_gate",
+	"checklist_in_result",
+	"result_too_brief",
+	"result_too_long",
+	"task_progress_required",
+	"task_progress_align",
+])
 
 /** Throttle-only blocks — do not consume circuit-breaker budget (mirrors HTTP 429 vs 4xx). */
 export const COMPLETION_SOFT_BLOCK_REASONS = new Set<CompletionPreflightReason>(["retry_cooldown", "double_check"])
@@ -187,15 +196,6 @@ export function validateCompletionResultQuality(result: string): string | null {
 	return null
 }
 
-/** Bundled quality gate — use when a single validateQuality callback is required. */
-export function validateCompletionPreflightQualityBundle(result: string): string | null {
-	return (
-		validateCompletionResultQuality(result) ??
-		validateCompletionResultExcludesChecklist(result) ??
-		validateCompletionResultMinLength(result)
-	)
-}
-
 /** Demo commands that only print text — blocked per attempt_completion tool spec. */
 const COMPLETION_DEMO_COMMAND_BLOCK_PATTERN = /^\s*(echo|cat|printf|type)\b/i
 
@@ -211,16 +211,6 @@ export function validateCompletionDemoCommand(command: string | undefined): stri
 		)
 	}
 	return null
-}
-
-/** Markdown checklist lines — result summary should not duplicate task_progress. */
-const COMPLETION_CHECKLIST_IN_RESULT_PATTERN = /^\s*-\s*\[[ xX]\]/m
-
-export function extractFocusChainItemLabels(checklist: string): string[] {
-	return checklist
-		.split("\n")
-		.map((line) => line.replace(/^\s*-\s*\[[ xX]\]\s*/i, "").trim())
-		.filter(Boolean)
 }
 
 export function recordCompletionBlockReason(config: TaskConfig, reason: CompletionPreflightReason): void {
@@ -283,64 +273,6 @@ export function getCompletionGateTelemetryContext(config: TaskConfig): {
 	}
 }
 
-export function validateCompletionResultExcludesChecklist(result: string): string | null {
-	if (COMPLETION_CHECKLIST_IN_RESULT_PATTERN.test(result)) {
-		return (
-			"Completion rejected: result must not contain checklist items. " +
-			"Put the completed checklist in task_progress, not in result."
-		)
-	}
-	return null
-}
-
-export function validateTaskProgressAlignsWithFocusChain(config: TaskConfig, taskProgress: string | undefined): string | null {
-	if (!config.focusChainSettings?.enabled) {
-		return null
-	}
-
-	const focusChecklist = config.taskState.currentFocusChainChecklist
-	if (!focusChecklist?.trim() || !taskProgress?.trim()) {
-		return null
-	}
-
-	const focusLabels = extractFocusChainItemLabels(focusChecklist)
-	const progressLabels = extractFocusChainItemLabels(taskProgress)
-	if (focusLabels.length === 0) {
-		return null
-	}
-
-	if (progressLabels.length < focusLabels.length) {
-		return (
-			`Completion rejected: task_progress has ${progressLabels.length} item(s) but focus chain has ${focusLabels.length}. ` +
-			"Include every focus chain item in task_progress, all marked [x]."
-		)
-	}
-
-	return null
-}
-
-export function validateCompletionResultMinLength(result: string): string | null {
-	const trimmed = result.trim()
-	if (trimmed.length < COMPLETION_RESULT_MIN_LENGTH) {
-		return (
-			`Completion rejected: result is too brief (${trimmed.length} chars, minimum ${COMPLETION_RESULT_MIN_LENGTH}). ` +
-			"Provide a 1–2 paragraph summary of what was done."
-		)
-	}
-	return null
-}
-
-export function validateCompletionResultMaxLength(result: string): string | null {
-	const trimmed = result.trim()
-	if (trimmed.length > COMPLETION_RESULT_MAX_LENGTH) {
-		return (
-			`Completion rejected: result exceeds maximum length (${trimmed.length} chars, maximum ${COMPLETION_RESULT_MAX_LENGTH}). ` +
-			"Shorten to a 1–2 paragraph summary; move checklists to task_progress."
-		)
-	}
-	return null
-}
-
 export function mapCompletionReasonToPreflightStage(reason: CompletionPreflightReason): CompletionPreflightStage {
 	switch (reason) {
 		case "circuit_breaker":
@@ -399,24 +331,8 @@ export function mapCompletionReasonToHttpStatus(reason: CompletionPreflightReaso
 
 const COMPLETION_GATE_PLAYBOOK_STEPS: Partial<Record<CompletionPreflightReason, readonly string[]>> = {
 	empty_result: [
-		"Write a 1–2 paragraph summary of completed work and outcomes.",
-		"Keep checklists in task_progress, not in result.",
+		"Provide a nonempty summary of the outcome and any limitations.",
 		"Retry attempt_completion with the updated result.",
-	],
-	result_too_brief: [
-		"Expand result to cover what changed, why, and verification outcomes.",
-		"Aim for at least 40 characters — typically 1–2 paragraphs.",
-		"Retry attempt_completion without re-submitting an unchanged summary.",
-	],
-	result_too_long: [
-		"Trim result to a concise 1–2 paragraph executive summary.",
-		"Move detailed checklists and file lists to task_progress.",
-		"Retry attempt_completion with the shortened result.",
-	],
-	checklist_in_result: [
-		"Remove markdown checklist lines (- [ ] / - [x]) from result.",
-		"Pass the full completed checklist in task_progress instead.",
-		"Keep result as a prose summary only.",
 	],
 	unfinished_markers: [
 		"Search the workspace for TODO/FIXME/placeholder markers and resolve them.",
@@ -439,24 +355,13 @@ const COMPLETION_GATE_PLAYBOOK_STEPS: Partial<Record<CompletionPreflightReason, 
 		"Retry attempt_completion after cooldown_remaining_ms reaches 0.",
 	],
 	focus_chain_incomplete: [
-		"Open the focus chain checklist and mark every item [x].",
-		"Use update_todo_list if items need status updates.",
-		"Retry attempt_completion with matching task_progress.",
-	],
-	task_progress_required: [
-		"Pass task_progress with the full focus chain checklist.",
-		"Mark every item [x] before completing.",
-		"Retry attempt_completion with both result and task_progress.",
+		"Resolve the remaining assigned work and verify its result.",
+		"Update the focus chain to reflect completed work and current scope.",
+		"Retry attempt_completion after the outstanding work is resolved.",
 	],
 	task_progress_incomplete: [
-		"Pass task_progress with every focus chain item marked [x].",
-		"Ensure task_progress item count matches the focus chain.",
-		"Keep result as a summary only — no checklist lines.",
-	],
-	task_progress_align: [
-		"Include every focus chain item in task_progress, in the same order.",
-		"Mark all items [x] in task_progress.",
-		"Retry attempt_completion with aligned task_progress.",
+		"Resolve the remaining assigned work and verify its result.",
+		"Update task_progress to reflect the actual completed work and current scope.",
 	],
 	invalid_demo_command: [
 		"Replace echo/cat/printf/type with a command that demonstrates real behavior.",
@@ -489,6 +394,8 @@ const COMPLETION_GATE_PLAYBOOK_STEPS: Partial<Record<CompletionPreflightReason, 
 }
 
 export function getCompletionGatePlaybookSteps(reason: CompletionPreflightReason): readonly string[] {
+	if (RETIRED_COMPLETION_REASONS.has(reason))
+		return ["This completion gate has been retired. Continue or finish the assigned task."]
 	return COMPLETION_GATE_PLAYBOOK_STEPS[reason] ?? []
 }
 
@@ -537,12 +444,7 @@ export function getRemainingCompletionGateStages(failedStage: CompletionPrefligh
 export const COMPLETION_PREFLIGHT_STAGE_HINTS: Partial<Record<CompletionPreflightStage, string>> = {
 	circuit_breaker: "Fix the issue or gather new validation evidence before retrying in this task",
 	quality: "Provide a nonempty summary of the outcome and any limitations",
-	checklist_in_result: "Keep checklists in task_progress, not in result",
-	min_length: "Provide enough detail to identify the completed work",
-	max_length: "Trim result to 6000 chars; move detail to task_progress",
-	task_progress_required: "Pass task_progress when focus chain exists",
 	task_progress_complete: "Every task_progress item must be [x]",
-	task_progress_align: "task_progress must mirror every focus chain item",
 	focus_chain: "Mark all focus chain items [x] via update_todo_list",
 	cooldown: "Wait for backoff before retrying after a gate block",
 	duplicate: "Change result or workspace before re-submitting",
@@ -1081,31 +983,6 @@ export function validateCompletionAttemptCooldown(config: TaskConfig): string | 
 	)
 }
 
-export function validateCompletionTaskProgressRequired(config: TaskConfig, taskProgress: string | undefined): string | null {
-	if (!config.focusChainSettings?.enabled) {
-		return null
-	}
-
-	const checklist = config.taskState.currentFocusChainChecklist
-	if (!checklist?.trim()) {
-		return null
-	}
-
-	const { totalItems } = parseFocusChainListCounts(checklist)
-	if (totalItems === 0) {
-		return null
-	}
-
-	if (!taskProgress?.trim()) {
-		return (
-			"Completion rejected: task_progress is required when a focus chain checklist exists. " +
-			"Pass the full checklist with all items marked [x]."
-		)
-	}
-
-	return null
-}
-
 export function validateFocusChainComplete(config: TaskConfig): string | null {
 	if (!config.focusChainSettings?.enabled) {
 		return null
@@ -1282,14 +1159,15 @@ export function buildCompletionBreatherHint(config: TaskConfig): string {
 
 export function buildCompletionPreflightRecoveryHint(reason: CompletionPreflightReason): string {
 	switch (reason) {
-		case "empty_result":
-			return "Write a 1–2 paragraph summary of what was done and retry attempt_completion."
+		case "roadmap_gate":
 		case "result_too_brief":
-			return "Expand your result to a substantive 1–2 paragraph summary of changes and outcomes."
 		case "result_too_long":
-			return "Shorten the result to 1–2 paragraphs; move checklists to task_progress."
 		case "checklist_in_result":
-			return "Remove checklist lines from result — put the completed checklist in task_progress only."
+		case "task_progress_required":
+		case "task_progress_align":
+			return "This completion gate has been retired. Continue or finish the assigned task."
+		case "empty_result":
+			return "Provide a nonempty summary of the outcome and any limitations, then retry attempt_completion."
 		case "unfinished_markers":
 			return "Remove TODO/FIXME/placeholder text from the codebase, then summarize the finished work."
 		case "invalid_tone":
@@ -1300,16 +1178,10 @@ export function buildCompletionPreflightRecoveryHint(reason: CompletionPreflight
 			return "Use the cooldown window to fix violations and run verification commands."
 		case "focus_chain_incomplete":
 			return "Mark all focus chain items [x] via update_todo_list before completing."
-		case "task_progress_required":
-			return "Pass task_progress with the full focus chain checklist, all items [x]."
 		case "task_progress_incomplete":
 			return "Pass task_progress with every checklist item marked [x]."
-		case "task_progress_align":
-			return "Include every focus chain item in task_progress with matching labels, all [x]."
 		case "circuit_breaker":
 			return "Fix the reported cause or run relevant validation, then retry completion in this task."
-		case "roadmap_gate":
-			return "Roadmap findings are advisory. Continue or finish the assigned task."
 		case "audit_gate":
 			return "Address critical audit violations in the workspace, run verification, then retry with an updated result."
 		case "double_check":
@@ -1457,19 +1329,20 @@ function getCompletionGateCircuitBreakerMessage(config: TaskConfig): string | nu
 }
 
 export function getCompletionGateCircuitBreakerError(config: TaskConfig): string | null {
-	retireRoadmapCompletionState(config)
+	retireObsoleteCompletionState(config)
 	return getCompletionGateCircuitBreakerMessage(config)
 }
 
-/** Remove obsolete roadmap retry pressure without discarding independent audit failures. */
-export function retireRoadmapCompletionState(config: TaskConfig): void {
+/** Remove retired workflow/formatting retry pressure without discarding independent failures. */
+export function retireObsoleteCompletionState(config: TaskConfig): void {
 	const state = config.taskState
 	const history = state.completionGateBlockHistory ?? []
-	if (state.lastCompletionBlockReason !== "roadmap_gate" && !history.some((entry) => entry.reason === "roadmap_gate")) return
+	const lastReasonRetired = RETIRED_COMPLETION_REASONS.has(state.lastCompletionBlockReason ?? "")
+	if (!lastReasonRetired && !history.some((entry) => RETIRED_COMPLETION_REASONS.has(entry.reason))) return
 	let retiredChain = false
 	let removed = 0
 	const retained = history.filter((entry) => {
-		if (entry.reason === "roadmap_gate") retiredChain = true
+		if (RETIRED_COMPLETION_REASONS.has(entry.reason)) retiredChain = true
 		else if (!["duplicate_submission", "retry_cooldown", "circuit_breaker"].includes(entry.reason)) retiredChain = false
 		if (!retiredChain) return true
 		if (!entry.soft && entry.reason !== "circuit_breaker") removed++
@@ -1482,7 +1355,7 @@ export function retireRoadmapCompletionState(config: TaskConfig): void {
 	state.completionGateObservabilityEnvelope = undefined
 	state.completionGatePressureLevel = undefined
 	state.lastProactiveGuidanceBlockCount = undefined
-	if (retiredChain || state.lastCompletionBlockReason === "roadmap_gate") {
+	if (retiredChain || lastReasonRetired) {
 		clearCompletionGateObservabilityState(config)
 		clearBlockedCompletionResultFingerprint(config)
 		state.lastCompletionAttemptAt = undefined
@@ -1528,8 +1401,8 @@ export function recordCompletionGateBlockEvent(
 	reason: CompletionPreflightReason,
 	options?: { result?: string; checkpointHash?: string },
 ): number {
-	// Older callers must not recreate retired roadmap retry pressure.
-	if (reason === "roadmap_gate") return config.taskState.completionGateBlockCount ?? 0
+	// Older callers must not recreate retired workflow/formatting retry pressure.
+	if (RETIRED_COMPLETION_REASONS.has(reason)) return config.taskState.completionGateBlockCount ?? 0
 	if (reason === "circuit_breaker") {
 		config.taskState.consecutiveMistakeCount++
 		getOrCreateCompletionGateSessionId(config)

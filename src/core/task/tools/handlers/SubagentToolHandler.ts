@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import {
@@ -6,7 +7,6 @@ import {
 	DietCodeSubagentUsageInfo,
 	SubagentStatusItem,
 } from "@shared/ExtensionMessage"
-import pTimeout from "p-timeout"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
@@ -27,6 +27,7 @@ interface ConfigWithExtensions extends TaskConfig {
 }
 
 const PROMPT_KEYS = ["prompt_1", "prompt_2", "prompt_3", "prompt_4", "prompt_5"] as const
+const PROGRESS_UPDATE_INTERVAL_MS = 100
 
 function resolveConfiguredSubagentName(toolName: string): string | undefined {
 	return AgentConfigLoader.getInstance().resolveSubagentNameForTool(toolName)
@@ -77,7 +78,10 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		if (prompts.length === 0) {
 			return
 		}
-		const partialMessage = JSON.stringify({ prompts } satisfies DietCodeAskUseSubagents)
+		const partialMessage = JSON.stringify({
+			batchId: block.call_id || block.tool_use_id,
+			prompts,
+		} satisfies DietCodeAskUseSubagents)
 		const autoApproveResult = uiHelpers.shouldAutoApproveTool(this.name)
 		const [shouldAutoApprove] = Array.isArray(autoApproveResult) ? autoApproveResult : [autoApproveResult, false]
 
@@ -137,6 +141,10 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		const autoApproveResult = config.autoApprover?.shouldAutoApproveTool(this.name)
 		const [autoApproveSafe] = Array.isArray(autoApproveResult) ? autoApproveResult : [autoApproveResult, false]
 		const didAutoApprove = !!autoApproveSafe
+		// Native calls carry their identity across partial, approval, and status rows.
+		// Manual XML approvals gain an identity when their existing partial ask is finalized.
+		// Auto-approved XML previews remain unkeyed for legacy prompt matching.
+		const batchId = block.call_id || block.tool_use_id || (didAutoApprove ? undefined : randomUUID())
 
 		if (didAutoApprove) {
 			reportToolUsage(
@@ -150,10 +158,20 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				block.isNativeToolCall,
 			)
 		} else {
+			const approvalMessage = JSON.stringify({ ...approvalPayload, batchId })
 			const didApprove = await ToolResultUtils.askApprovalAndPushFeedback(
 				"use_subagents",
 				approvalBody,
-				config,
+				{
+					...config,
+					callbacks: {
+						...config.callbacks,
+						// Correlation is display metadata. Keep the semantic approval body stable
+						// so a new call/batch ID cannot reopen an identical denied assignment.
+						ask: (type, text, partial) =>
+							config.callbacks.ask(type, type === "use_subagents" ? approvalMessage : text, partial),
+					},
+				},
 				prompts.length === 1
 					? `DietCode wants to use ${configuredSubagentName ? `the '${configuredSubagentName}' subagent` : "a subagent"}`
 					: `DietCode wants to use ${prompts.length} subagents`,
@@ -203,10 +221,30 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		}))
 
 		let statusMessageTs: number | undefined
+		let webviewDelivery: Promise<void> | undefined
+		let webviewDeliveryPending = false
+		const queueWebviewDelivery = () => {
+			webviewDeliveryPending = true
+			webviewDelivery ??= Promise.resolve().then(async () => {
+				try {
+					while (webviewDeliveryPending) {
+						webviewDeliveryPending = false
+						try {
+							await config.callbacks.postStateToWebview()
+						} catch (error) {
+							Logger.warn("[SubagentToolHandler] Could not deliver helper progress", error)
+						}
+					}
+				} finally {
+					webviewDelivery = undefined
+				}
+			})
+		}
 		const emitStatus = async (status: DietCodeSaySubagentStatus["status"], partial: boolean) => {
-			const completed = entries.filter((entry) => entry.status === "completed" || entry.status === "failed").length
 			const successes = entries.filter((entry) => entry.status === "completed").length
 			const failures = entries.filter((entry) => entry.status === "failed").length
+			const cancelled = entries.filter((entry) => entry.status === "cancelled").length
+			const completed = successes + failures + cancelled
 			const toolCalls = entries.reduce((acc, entry) => acc + (entry.toolCalls || 0), 0)
 			const inputTokens = entries.reduce((acc, entry) => acc + (entry.inputTokens || 0), 0)
 			const outputTokens = entries.reduce((acc, entry) => acc + (entry.outputTokens || 0), 0)
@@ -215,11 +253,13 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			const maxContextUsagePercentage = entries.reduce((acc, entry) => Math.max(acc, entry.contextUsagePercentage || 0), 0)
 
 			const payload: DietCodeSaySubagentStatus = {
+				batchId,
 				status,
 				total: entries.length,
 				completed,
 				successes,
 				failures,
+				cancelled,
 				toolCalls,
 				inputTokens,
 				outputTokens,
@@ -248,7 +288,10 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 					if (index < 0) return
 					await messages.updateDietCodeMessage(index, { text, partial })
 				}
-				await config.callbacks.postStateToWebview()
+				// Persist the row independently: an unresponsive webview must not hold
+				// newer progress or the terminal state behind an older delivery. Keep
+				// at most one delivery in flight and coalesce its pending successor.
+				queueWebviewDelivery()
 			} else {
 				await config.callbacks.say("subagent", text, undefined, undefined, partial)
 			}
@@ -256,14 +299,29 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 
 		let pendingStatus: { status: DietCodeSaySubagentStatus["status"]; partial: boolean } | undefined
 		let statusUpdateQueue: Promise<void> | undefined
+		let lastStatusWriteAt = Number.NEGATIVE_INFINITY
+		let resumeStatusDelay: (() => void) | undefined
 		const queueStatusUpdate = (status: DietCodeSaySubagentStatus["status"], partial: boolean): Promise<void> => {
-			// Coalesce progress while the UI is busy; retain the final state without queuing every token update.
+			// Bound progress I/O even when the UI is fast. Terminal updates bypass the delay.
 			pendingStatus = { status, partial }
+			if (!partial) resumeStatusDelay?.()
 			statusUpdateQueue ??= (async () => {
 				try {
 					while (pendingStatus) {
+						const waitMs = PROGRESS_UPDATE_INTERVAL_MS - (Date.now() - lastStatusWriteAt)
+						if (pendingStatus.partial && waitMs > 0) {
+							await new Promise<void>((resolve) => {
+								const timer = setTimeout(resolve, waitMs)
+								resumeStatusDelay = () => {
+									clearTimeout(timer)
+									resolve()
+								}
+							})
+							resumeStatusDelay = undefined
+						}
 						const update = pendingStatus
 						pendingStatus = undefined
+						lastStatusWriteAt = Date.now()
 						try {
 							await emitStatus(update.status, update.partial)
 						} catch (error) {
@@ -355,7 +413,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			const id = childStreamIds[index]
 			if (!id || closedStreams.has(id)) return
 			const current = entries[index]
-			if (current.status !== "completed" && current.status !== "failed") return
+			if (current.status !== "completed" && current.status !== "failed" && current.status !== "cancelled") return
 			closedStreams.add(id)
 			void observeHelperOperation("Stream finalization", async () => {
 				if (current.status === "completed") await orchestrator.completeStream(id, excerpt(current.result, 200))
@@ -398,6 +456,9 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 
 		const runSubagent = async (index: number) => {
 			const current = entries[index]
+			current.status = "running"
+			current.activity = { phase: "preparing" }
+			void queueStatusUpdate("running", true)
 			if (parentStreamId) {
 				await observeHelperOperation("Stream registration", async () => {
 					const child = await orchestrator.spawnChildStream(parentStreamId!, `subagent: ${prompts[index].slice(0, 80)}`)
@@ -415,15 +476,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 					if (finalized) return
 					if (update.stats) recordUsage(index, update.stats)
 
-					if (update.status === "running") {
-						current.status = "running"
-					}
-					if (update.status === "completed") {
-						current.status = "completed"
-					}
-					if (update.status === "failed") {
-						current.status = "failed"
-					}
+					if (update.status) current.status = update.status
 					if (update.result !== undefined) {
 						current.result = update.result
 					}
@@ -463,23 +516,49 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			if (!finalized) {
 				recordUsage(index, result.stats)
 				results[index] = { status: "fulfilled", value: result }
+				current.status = result.status
+				current.result = result.result ?? current.result
+				current.error = result.error
+				current.filesModified = result.filesModified ?? current.filesModified
+				current.filesViewed = result.filesViewed ?? current.filesViewed
+				current.durationMs = result.durationMs ?? current.durationMs
+				const stats = latestStats[index] ?? result.stats
+				current.toolCalls = stats.toolCalls || 0
+				current.inputTokens = stats.inputTokens || 0
+				current.outputTokens = stats.outputTokens || 0
+				current.totalCost = stats.totalCost || 0
+				current.contextTokens = stats.contextTokens || 0
+				current.contextWindow = stats.contextWindow || 0
+				current.contextUsagePercentage = stats.contextUsagePercentage || 0
+				current.activity = undefined
+				// Release this finished helper's reservations without waiting for slower siblings.
+				closeChildStream(index)
+				void queueStatusUpdate("running", true)
 			}
 			// The execution receipt still receives a late outcome after the batch stops waiting.
 			return result
 		}
 		const failSubagent = (index: number, error: unknown) => {
 			if (finalized || (stopReason && entries[index].status === "completed")) return
-			Logger.error(`[SubagentToolHandler] Subagent ${index} crashed:`, error)
+			if (!stopReason) Logger.error(`[SubagentToolHandler] Subagent ${index} crashed:`, error)
 			const current = entries[index]
-			current.status = "failed"
+			current.status = stopReason ? "cancelled" : "failed"
+			current.activity = undefined
 			current.error =
 				stopReason ||
 				(error instanceof Error ? error.message : typeof error === "string" ? error : "Internal Runner Crash")
 			results[index] = { status: "rejected", reason: error }
+			if (!stopReason) closeChildStream(index)
 			void queueStatusUpdate("running", true)
 		}
 
 		const SUBAGENT_EXECUTION_TIMEOUT_MS = 20 * 60 * 1000
+		// Own the deadline before per-assignment queue timers are registered, so a
+		// stopped batch consistently cancels queued work instead of reporting crashes.
+		const batchDeadline = setTimeout(
+			() => stopBatch("Subagent swarm execution timed out after 20 minutes."),
+			SUBAGENT_EXECUTION_TIMEOUT_MS,
+		)
 		// Reserve every assignment before dispatch. Batches share three slots per task/depth;
 		// child helpers have a separate depth lane so parents waiting for them cannot deadlock it.
 		const workers = prompts.map((prompt, index) =>
@@ -499,15 +578,13 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		)
 
 		try {
-			await pTimeout(Promise.race([Promise.all(workers), stopped]), {
-				milliseconds: SUBAGENT_EXECUTION_TIMEOUT_MS,
-				message: "Subagent swarm execution timed out after 20 minutes.",
-			})
+			await Promise.race([Promise.all(workers), stopped])
 		} catch (err: unknown) {
 			Logger.error("[SubagentToolHandler] Swarm execution error or timeout:", err)
 			// Abort all runners on timeout to prevent zombie processes
 			stopBatch(err instanceof Error ? err.message : "Helper batch stopped.")
 		} finally {
+			clearTimeout(batchDeadline)
 			finalized = true
 			config.taskState.abortSignal.removeEventListener("abort", onParentAbort)
 		}
@@ -523,32 +600,16 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			if (!result) {
 				// A sibling may have triggered the budget stop just after this helper
 				// published its completed handoff but before its promise settled.
-				if (entries[index].status === "completed") return
-				entries[index].status = "failed"
+				if (entries[index].status === "completed" || entries[index].status === "failed") return
+				entries[index].status = "cancelled"
 				entries[index].error = stopReason || "Helper cancelled before finishing."
 				return
 			}
 
 			if (result.status === "rejected") {
-				entries[index].status = "failed"
 				entries[index].error = entries[index].error || "Subagent execution failed"
 				return
 			}
-
-			entries[index].status = result.value.status
-			entries[index].result = result.value.result ?? entries[index].result
-			entries[index].error = result.value.error
-			entries[index].filesModified = result.value.filesModified ?? entries[index].filesModified
-			entries[index].filesViewed = result.value.filesViewed ?? entries[index].filesViewed
-			entries[index].durationMs = result.value.durationMs
-			const stats = latestStats[index] ?? result.value.stats
-			entries[index].toolCalls = stats.toolCalls || 0
-			entries[index].inputTokens = stats.inputTokens || 0
-			entries[index].outputTokens = stats.outputTokens || 0
-			entries[index].totalCost = stats.totalCost || 0
-			entries[index].contextTokens = result.value.stats.contextTokens || 0
-			entries[index].contextWindow = result.value.stats.contextWindow || 0
-			entries[index].contextUsagePercentage = result.value.stats.contextUsagePercentage || 0
 		})
 		entries.forEach((_entry, index) => closeChildStream(index))
 		if (entries.some((entry) => entry.status === "completed" || (entry.filesModified?.length ?? 0) > 0)) {
@@ -575,7 +636,8 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		}
 
 		const failures = entries.filter((entry) => entry.status === "failed").length
-		const finalStatus = queueStatusUpdate(failures > 0 ? "failed" : "completed", false)
+		const cancelled = entries.filter((entry) => entry.status === "cancelled").length
+		const finalStatus = queueStatusUpdate(cancelled > 0 ? "cancelled" : failures > 0 ? "failed" : "completed", false)
 
 		const subagentUsagePayload: DietCodeSubagentUsageInfo = {
 			source: "subagents",
@@ -592,13 +654,13 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			]),
 		)
 
-		const successCount = entries.length - failures
+		const successCount = entries.filter((entry) => entry.status === "completed").length
 
 		const blackboard = config.taskState.swarmBlackboard || []
 		const summary = [
 			"### SWARM EXECUTION SUMMARY",
-			`Total Agents: ${entries.length} (Success: ${successCount}, Fail: ${failures})`,
-			...(failures > 0
+			`Total Agents: ${entries.length} (Success: ${successCount}, Fail: ${failures}${cancelled ? `, Cancelled: ${cancelled}` : ""})`,
+			...(failures > 0 || cancelled > 0
 				? [
 						"Use completed results and partial work below. Continue independent authorized work; resolve a reported blocker before retrying the same assignment.",
 					]
@@ -623,7 +685,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				const detail =
 					entry.status === "completed"
 						? `**Result:**\n${excerpt(entry.result, resultLimit)}`
-						: `**Error:**\n${entry.error || "Unknown error"}${entry.result ? `\n**Partial result:**\n${excerpt(entry.result, resultLimit)}` : ""}`
+						: `**${entry.status === "cancelled" ? "Cancellation" : "Error"}:**\n${entry.error || (entry.status === "cancelled" ? "Helper cancelled." : "Unknown error")}${entry.result ? `\n**Partial result:**\n${excerpt(entry.result, resultLimit)}` : ""}`
 				const signals =
 					entry.criticalSignals && entry.criticalSignals.length > 0
 						? `\n**Signals:** ${entry.criticalSignals.join(", ")}`

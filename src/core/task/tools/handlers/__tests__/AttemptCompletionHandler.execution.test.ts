@@ -18,11 +18,11 @@ import { ExecuteCommandToolHandler } from "../ExecuteCommandToolHandler"
 
 describe("completion command execution", () => {
 	afterEach(() => sinon.restore())
-	function fixture(allowed = true, trusted = true) {
+	function fixture(allowed = true, trusted = true, mockPreflight = true) {
 		sinon.stub(hooks, "getHooksEnabledSafe").returns(false)
 		sinon.stub(completion, "shouldEmitProactiveCompletionGuidance").returns(false)
 		sinon.stub(completion, "shouldEmitPreflightReadinessHint").returns(false)
-		sinon.stub(pipeline, "runCompletionPreflightChecks").resolves(null)
+		if (mockPreflight) sinon.stub(pipeline, "runCompletionPreflightChecks").resolves(null)
 		sinon.stub(pipeline, "evaluateCompletionAuditGate").resolves({ status: "skipped" } as never)
 		sinon.stub(ToolHookUtils, "runPreToolUseIfEnabled").resolves()
 		sinon.stub(executor, "execute").callsFake(async (_id, action) => action(new AbortController().signal))
@@ -86,6 +86,23 @@ describe("completion command execution", () => {
 		const completionMessage = callbacks.say.getCalls().find((call) => call.args[0] === "completion_result")!
 		assert.ok(callbacks.executeCommandTool.firstCall.calledBefore(completionMessage))
 	})
+	for (const result of ["Fixed.", "Verified the requested fix.\n- [x] Regression test passed"]) {
+		it(`publishes ${result.includes("[x]") ? "a completed checklist" : "a concise result"} through real preflight without duplicating a completed focus chain`, async () => {
+			const { handler, config, callbacks, block } = fixture(true, true, false)
+			config.taskState.currentFocusChainChecklist = "- [x] Implement change\n- [x] Verify regression"
+			block.params = { result, command: "" }
+			assert.match(String(await handler.execute(config, block)), /Result: Done/)
+			const completionMessages = callbacks.say.getCalls().filter((call) => call.args[0] === "completion_result")
+			assert.equal(completionMessages.length, 1)
+			assert.equal(completionMessages[0].args[1], result)
+			assert.equal(config.taskState.completionGateBlockCount ?? 0, 0)
+			sinon.assert.notCalled(callbacks.executeCommandTool)
+			assert.deepEqual(
+				callbacks.ask.getCalls().map((call) => call.args[0]),
+				["completion_result"],
+			)
+		})
+	}
 	for (const trusted of [true, false]) {
 		it(
 			trusted ? "honors command policy before completion" : "does not publish completion after command approval is denied",

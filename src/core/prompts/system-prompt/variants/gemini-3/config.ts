@@ -87,13 +87,8 @@ export const config = createVariant(ModelFamily.GEMINI_3)
 		SystemPromptSection.EDITING_FILES,
 		gemini3ComponentOverrides[SystemPromptSection.EDITING_FILES] as ConfigOverride,
 	)
-	.overrideComponent(SystemPromptSection.OBJECTIVE, gemini3ComponentOverrides[SystemPromptSection.OBJECTIVE] as ConfigOverride)
 	.overrideComponent(SystemPromptSection.RULES, gemini3ComponentOverrides[SystemPromptSection.RULES] as ConfigOverride)
 	.overrideComponent(SystemPromptSection.FEEDBACK, gemini3ComponentOverrides[SystemPromptSection.FEEDBACK] as ConfigOverride)
-	.overrideComponent(
-		SystemPromptSection.ACT_VS_PLAN,
-		gemini3ComponentOverrides[SystemPromptSection.ACT_VS_PLAN] as ConfigOverride,
-	)
 	.overrideComponent(
 		SystemPromptSection.TASK_PROGRESS,
 		gemini3ComponentOverrides[SystemPromptSection.TASK_PROGRESS] as ConfigOverride,

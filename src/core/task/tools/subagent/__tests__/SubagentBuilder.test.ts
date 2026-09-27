@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert"
 import * as api from "@core/api"
 import { PromptRegistry } from "@core/prompts/system-prompt"
+import { HEAV3NS_MANDATE } from "@core/prompts/system-prompt/components/heav3ns_mandate"
 import { DietCodeToolSet } from "@core/prompts/system-prompt/registry/DietCodeToolSet"
 import type { TaskConfig } from "@core/task/tools/types/TaskConfig"
 import { afterEach, describe, it } from "mocha"
@@ -82,6 +83,8 @@ describe("SubagentBuilder", () => {
 		assert.match(prompt, /Identity: cached-agent/)
 		assert.match(prompt, /Objective: cached description/)
 		assert.match(prompt, /cached system prompt/)
+		assert.ok(prompt.includes(HEAV3NS_MANDATE), "custom agent profiles must retain shared execution guidance")
+		assert.ok(!prompt.includes("generated system prompt"), "custom profile still replaces the generated role")
 		assert.match(prompt, new RegExp(SUBAGENT_SYSTEM_SUFFIX.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
 	})
 
@@ -94,8 +97,9 @@ describe("SubagentBuilder", () => {
 		const builder = new SubagentBuilder(createTaskConfig("act", "anthropic"))
 
 		assert.deepEqual(builder.getAllowedTools(), SUBAGENT_DEFAULT_ALLOWED_TOOLS)
-		const prompt = builder.buildSystemPrompt("generated prompt")
+		const prompt = builder.buildSystemPrompt(`generated prompt\n\n${HEAV3NS_MANDATE}`)
 		assert.match(prompt, /^generated prompt/)
+		assert.equal(prompt.split(HEAV3NS_MANDATE).length - 1, 1, "generated roles must not duplicate the mandate")
 		assert.match(prompt, /SWARM NESTING CONTEXT/)
 		assert.match(prompt, /SUBSTRATE HEALTH SIGNAL/)
 		assert.match(

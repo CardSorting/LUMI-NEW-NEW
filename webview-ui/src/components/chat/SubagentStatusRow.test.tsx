@@ -1,5 +1,6 @@
 import type { DietCodeMessage } from "@shared/ExtensionMessage"
 import { fireEvent, render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 import SubagentStatusRow from "./SubagentStatusRow"
 
@@ -10,7 +11,7 @@ function message(status: string): DietCodeMessage {
 	return {
 		ts: 1,
 		type: "say",
-		say: "subagent_status",
+		say: "subagent",
 		text: JSON.stringify({
 			status,
 			items: [
@@ -29,11 +30,11 @@ function message(status: string): DietCodeMessage {
 }
 
 describe("SubagentStatusRow", () => {
-	it("keeps helpers running when unrelated progress arrives", () => {
+	it.each(["info", "api_req_started"] as const)("keeps helpers running when %s arrives", (say) => {
 		render(
 			<SubagentStatusRow
 				isLast={false}
-				lastModifiedMessage={{ ts: 2, type: "say", say: "info", text: "Parent progress" }}
+				lastModifiedMessage={{ ts: 2, type: "say", say, text: "Parent progress" }}
 				message={message("running")}
 			/>,
 		)
@@ -51,23 +52,30 @@ describe("SubagentStatusRow", () => {
 		)
 		expect(screen.getByText("cancelled")).toBeInTheDocument()
 	})
-	it("shows a named status and keyboard-accessible result disclosure", () => {
+	it("lazily displays results with a named, keyboard-accessible disclosure", async () => {
+		const user = userEvent.setup()
 		render(<SubagentStatusRow isLast message={message("completed")} />)
 		expect(screen.getByText("Schema review")).toBeInTheDocument()
 		expect(screen.getByText("completed")).toBeInTheDocument()
-		const disclosure = screen.getByRole("button", { name: "Show subagent output" })
+		const disclosure = screen.getByRole("button", { name: "Show output for Schema review" })
 		expect(disclosure).toHaveAttribute("aria-expanded", "false")
-		fireEvent.click(disclosure)
+		expect(screen.queryByText("No regressions found")).not.toBeInTheDocument()
+		await user.tab()
+		expect(disclosure).toHaveFocus()
+		await user.keyboard("{Enter}")
 		expect(disclosure).toHaveAttribute("aria-expanded", "true")
 		expect(document.getElementById(disclosure.getAttribute("aria-controls")!)).toBeVisible()
 		expect(screen.getByText("No regressions found")).toBeVisible()
+		await user.keyboard(" ")
+		expect(disclosure).toHaveAttribute("aria-expanded", "false")
+		expect(screen.queryByText("No regressions found")).not.toBeInTheDocument()
 	})
 
 	it("keeps failure details available for the parent handoff", () => {
 		render(<SubagentStatusRow isLast message={message("failed")} />)
 		expect(screen.getByText("failed")).toBeInTheDocument()
 		expect(screen.getByText("The required tool is unavailable")).toBeVisible()
-		fireEvent.click(screen.getByRole("button", { name: "Show subagent output" }))
+		fireEvent.click(screen.getByRole("button", { name: "Show output for Schema review" }))
 		expect(screen.getByText("Partial work")).toBeVisible()
 		expect(screen.getByText("No regressions found")).toBeVisible()
 	})
@@ -92,7 +100,7 @@ describe("SubagentStatusRow", () => {
 		data.text = JSON.stringify(payload)
 		render(<SubagentStatusRow isLast message={data} />)
 		expect(screen.getByText("Schema review")).toBeVisible()
-		fireEvent.click(screen.getByRole("button", { name: "Show subagent output" }))
+		fireEvent.click(screen.getByRole("button", { name: "Show output for Schema review" }))
 		expect(screen.getByText("No regressions found")).toBeVisible()
 	})
 
@@ -108,7 +116,40 @@ describe("SubagentStatusRow", () => {
 				}}
 			/>,
 		)
-		expect(screen.getByText('"Read the config"')).toBeVisible()
+		expect(screen.getByText("Read the config")).toBeVisible()
 		expect(screen.getByText("queued")).toBeVisible()
+	})
+
+	it("keeps open results attached to the same helper as stored items change order", () => {
+		const data = message("completed")
+		const payload = JSON.parse(data.text!)
+		const first = payload.items[0]
+		const second = { ...first, id: "other", name: "Routing review", result: "Routes checked" }
+		data.text = JSON.stringify({ ...payload, items: [first, second] })
+		const { rerender } = render(<SubagentStatusRow isLast message={data} />)
+		fireEvent.click(screen.getByRole("button", { name: "Show output for Schema review" }))
+		rerender(<SubagentStatusRow isLast message={{ ...data, text: JSON.stringify({ ...payload, items: [second, first] }) }} />)
+		expect(screen.getByRole("button", { name: "Hide output for Schema review" })).toHaveAttribute("aria-expanded", "true")
+		expect(screen.getByRole("button", { name: "Show output for Routing review" })).toHaveAttribute("aria-expanded", "false")
+		expect(screen.getByText("No regressions found")).toBeVisible()
+		expect(screen.queryByText("Routes checked")).not.toBeInTheDocument()
+	})
+
+	it("distinguishes cancelled work from failure and preserves completed sibling results", () => {
+		const data = message("completed")
+		const payload = JSON.parse(data.text!)
+		payload.status = "cancelled"
+		payload.items.push({ id: "stopped", prompt: "Check routes", status: "cancelled", error: "Stopped by user" })
+		render(<SubagentStatusRow isLast message={{ ...data, text: JSON.stringify(payload) }} />)
+		expect(screen.getByRole("status")).toHaveTextContent("1 of 2 completed · 1 cancelled")
+		expect(screen.queryByText("failed")).not.toBeInTheDocument()
+		expect(screen.getByText("Stopped by user")).toBeVisible()
+		fireEvent.click(screen.getByRole("button", { name: "Show output for Schema review" }))
+		expect(screen.getByText("No regressions found")).toBeVisible()
+	})
+
+	it("shows an understandable fallback for an unreadable status payload", () => {
+		render(<SubagentStatusRow isLast message={{ ...message("running"), text: "null" }} />)
+		expect(screen.getByText(/Helper status is unavailable/)).toBeVisible()
 	})
 })

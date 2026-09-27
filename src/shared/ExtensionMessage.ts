@@ -331,7 +331,7 @@ export interface DietCodeSayGenerateExplanation {
 	error?: string
 }
 
-export type SubagentExecutionStatus = "pending" | "running" | "completed" | "failed"
+export type SubagentExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled"
 
 export interface SubagentActivity {
 	phase: "preparing" | "waiting" | "responding" | "tool" | "retrying" | "recovering"
@@ -365,11 +365,14 @@ export interface SubagentStatusItem {
 }
 
 export interface DietCodeSaySubagentStatus {
-	status: "running" | "completed" | "failed"
+	/** Correlates a batch with its request without relying on prompt text. */
+	batchId?: string
+	status: "running" | "completed" | "failed" | "cancelled"
 	total: number
 	completed: number
 	successes: number
 	failures: number
+	cancelled?: number
 	toolCalls: number
 	inputTokens: number
 	outputTokens: number
@@ -396,6 +399,7 @@ export interface DietCodeAskUseMcpServer {
 }
 
 export interface DietCodeAskUseSubagents {
+	batchId?: string
 	prompts: string[]
 }
 

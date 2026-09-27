@@ -24,6 +24,7 @@ const items = [
 		status: "completed",
 		result: "Reviewed the routing changes. The focused checks passed.",
 		toolCalls: 4,
+		durationMs: 18200,
 		totalCost: 0.024,
 		contextTokens: 2400,
 	}),
@@ -69,6 +70,22 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 export const MixedProgress: Story = {}
+export const CancelledBatch: Story = {
+	args: {
+		message: message([
+			items[0],
+			helper(2, {
+				name: "Verify navigation",
+				status: "cancelled",
+				error: "Stopped by user.",
+				result: "Identified the affected route. Verification remains unfinished.",
+				toolCalls: 2,
+				durationMs: 9400,
+			}),
+			helper(3, { name: "Check keyboard access", status: "cancelled", error: "Cancelled before starting." }),
+		]),
+	},
+}
 export const LongAssignment: Story = {
 	args: {
 		message: message([

@@ -400,7 +400,7 @@
     "type": "function",
     "function": {
       "name": "roadmap",
-      "description": "Per-project ROADMAP.md steering — living checkpoint for center of gravity, Now/Next/Later, code soup audit, and completion gates. Responses include project_identity_line, _roadmap_operator_hints, agent_playbook, and recommended_next_action.",
+      "description": "Optional project ROADMAP.md context and maintenance: direction, Now/Next/Later, evidence, and document diagnostics. No roadmap action or finding gates task execution or completion. Choose a relevant action, not a ritual sequence; reuse evidence and finish the assigned task. Routine in-scope updates need no additional user approval.",
       "strict": false,
       "parameters": {
         "type": "object",
@@ -433,7 +433,7 @@
     "type": "function",
     "function": {
       "name": "roadmap_checkpoint",
-      "description": "Alias for roadmap(action='checkpoint') — full evidence bundle and checkpoint algorithm before editing ROADMAP.md.",
+      "description": "Alias for roadmap(action='checkpoint') — optional evidence for roadmap work. Not a prerequisite to editing or completing the assigned task.",
       "strict": false,
       "parameters": {
         "type": "object",
@@ -460,7 +460,7 @@
     "type": "function",
     "function": {
       "name": "use_subagents",
-      "description": "Run up to five focused in-process subagents in parallel. Each subagent gets its own prompt and returns a comprehensive research result with tool and token stats. Use this for broad exploration when reading many files would consume the main agent's context window. You do not need to launch multiple subagents every time; using one subagent is valid when it avoids unnecessary context usage for light discovery work.",
+      "description": "Run up to five focused in-process subagents in parallel for independent investigation, implementation, debugging, or verification. Each helper can use its exposed tools to read and edit files, execute commands, and check results within the assigned scope and configured permissions. Give each helper a concrete deliverable and useful context. Use one or more helpers when delegation materially accelerates the task; reconcile their evidence and continue execution without peer-approval ceremonies.",
       "strict": false,
       "parameters": {
         "type": "object",
