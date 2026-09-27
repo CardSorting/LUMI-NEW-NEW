@@ -1,28 +1,32 @@
+import { createHash } from "node:crypto"
+import { writeAtomic } from "@utils/fs"
 import * as fs from "fs/promises"
 import * as os from "os"
 import * as path from "path"
 import { formatWatchSteeringLine } from "./RoadmapAgentSteering"
 import { getRoadmapConfig } from "./RoadmapConfig"
+import { withRoadmapLock } from "./RoadmapDocument"
 import { recommendNextAction } from "./RoadmapOperator"
 
 const MAX_LOG_BYTES = 1024 * 1024
 const MAX_LOG_LINES = 2000
 
-function sessionDir(): string {
+function sessionDir(workspace?: string): string {
 	const raw = process.env.DIETCODE_SESSION_DIR?.trim()
-	return raw ? path.resolve(raw) : path.join(os.homedir(), ".dietcode", "session")
+	const root = raw ? path.resolve(raw) : path.join(os.homedir(), ".dietcode", "session")
+	return workspace ? path.join(root, "workspaces", createHash("sha256").update(path.resolve(workspace)).digest("hex")) : root
 }
 
-export function progressJsonlPath(): string {
-	return path.join(sessionDir(), "roadmap-progress.jsonl")
+export function progressJsonlPath(workspace?: string): string {
+	return path.join(sessionDir(workspace), "roadmap-progress.jsonl")
 }
 
-export function progressCurrentPath(): string {
-	return path.join(sessionDir(), "roadmap-progress-current.json")
+export function progressCurrentPath(workspace?: string): string {
+	return path.join(sessionDir(workspace), "roadmap-progress-current.json")
 }
 
-export function lastErrorPath(): string {
-	return path.join(sessionDir(), "roadmap-last-error.json")
+export function lastErrorPath(workspace?: string): string {
+	return path.join(sessionDir(workspace), "roadmap-last-error.json")
 }
 
 async function trimJsonl(filePath: string): Promise<void> {
@@ -30,9 +34,13 @@ async function trimJsonl(filePath: string): Promise<void> {
 		const stat = await fs.stat(filePath)
 		if (stat.size <= MAX_LOG_BYTES) return
 		const text = await fs.readFile(filePath, "utf8")
-		const lines = text.split(/\r?\n/).filter(Boolean)
-		if (lines.length <= MAX_LOG_LINES) return
-		await fs.writeFile(filePath, `${lines.slice(-MAX_LOG_LINES).join("\n")}\n`, "utf8")
+		const lines = text.split(/\r?\n/).filter(Boolean).slice(-MAX_LOG_LINES)
+		let bytes = 0
+		let start = lines.length
+		while (start > 0 && bytes + Buffer.byteLength(lines[start - 1]) + 1 <= MAX_LOG_BYTES) {
+			bytes += Buffer.byteLength(lines[--start]) + 1
+		}
+		await writeAtomic(filePath, `${lines.slice(start).join("\n")}\n`)
 	} catch {
 		// non-fatal
 	}
@@ -63,62 +71,82 @@ export async function emitProgress(
 	}
 
 	const line = JSON.stringify(event)
-	const jsonl = progressJsonlPath()
-	const current = progressCurrentPath()
-
-	await fs.mkdir(path.dirname(jsonl), { recursive: true })
-	await fs.appendFile(jsonl, `${line}\n`, "utf8")
-	await trimJsonl(jsonl)
-	await fs.writeFile(current, JSON.stringify(event, null, 2), "utf8")
-	return event
+	const jsonl = progressJsonlPath(params.workspace)
+	const current = progressCurrentPath(params.workspace)
+	try {
+		await withRoadmapLock(jsonl, async () => {
+			await fs.mkdir(path.dirname(jsonl), { recursive: true })
+			await fs.appendFile(jsonl, `${line}\n`, "utf8")
+			await trimJsonl(jsonl)
+			await writeAtomic(current, JSON.stringify(event, null, 2))
+		})
+		return event
+	} catch {
+		// Diagnostic persistence must not turn a successful edit into a retryable tool failure.
+		return { ...event, persisted: false }
+	}
 }
 
-export async function readCurrentProgress(): Promise<Record<string, unknown> | null> {
+export async function readCurrentProgress(workspace?: string): Promise<Record<string, unknown> | null> {
 	try {
-		const text = await fs.readFile(progressCurrentPath(), "utf8")
+		const text = await fs.readFile(progressCurrentPath(workspace), "utf8")
 		return JSON.parse(text)
 	} catch {
 		return null
 	}
 }
 
-export async function readProgressTail(limit = 20): Promise<Record<string, unknown>[]> {
+export async function readProgressTail(limit = 20, workspace?: string): Promise<Record<string, unknown>[]> {
+	const count = Number.isFinite(limit) ? Math.min(MAX_LOG_LINES, Math.max(0, Math.floor(limit))) : 20
+	if (!count) return []
 	try {
-		const text = await fs.readFile(progressJsonlPath(), "utf8")
+		const text = await fs.readFile(progressJsonlPath(workspace), "utf8")
 		const lines = text.split(/\r?\n/).filter(Boolean)
-		return lines.slice(-limit).map((line) => JSON.parse(line))
+		const events: Record<string, unknown>[] = []
+		for (const line of lines) {
+			try {
+				const event = JSON.parse(line)
+				if (event && typeof event === "object" && !Array.isArray(event)) events.push(event)
+			} catch {
+				/* Skip a torn record without discarding the usable history. */
+			}
+		}
+		return events.slice(-count)
 	} catch {
 		return []
 	}
 }
 
 export async function recordLastError(error: Record<string, unknown>): Promise<void> {
+	const workspace = typeof error.workspace === "string" ? error.workspace : undefined
 	try {
-		await fs.mkdir(sessionDir(), { recursive: true })
-		await fs.writeFile(lastErrorPath(), JSON.stringify({ ...error, recorded_at: new Date().toISOString() }, null, 2), "utf8")
+		await withRoadmapLock(lastErrorPath(workspace), async () => {
+			await fs.mkdir(sessionDir(workspace), { recursive: true })
+			await writeAtomic(
+				lastErrorPath(workspace),
+				JSON.stringify({ ...error, recorded_at: new Date().toISOString() }, null, 2),
+			)
+		})
 	} catch {
 		// non-fatal
 	}
 }
 
-export async function readLastError(): Promise<Record<string, unknown> | null> {
+export async function readLastError(workspace?: string): Promise<Record<string, unknown> | null> {
 	try {
-		const text = await fs.readFile(lastErrorPath(), "utf8")
-		return JSON.parse(text)
+		const text = await fs.readFile(lastErrorPath(workspace), "utf8")
+		const error = JSON.parse(text)
+		if (!error || typeof error !== "object" || Array.isArray(error)) return null
+		// A tombstone is intentional. Deleting the file would resurrect errors from the journal.
+		return error.cleared ? scanProgressTailForLastError(workspace, error.event_ids || []) : error
 	} catch {
-		return scanProgressTailForLastError()
+		return scanProgressTailForLastError(workspace)
 	}
 }
 
 const ERROR_RECOVERY: Record<string, Record<string, string>> = {
 	"validate.failed": {
 		operator_action: "roadmap(action='validate') — fix schema issues",
-		retry_command: "roadmap(action='validate')",
-		diagnostic_command: "/roadmap explain-gate",
-		suggested_slash_command: "/roadmap validate",
-	},
-	"roadmap.file_mutated": {
-		operator_action: "ROADMAP.md mutated — validate before closing checkpoint pass",
 		retry_command: "roadmap(action='validate')",
 		diagnostic_command: "/roadmap explain-gate",
 		suggested_slash_command: "/roadmap validate",
@@ -141,7 +169,8 @@ function enrichProgressError(event: Record<string, unknown>, code: string): Reco
 		payload,
 		ts_iso: event.ts_iso,
 		string_code: code,
-		safe_to_retry: true,
+		safe_to_retry: false,
+		retry_condition: "Resolve the reported cause or change the document before retrying.",
 		...recovery,
 		validation: payload.validation,
 		error: payload.error,
@@ -149,16 +178,27 @@ function enrichProgressError(event: Record<string, unknown>, code: string): Reco
 	}
 }
 
-export async function scanProgressTailForLastError(): Promise<Record<string, unknown> | null> {
-	const events = await readProgressTail(100)
+export async function scanProgressTailForLastError(
+	workspace?: string,
+	excludedEvents: string[] = [],
+): Promise<Record<string, unknown> | null> {
+	const events = await readProgressTail(100, workspace)
+	const excluded = new Set(excludedEvents)
+	const resolvedActions = new Set<string>()
 	for (let i = events.length - 1; i >= 0; i--) {
 		const event = events[i]
-		const validation = ((event.payload as Record<string, unknown>) || {}).validation as Record<string, unknown> | undefined
-		if (validation?.valid === false) {
-			return enrichProgressError(event, "validate.failed")
+		if (excluded.has(String(event.event_id))) continue
+		const payload = (event.payload || {}) as Record<string, unknown>
+		const validation = payload.validation as Record<string, unknown> | undefined
+		const action = String(event.action || "")
+		// Inspecting last_error/watch/doctor cannot resolve (or create) a failure by itself.
+		if (["last_error", "watch", "progress", "doctor"].includes(action)) continue
+		if (event.success === true && action === "validate") {
+			resolvedActions.add("validate")
 		}
-		if (event.phase === "roadmap.file_mutated") {
-			return enrichProgressError(event, "roadmap.file_mutated")
+		if (resolvedActions.has(action)) continue
+		if (event.success === false && (validation?.valid === false || (action === "validate" && payload.valid === false))) {
+			return enrichProgressError(event, "validate.failed")
 		}
 		if (event.success === false) {
 			const payload = (event.payload || {}) as Record<string, unknown>
@@ -194,22 +234,24 @@ export async function formatProgressReport(params: {
 	}
 
 	if (params.tail) {
-		return JSON.stringify(await readProgressTail(last), null, 2)
+		return JSON.stringify(await readProgressTail(last, params.workspace), null, 2)
 	}
 
-	const current = await readCurrentProgress()
+	const current = await readCurrentProgress(params.workspace)
 	const snap = params.snapshot || {}
 	if (!current) {
 		const nextRec = (snap.recommended_next_action || {}) as Record<string, unknown>
 		const brief = snap.steering_brief || snap.steering_identity || snap.project_identity_line
 		const lines = ["🗺️ Roadmap progress: idle (no roadmap tool activity this session)"]
 		if (brief) lines.push(`Project: ${brief}`)
-		if (nextRec.command) lines.push(`Next: ${nextRec.command}`)
+		if (nextRec.command) lines.push(`Optional action: ${nextRec.command}`)
 		const digest = (snap.project_steering_digest || {}) as Record<string, unknown>
 		const remaining = digest.bootstrap_remaining
 		if (remaining && Number(remaining) > 0) {
 			lines.push(`Bootstrap fill: ${remaining} phrase(s) — roadmap(action='apply_bootstrap_fill', context='write')`)
 		}
+		if (!nextRec.command) lines.push("No required roadmap action. Continue or finish the assigned task.")
+		lines.push("Optional diagnostics: /roadmap watch | progress --timeline | explain-gate")
 		return lines.join("\n")
 	}
 
@@ -225,7 +267,7 @@ export async function formatProgressReport(params: {
 	if (payload.valid === false) lines.push("Schema: invalid — /roadmap explain-gate")
 
 	const nextRec = (snap.recommended_next_action || {}) as Record<string, unknown>
-	if (nextRec.command) lines.push(`Next: ${nextRec.command}`)
+	if (nextRec.command) lines.push(`Optional action: ${nextRec.command}`)
 
 	const digest = (snap.project_steering_digest || {}) as Record<string, unknown>
 	if (digest.identity_line) lines.push(`Project: ${digest.identity_line}`)
@@ -233,11 +275,11 @@ export async function formatProgressReport(params: {
 	if (remaining && Number(remaining) > 0) {
 		lines.push(`Bootstrap fill: ${remaining} phrase(s) — roadmap(action='apply_bootstrap_fill', context='write')`)
 	}
-	if (snap.kanban_complete_allowed === false) lines.push("⚠️  attempt_completion blocked")
+	lines.push("Roadmap observations never block completion.")
 
 	if (params.timeline) {
 		lines.push("", "Timeline:")
-		for (const event of summarizeRecentEvents(await readProgressTail(Math.max(last, 10)), last)) {
+		for (const event of summarizeRecentEvents(await readProgressTail(Math.max(last, 10), params.workspace), last)) {
 			lines.push(`  • ${event.ts_iso} ${event.phase} action=${event.action} success=${event.success}`)
 		}
 	}
@@ -253,11 +295,11 @@ export async function buildProgressSnapshot(workspace: string): Promise<Record<s
 	const { RoadmapService } = await import("./RoadmapService")
 
 	const steering = await buildSteeringContext(workspace)
-	const current = await readCurrentProgress()
+	const current = await readCurrentProgress(workspace)
 	const status = await RoadmapService.getInstance().getOperationalStatus(workspace, "", "light")
 	const gate = (status.roadmap_gate || {}) as Record<string, unknown>
 	const wsState = (status.workspace_state || {}) as Record<string, unknown>
-	const lastErr = (await readLastError()) || null
+	const lastErr = (await readLastError(workspace)) || null
 	const bootstrapInc = isBootstrapIncomplete({
 		roadmap_exists: !!status.roadmap_exists,
 		bootstrap_complete: status.bootstrap_complete,
@@ -284,8 +326,8 @@ export async function buildProgressSnapshot(workspace: string): Promise<Record<s
 		bootstrap_complete: steering.bootstrap_complete ?? status.bootstrap_complete,
 		bootstrap_placeholder_count: steering.bootstrap_placeholder_count ?? status.bootstrap_placeholder_count,
 		current: current || null,
-		current_path: progressCurrentPath(),
-		jsonl_path: progressJsonlPath(),
+		current_path: progressCurrentPath(workspace),
+		jsonl_path: progressJsonlPath(workspace),
 		current_exists: current != null,
 		workspace_state: wsState || null,
 		roadmap_gate: gate,
@@ -298,14 +340,29 @@ export async function buildProgressSnapshot(workspace: string): Promise<Record<s
 		project_identity_line: status.project_identity_line,
 		project_steering_digest: status.project_steering_digest,
 		last_error: lastErr,
-		recent_events: summarizeRecentEvents(await readProgressTail(5)),
+		recent_events: summarizeRecentEvents(await readProgressTail(5, workspace)),
 		phase: status.phase,
 	}
 }
 
-export async function clearLastError(): Promise<void> {
+export async function clearLastError(workspace?: string, action?: string): Promise<void> {
 	try {
-		await fs.unlink(lastErrorPath())
+		await withRoadmapLock(lastErrorPath(workspace), async () => {
+			await withRoadmapLock(progressJsonlPath(workspace), async () => {
+				const error = await readLastError(workspace)
+				if (!error || (action && error.action !== action && error.string_code !== `${action}.failed`)) return
+				const events = await readProgressTail(100, workspace)
+				await fs.mkdir(sessionDir(workspace), { recursive: true })
+				await writeAtomic(
+					lastErrorPath(workspace),
+					JSON.stringify({
+						cleared: true,
+						event_ids: events.map((event) => String(event.event_id)),
+						recorded_at: new Date().toISOString(),
+					}),
+				)
+			})
+		})
 	} catch {
 		// non-fatal
 	}

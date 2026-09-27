@@ -10,10 +10,10 @@ The roadmap is the project's steering surface — not a backlog or wishlist.
 |----------|---------|
 | See one-screen status | /roadmap cockpit or roadmap(action='cockpit') |
 | Check production health | /roadmap doctor or roadmap(action='doctor') |
-| Before major direction changes | roadmap(action='checkpoint') |
-| After agent edits ROADMAP.md | /roadmap validate or roadmap(action='validate') |
+| Gather evidence for roadmap work | roadmap(action='checkpoint') |
+| Inspect document structure (optional) | /roadmap validate or roadmap(action='validate') |
 | Bootstrap placeholders remain | roadmap(action='apply_bootstrap_fill', context='write') |
-| Closed gates / completion blocked | /roadmap explain-gate or roadmap(action='explain_gate') |
+| Explain advisory findings | /roadmap explain-gate or roadmap(action='explain_gate') |
 | Checkpoint outdated vs git activity | /roadmap explain-stale or roadmap(action='explain_stale') |
 | Activity timeline | /roadmap progress --timeline |
 
@@ -26,11 +26,17 @@ Roadmap workflow (agents)
 1. Use roadmap(action='guide') when roadmap context is relevant to the assignment.
 2. For a requested checkpoint or meaningful direction change, gather evidence once with roadmap(action='checkpoint').
 3. Edit only affected sections of ROADMAP.md at the workspace root. Non-goals and template suggestions are advisory; do not invent constraints.
-4. After the final edit, run roadmap(action='validate') once. Fix reported errors before rerunning; unchanged validation cannot improve the result.
-5. Use roadmap(action='explain_gate') only for a configured blocking check. Repair remains available while completion is blocked.
+4. Live status checks the current revision automatically. Inspect roadmap(action='validate') only when document diagnostics are useful; no validation is required to finish a task.
+5. Roadmap findings are advisory, including missing sections, incomplete bootstrap, checkpoint age, and diagnostic errors. They never restrict task completion.
 6. Finish with the outcome and any unresolved limitations. Do not repeat checkpoints, audits, or passing tests without new evidence.
 
 Keep Now focused on the current work. Review section 9 only when architecture or risk changes. Use the smallest relevant verification; research-only tasks do not require test runs. If an unchanged failure cannot be repaired, report the blocker instead of looping.
+
+Reuse the workspace evidence already gathered. A workspace containing only ROADMAP.md is a new project; proceed with the requested implementation or ask for essential missing requirements. Repeated planning, unchanged workspace scans, and roadmap activity timestamps are not progress. Finish the assigned outcome before considering any other Now/Next/Later item; the roadmap does not authorize continuing into new work.
+
+Authority: perform routine, reversible roadmap repairs and evidence-backed updates within the user's assigned task without asking for ceremonial approval. Preserve user-authored history, explicit non-goals, permissions and scope. Do not fabricate project decisions or mark incomplete work complete. Ask only for a genuinely missing decision or permission.
+
+Navigation: there are no roadmap prerequisites. required_action is always null and agent_next_call is empty. advisory_actions are optional context, not a new assignment. Resume or finish the assigned task after each observation. Timestamps, journal activity, and rereading the same revision never authorize another pass. Retry a failed repair only after its cause or the document revision changes.
 `.trim()
 
 export interface GateSnapshot {
@@ -43,6 +49,7 @@ export interface GateSnapshot {
 	bootstrap_complete?: boolean
 	bootstrap_placeholder_count?: number
 	blocking_gates?: Array<{ id?: string; label?: string; why?: string; fix?: string; blocks_kanban_complete?: boolean }>
+	closed_gates?: Array<{ id?: string; label?: string; why?: string; fix?: string; blocks_kanban_complete?: boolean }>
 	workspace_state?: Record<string, unknown>
 	roadmap_path?: string
 }
@@ -77,17 +84,17 @@ export function determinePhase(params: {
 }): { phase: string; operator_summary: string; agent_next_call: string; agent_blocked: boolean } {
 	if (params.roadmap_exists && params.validation_valid === false) {
 		return {
-			phase: "validate_pending",
-			operator_summary: "ROADMAP.md failed schema validation — repair before next checkpoint.",
-			agent_next_call: "roadmap(action='validate') then fix reported issues",
+			phase: "structure_repair",
+			operator_summary: "ROADMAP.md has structural findings; repair only if relevant to the assigned work.",
+			agent_next_call: "",
 			agent_blocked: false,
 		}
 	}
 	if (!params.roadmap_exists) {
 		return {
 			phase: "bootstrap",
-			operator_summary: "No ROADMAP.md — run a checkpoint pass to create the steering surface.",
-			agent_next_call: "roadmap(action='checkpoint') then roadmap(action='template') if needed",
+			operator_summary: "No ROADMAP.md. Continue the assigned task; create one only when useful to that work.",
+			agent_next_call: "",
 			agent_blocked: false,
 		}
 	}
@@ -95,8 +102,8 @@ export function determinePhase(params: {
 		return {
 			phase: "bootstrap_fill",
 			operator_summary:
-				"Bootstrap template phrases remain — preview roadmap(action='apply_bootstrap_fill'), apply with context='write', then validate.",
-			agent_next_call: "roadmap(action='apply_bootstrap_fill', context='write')",
+				"Bootstrap template phrases remain. Evidence-based autofill is available when relevant; missing decisions need not be invented.",
+			agent_next_call: "",
 			agent_blocked: false,
 		}
 	}
@@ -104,15 +111,15 @@ export function determinePhase(params: {
 		return {
 			phase: "structure_repair",
 			operator_summary: `ROADMAP.md missing ${params.sections_missing.length} sections — repair schema without losing history.`,
-			agent_next_call: "roadmap(action='checkpoint', context='repair schema')",
+			agent_next_call: "",
 			agent_blocked: false,
 		}
 	}
 	if (params.health_status && ["Fragmenting", "Overloaded", "Blocked", "Drifting"].includes(params.health_status)) {
 		return {
 			phase: "coherence_recovery",
-			operator_summary: `Roadmap health is ${params.health_status} — run coherence recovery and demote overloaded Now items.`,
-			agent_next_call: "roadmap(action='checkpoint', context='coherence recovery')",
+			operator_summary: `Roadmap health is ${params.health_status}; consider this context when choosing relevant work.`,
+			agent_next_call: "",
 			agent_blocked: false,
 		}
 	}
@@ -126,7 +133,7 @@ export function determinePhase(params: {
 
 export function roadmapToolCommandToSlash(command?: string): string {
 	const raw = String(command || "").trim()
-	if (!raw) return "/roadmap cockpit"
+	if (!raw) return ""
 	if (raw.startsWith("/roadmap")) return raw
 
 	const actionMatch = /roadmap\(action='([^']+)'(?:,\s*context='([^']*)')?\)/.exec(raw)
@@ -147,80 +154,12 @@ export function recommendNextAction(params: {
 	bootstrap_incomplete?: boolean
 	last_error?: Record<string, unknown> | null
 }): { action: string; command: string; detail: string } {
-	if (params.last_error) {
-		return {
-			action: "run_doctor",
-			command: "roadmap(action='last_error')",
-			detail: String(params.last_error.operator_action || params.last_error.message || "Review last roadmap error."),
-		}
-	}
-	if (params.validation_pending) {
-		return {
-			action: "run_validate",
-			command: "roadmap(action='validate')",
-			detail: "ROADMAP.md mutated since last validate — confirm schema before closing pass.",
-		}
-	}
-	if (params.bootstrap_incomplete || params.phase === "bootstrap_fill") {
-		return {
-			action: "apply_bootstrap_fill",
-			command: "roadmap(action='apply_bootstrap_fill', context='write')",
-			detail: "Apply evidence replacements for bootstrap placeholders, then validate. Preview: roadmap(action='apply_bootstrap_fill').",
-		}
-	}
-	if (!params.roadmap_exists) {
-		return {
-			action: "bootstrap_roadmap",
-			command: "roadmap(action='checkpoint')",
-			detail: "ROADMAP.md missing — run a checkpoint pass to create the steering surface.",
-		}
-	}
-	if (params.schema_valid === false) {
-		return {
-			action: "explain_gate",
-			command: "roadmap(action='explain_gate')",
-			detail: "Schema gate closed — review closed gates, fix ROADMAP.md, then validate.",
-		}
-	}
-	if (params.stale) {
-		return {
-			action: "explain_stale",
-			command: "roadmap(action='explain_stale')",
-			detail: "Checkpoint is older than recent activity. Refresh during the next relevant roadmap update; this advisory does not block completion.",
-		}
-	}
-	if (params.phase === "structure_repair") {
-		return {
-			action: "repair_schema",
-			command: "roadmap(action='checkpoint', context='repair schema')",
-			detail: "ROADMAP.md schema incomplete — repair missing sections without losing history.",
-		}
-	}
-	if (params.phase === "coherence_recovery") {
-		return {
-			action: "coherence_recovery",
-			command: "roadmap(action='checkpoint', context='coherence recovery')",
-			detail: "Roadmap health degraded — demote overloaded Now items and strengthen section 9 audit.",
-		}
-	}
-	if (params.phase === "validate_pending") {
-		return {
-			action: "run_validate",
-			command: "roadmap(action='validate')",
-			detail: "Validation pending — confirm schema before closing the checkpoint pass.",
-		}
-	}
-	if (params.phase === "bootstrap") {
-		return {
-			action: "run_checkpoint",
-			command: "roadmap(action='checkpoint')",
-			detail: "Bootstrap ROADMAP.md from gathered evidence.",
-		}
-	}
 	return {
-		action: "wait",
+		action: "continue_task",
 		command: "",
-		detail: "Roadmap steering surface current — continue the assigned task. No further roadmap call is needed until a meaningful direction shift.",
+		detail: params.last_error
+			? "Roadmap diagnostics are unavailable. Continue the assigned task; retry only if relevant and the cause changes."
+			: "Roadmap findings are advisory. Continue or finish the assigned task; no further roadmap call is required.",
 	}
 }
 
@@ -233,30 +172,27 @@ export function formatExplainGateReport(params: {
 	validation?: Record<string, unknown>
 	freshness?: Record<string, unknown>
 }): string {
-	const lines = ["🗺️ Roadmap gate explanation", `Workspace: ${params.workspace || "(auto)"}`, ""]
+	const lines = [
+		"🗺️ Roadmap findings (advisory)",
+		`Workspace: ${params.workspace || "(auto)"}`,
+		"No roadmap finding blocks task completion.",
+		"",
+	]
 
 	const closed = params.closed_gates || params.blocking_gates || []
 	if (closed.length > 0 || params.open_gates) {
-		lines.push(`closed_gates=${closed.length} open_gates=${(params.open_gates || []).length}`)
+		lines.push(`Findings: ${closed.length}; checks without findings: ${(params.open_gates || []).length}`)
 		if (closed.length > 0) {
 			lines.push("")
 			for (const item of closed) {
-				const required = params.blocking_gates
-					? params.blocking_gates.some((gate) => gate.id === item.id)
-					: item.blocks_kanban_complete
-				const mark = required ? "Required — " : "Advisory — "
-				lines.push(`${mark}${item.label}: ${item.why}`)
-				lines.push(`   fix: ${item.fix}`)
+				lines.push(`Advisory — ${item.label}: ${item.why}`)
+				lines.push(`   Optional action: ${item.fix}`)
 			}
 		} else {
-			lines.push("✅ All roadmap steering gates open")
+			lines.push("No roadmap findings.")
 		}
 		lines.push("")
-		if (params.kanban_complete_allowed === false) {
-			lines.push("⛔ attempt_completion blocked — resolve blocking gates above")
-		} else if (params.kanban_complete_allowed === true) {
-			lines.push("✅ attempt_completion allowed")
-		}
+		lines.push("Continue or finish the assigned task.")
 		return lines.join("\n")
 	}
 
@@ -307,7 +243,7 @@ export function buildAgentOperatorHints(params: {
 		params.recommended_next_action ||
 		recommendNextAction({
 			phase: String(wsState.phase || ""),
-			roadmap_exists: !!snap.roadmap_present,
+			roadmap_exists: params.gate ? !!snap.roadmap_present : true,
 			schema_valid: snap.schema_valid,
 			stale: !!snap.checkpoint_stale,
 			validation_pending: !!(snap.validation_pending || wsState.validation_pending),
@@ -324,9 +260,10 @@ export function buildAgentOperatorHints(params: {
 		write_guard: roadmapPath
 			? `ROADMAP.md lives only at ${roadmapPath}`
 			: "ROADMAP.md must be written at the project workspace root",
-		kanban_complete_allowed: snap.kanban_complete_allowed,
+		roadmap_mode: "advisory",
+		kanban_complete_allowed: true,
 		validation_pending: !!snap.validation_pending,
-		preferred_command: nextRec.command,
+		preferred_command: "",
 		slash_commands: [
 			"/roadmap cockpit",
 			"/roadmap explain-gate",
@@ -334,9 +271,9 @@ export function buildAgentOperatorHints(params: {
 			"/roadmap progress --current",
 			...(bootstrapInc ? ["/roadmap validate", "roadmap(action='apply_bootstrap_fill', context='write')"] : []),
 		],
-		next_action: params.agent_next_call || nextRec.command,
+		next_action: "",
 		recovery_suggestion: params.operator_summary || nextRec.detail,
-		suggested_slash_command: roadmapToolCommandToSlash(nextRec.command),
+		suggested_slash_command: "",
 		diagnostic_command: "roadmap(action='explain_gate')",
 		project_steering_digest: digest,
 		project_identity_line: digest.identity_line,
@@ -345,14 +282,6 @@ export function buildAgentOperatorHints(params: {
 
 	if (params.bootstrap_fill_hint) {
 		hints.bootstrap_fill_hint = params.bootstrap_fill_hint
-	}
-
-	if (snap.kanban_complete_allowed === false) {
-		const blocking = snap.blocking_gates || []
-		if (blocking.length > 0) {
-			hints.missing_gate = blocking[0].id
-			hints.recovery_suggestion = blocking[0].fix || hints.recovery_suggestion
-		}
 	}
 
 	if (params.last_error) {
@@ -367,7 +296,53 @@ export function wrapClarityEnvelope(
 	payload: Record<string, unknown>,
 	phaseInfo?: Record<string, unknown>,
 ): Record<string, unknown> {
-	const gate = (payload.roadmap_gate || null) as GateSnapshot | null
+	const rawGate = (payload.roadmap_gate || null) as GateSnapshot | null
+	// Normalize legacy snapshots too: stale gate flags must never resurrect authority.
+	const advisory = (rawGate?.closed_gates || rawGate?.blocking_gates || []).map((item) => ({
+		...item,
+		blocks_kanban_complete: false,
+	}))
+	const gate = rawGate
+		? {
+				...rawGate,
+				mode: "advisory",
+				findings: advisory,
+				closed_gates: advisory,
+				blocking_gates: [],
+				blocking_gate_count: 0,
+				kanban_complete_allowed: true,
+				preferred_command: "",
+			}
+		: null
+	payload = {
+		...payload,
+		...(gate ? { roadmap_gate: gate } : {}),
+		roadmap_mode: "advisory",
+		kanban_complete_allowed: true,
+		completion_ready: true,
+		agent_blocked: false,
+		agent_status: advisory.length ? "ready_with_advisories" : "ready",
+		required_action: null,
+		advisory_actions: advisory,
+		agent_next_call: "",
+		first_call: "",
+		recommended_next_action: recommendNextAction({ last_error: payload.last_error as Record<string, unknown> | null }),
+		stop_reason: "Continue or finish the assigned task. Roadmap findings never require another call or expand scope.",
+	}
+	if (gate) {
+		const state = gate.workspace_state || {}
+		if (typeof state.observed_revision === "string") {
+			payload.progress_evidence = {
+				version: 1,
+				workspace: gate.workspace,
+				document_revision: state.observed_revision,
+				validated_revision: state.validated_revision,
+				schema_valid: gate.schema_valid,
+				bootstrap_placeholder_count: gate.bootstrap_placeholder_count,
+				blocking_gates: [],
+			}
+		}
+	}
 	const digest = (payload.project_steering_digest || {}) as Record<string, unknown>
 	const operatorHints = buildAgentOperatorHints({
 		action: String(payload.action || ""),
@@ -375,7 +350,7 @@ export function wrapClarityEnvelope(
 		workspace: String(payload.workspace || ""),
 		last_error: (payload.last_error as Record<string, unknown>) || null,
 		operator_summary: String(payload.operator_summary || ""),
-		agent_next_call: String(payload.agent_next_call || ""),
+		agent_next_call: payload.agent_next_call as string | undefined,
 		recommended_next_action: payload.recommended_next_action as { command?: string; detail?: string },
 		project_steering_digest: digest,
 		bootstrap_fill_hint: payload.bootstrap_fill_plan

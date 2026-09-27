@@ -15,6 +15,10 @@ export function formatExplainStaleReport(freshness: Record<string, unknown>, ste
 	if (freshness.git_commits_in_window != null) {
 		lines.push(`Git commits in evidence window: ${freshness.git_commits_in_window}`)
 	}
-	lines.push(`Next: ${freshness.recommended_action || "roadmap(action='checkpoint', context='stale refresh')"}`)
+	lines.push(
+		freshness.stale
+			? `Optional: ${freshness.recommended_action || "Review checkpoint evidence during relevant roadmap work"}. Does not block completion.`
+			: "No checkpoint refresh required by the observed activity.",
+	)
 	return lines.join("\n")
 }

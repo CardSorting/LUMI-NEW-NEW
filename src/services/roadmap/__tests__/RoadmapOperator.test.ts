@@ -1,5 +1,10 @@
 import * as assert from "assert"
-import { DEFAULT_ROADMAP_CONFIG } from "../RoadmapConfig"
+import {
+	DEFAULT_ROADMAP_CONFIG,
+	getRoadmapConfig,
+	invalidateRoadmapConfigCache,
+	setRoadmapConfigOverride,
+} from "../RoadmapConfig"
 import {
 	buildAgentOperatorHints,
 	formatExplainGateReport,
@@ -39,25 +44,41 @@ describe("RoadmapOperator", () => {
 	})
 
 	describe("recommendNextAction", () => {
-		it("prioritizes validation_pending", () => {
+		it("pending validation requires no follow-up", () => {
 			const rec = recommendNextAction({ validation_pending: true, roadmap_exists: true })
-			assert.strictEqual(rec.action, "run_validate")
-			assert.match(rec.command, /validate/)
+			assert.strictEqual(rec.action, "continue_task")
+			assert.strictEqual(rec.command, "")
 		})
 
-		it("prioritizes bootstrap fill", () => {
+		it("bootstrap findings require no follow-up", () => {
 			const rec = recommendNextAction({ bootstrap_incomplete: true, roadmap_exists: true })
-			assert.strictEqual(rec.action, "apply_bootstrap_fill")
+			assert.strictEqual(rec.command, "")
 		})
 
-		it("routes stale checkpoints to explain_stale", () => {
+		it("stale checkpoints require no follow-up", () => {
 			const rec = recommendNextAction({ stale: true, roadmap_exists: true, schema_valid: true })
-			assert.strictEqual(rec.action, "explain_stale")
-			assert.match(rec.command, /explain_stale/)
+			assert.strictEqual(rec.command, "")
 		})
 	})
 
 	describe("wrapClarityEnvelope", () => {
+		it("normalizes obsolete blocking snapshots while preserving findings", () => {
+			const wrapped = wrapClarityEnvelope({
+				required_action: { fix: "run another gate" },
+				agent_next_call: "roadmap(action='doctor')",
+				roadmap_gate: {
+					kanban_complete_allowed: false,
+					blocking_gates: [{ id: "schema_valid", label: "Schema", blocks_kanban_complete: true }],
+				},
+			})
+			assert.strictEqual(wrapped.roadmap_mode, "advisory")
+			assert.strictEqual(wrapped.required_action, null)
+			assert.strictEqual(wrapped.completion_ready, true)
+			assert.strictEqual(wrapped.agent_next_call, "")
+			assert.strictEqual((wrapped.advisory_actions as Array<{ id: string }>)[0].id, "schema_valid")
+			assert.deepStrictEqual((wrapped.roadmap_gate as Record<string, unknown>).blocking_gates, [])
+			assert.strictEqual((wrapped._roadmap_operator_hints as Record<string, unknown>).next_action, "")
+		})
 		it("includes playbooks and operator hints", () => {
 			const wrapped = wrapClarityEnvelope({
 				action: "guide",
@@ -89,7 +110,8 @@ describe("RoadmapOperator", () => {
 				],
 				kanban_complete_allowed: false,
 			})
-			assert.match(report, /attempt_completion blocked/)
+			assert.doesNotMatch(report, /attempt_completion blocked|Required —/)
+			assert.match(report, /advisory/)
 			assert.match(report, /validate/)
 		})
 	})
@@ -112,6 +134,37 @@ describe("RoadmapOperator", () => {
 })
 
 describe("RoadmapConfig defaults", () => {
+	it("ignores all legacy environment and runtime completion gate flags", () => {
+		const keys = [
+			"MIRA_ROADMAP_BLOCK_KANBAN_ON_INVALID_SCHEMA",
+			"MIRA_ROADMAP_BLOCK_KANBAN_ON_VALIDATION_PENDING",
+			"MIRA_ROADMAP_BLOCK_KANBAN_ON_BOOTSTRAP_INCOMPLETE",
+			"MIRA_ROADMAP_FAIL_CLOSED_COMPLETION_GATES",
+		]
+		const prior = keys.map((key) => process.env[key])
+		try {
+			for (const key of keys) process.env[key] = "true"
+			setRoadmapConfigOverride({
+				block_kanban_on_invalid_schema: true,
+				block_kanban_on_validation_pending: true,
+				block_kanban_on_bootstrap_incomplete: true,
+				fail_closed_completion_gates: true,
+			})
+			const cfg = getRoadmapConfig()
+			assert.strictEqual(cfg.block_kanban_on_invalid_schema, false)
+			assert.strictEqual(cfg.block_kanban_on_validation_pending, false)
+			assert.strictEqual(cfg.block_kanban_on_bootstrap_incomplete, false)
+			assert.strictEqual(cfg.fail_closed_completion_gates, false)
+			assert.strictEqual(cfg.block_writes_outside_workspace, true)
+		} finally {
+			keys.forEach((key, index) => {
+				if (prior[index] === undefined) delete process.env[key]
+				else process.env[key] = prior[index]
+			})
+			setRoadmapConfigOverride(null)
+			invalidateRoadmapConfigCache()
+		}
+	})
 	it("keeps roadmap maintenance advisory and write safeguards enabled", () => {
 		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.progress_enabled, true)
 		assert.strictEqual(DEFAULT_ROADMAP_CONFIG.auto_install_skills, true)

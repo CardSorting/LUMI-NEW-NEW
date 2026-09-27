@@ -1,5 +1,5 @@
 import { getRoadmapConfig } from "./RoadmapConfig"
-import { emitProgress } from "./RoadmapProgress"
+import { clearLastError, emitProgress } from "./RoadmapProgress"
 
 export const ROADMAP_EVENT_BY_ACTION: Record<string, string> = {
 	guide: "guide",
@@ -42,13 +42,8 @@ export function parseRoadmapToolResult(result: unknown): { parsed: Record<string
 		parsed = result as Record<string, unknown>
 	}
 
-	const action = String(parsed.action || "")
-	let success = parsed.success !== false && parsed.ok !== false
-	if (action === "validate") {
-		success = Boolean((parsed.validation as Record<string, unknown>)?.valid ?? parsed.valid)
-	} else if (action === "doctor") {
-		success = Boolean(parsed.ok ?? parsed.success)
-	}
+	// Observation success is independent of the health/schema findings it reports.
+	const success = parsed.success !== false && parsed.ok !== false
 
 	return { parsed, success }
 }
@@ -60,6 +55,11 @@ export async function journalRoadmapToolCall(action: string, workspace: string, 
 	const { parsed, success } = parseRoadmapToolResult(result)
 	const event = ROADMAP_EVENT_BY_ACTION[action] || "tool_call"
 	const digest = (parsed.project_steering_digest || {}) as Record<string, unknown>
+	// A successful read resolves that read's prior failure, never an unrelated failed write.
+	// Observing errors/health does not resolve them, and a preview cannot stand in for a write.
+	if (success && (["guide", "status", "evidence", "validate"].includes(action) || parsed.written === true)) {
+		await clearLastError(workspace, action)
+	}
 
 	await emitProgress(`roadmap.${event}`, {
 		action,
@@ -91,10 +91,6 @@ export async function journalRoadmapFileMutation(params: {
 	const cfg = getRoadmapConfig()
 	if (!cfg.enabled || !cfg.progress_enabled) return
 
-	const followup = params.bootstrapIncomplete
-		? "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')"
-		: "roadmap(action='validate')"
-
 	await emitProgress(params.allowed ? "roadmap.file_mutated" : "roadmap.write_rejected", {
 		action: "file_mutated",
 		workspace: params.workspace,
@@ -102,7 +98,7 @@ export async function journalRoadmapFileMutation(params: {
 		payload: {
 			tool: params.toolName,
 			path: params.path,
-			followup,
+			followup: "",
 			write_allowed: params.allowed,
 			expected_path: params.expectedPath,
 			bootstrap_incomplete: params.bootstrapIncomplete,

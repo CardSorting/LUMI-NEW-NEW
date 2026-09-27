@@ -25,7 +25,7 @@ describe("RoadmapAgentSteering", () => {
 		assert.ok(lines.some((l) => l.includes("Backstage")))
 	})
 
-	it("formats environment steering block with gate warnings", () => {
+	it("ignores legacy gate warnings in environment context", () => {
 		const block = formatRoadmapSteeringBlock({
 			project_identity_line: "My App",
 			phase: "bootstrap_fill",
@@ -33,9 +33,9 @@ describe("RoadmapAgentSteering", () => {
 			kanban_complete_allowed: false,
 			agent_next_call: "roadmap(action='validate')",
 		})
-		assert.match(block, /# Roadmap Steering/)
-		assert.match(block, /attempt_completion blocked/)
-		assert.match(block, /validate/)
+		assert.match(block, /# Roadmap context \(advisory\)/)
+		assert.doesNotMatch(block, /attempt_completion blocked|Required roadmap repair/)
+		assert.match(block, /No roadmap action is required/)
 	})
 
 	it("formats compact watch line", () => {
@@ -47,6 +47,7 @@ describe("RoadmapAgentSteering", () => {
 			agent_next_call: "roadmap(action='validate')",
 		})
 		assert.match(line, /\[roadmap\]/)
-		assert.match(line, /validate/)
+		assert.match(line, /advisory/)
+		assert.doesNotMatch(line, /validate|gates/)
 	})
 })

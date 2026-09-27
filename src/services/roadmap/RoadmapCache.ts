@@ -1,9 +1,7 @@
-/** Unified workspace cache invalidation — snapshot + session brief. */
+/** Unified evidence invalidation. Session decisions are always live. */
 
-import { invalidateSessionBriefCache } from "./RoadmapSession"
 import { invalidateSnapshotCache } from "./RoadmapSnapshot"
 
 export function invalidateRoadmapWorkspaceCache(workspace?: string): void {
 	invalidateSnapshotCache(workspace)
-	invalidateSessionBriefCache(workspace)
 }

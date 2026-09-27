@@ -1,12 +1,12 @@
 ---
 title: "ROADMAP.md Steering"
 sidebarTitle: "Roadmap Steering"
-description: "Auto-rolling ROADMAP.md gates, tools, and VS Code settings in LUMI."
+description: "Advisory ROADMAP.md context, autonomous maintenance, and bounded diagnostics in LUMI."
 ---
 
-LUMI can steer long-running work through a project **`ROADMAP.md`** file — with advisory checks by default and optional required checks for teams that need them.
+LUMI uses **`ROADMAP.md`** as planning context, not an execution governor. Every roadmap finding is advisory. No roadmap check, repair, installation, or approval is required to start, continue, or finish the assigned task.
 
-Implementation: `src/services/roadmap/` (26 files). Completion integration: `RoadmapCompletionGate.ts` + `completionGatePipeline.ts`.
+Implementation: `src/services/roadmap/`. Roadmap evaluation is absent from `completionGatePipeline.ts`; old completion APIs remain inert for compatibility.
 
 ## VS Code settings
 
@@ -15,24 +15,51 @@ All settings use the `lumi.roadmap.*` prefix in root `package.json`:
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `lumi.roadmap.enabled` | `true` | Master switch for roadmap steering |
-| `lumi.roadmap.autoBootstrap` | `true` | Create `ROADMAP.md` from workspace evidence when missing |
+| `lumi.roadmap.autoBootstrap` | `true` | Allow the explicit bootstrap helper; no automatic task-start writes |
 | `lumi.roadmap.autoBootstrapFill` | `true` | Apply evidence autofill after bootstrap |
-| `lumi.roadmap.blockKanbanOnInvalidSchema` | `false` | Require schema errors to be repaired before completion |
-| `lumi.roadmap.blockKanbanOnBootstrapIncomplete` | `false` | Require bootstrap placeholders to be filled before completion |
-| `lumi.roadmap.blockKanbanOnValidationPending` | `false` | Block `attempt_completion` when ROADMAP changed since last validate |
-| `lumi.roadmap.failClosedCompletionGates` | `false` | Block completion when roadmap gate evaluation fails |
+| `lumi.roadmap.blockKanbanOnInvalidSchema` | `false` | Retired; ignored even when saved as `true` |
+| `lumi.roadmap.blockKanbanOnBootstrapIncomplete` | `false` | Retired; ignored even when saved as `true` |
+| `lumi.roadmap.blockKanbanOnValidationPending` | `false` | Retired; ignored even when saved as `true` |
+| `lumi.roadmap.failClosedCompletionGates` | `false` | Retired; ignored even when saved as `true` |
 
 ## Completion and recovery
 
-Missing non-goals, template suggestions, and checkpoint age do not block completion by default. Existing explicit settings still apply. Workspace write guards remain enforced.
+Schema errors, missing roadmaps, template suggestions, checkpoint age, and diagnostic outages cannot block task completion. Legacy gate flags from settings, environment variables, and runtime overrides cannot re-enable roadmap governance. Workspace and command safety boundaries remain enforced at execution, independently of diagnostic health.
 
-After editing the roadmap, validate once. Fix an actual error before rerunning validation; unchanged content produces the same result. Diagnostic and checkpoint tools remain available while required checks are blocked. If a repair needs unavailable access or a user decision, report the blocker.
+Explicit diagnostic tools validate the current content revision. Use `validate` only when document diagnostics are useful, not to obtain permission to finish. Old roadmap retry pressure and its dependent retry loop are retired without clearing independent audit failures. Existing optional task audits are separate from roadmap handling.
+
+## Autonomous roadmap lifecycle
+
+Status responses share one navigation contract:
+
+| Field | Meaning |
+|-------|---------|
+| `roadmap_mode` | Always `advisory` |
+| `completion_ready` | Always `true` for roadmap purposes; not proof the assigned task is done |
+| `required_action` | Always `null`; no roadmap prerequisites |
+| `advisory_actions` | Optional findings, never a new assignment |
+| `agent_next_call` | Always empty; views preserve that terminal value |
+| `progress_evidence` | Versioned content/check evidence shared by the status views, not their presentation or journal timestamps |
+
+Routine reversible repairs within the assignment use the agent's existing authority. They do not need ceremonial confirmation, but cannot expand scope, override permissions, invent decisions, or erase user history. A workspace containing only `ROADMAP.md` is a new project, not a reason to keep searching for starter code. Finish the assigned outcome; Now/Next/Later are not an automatic queue of new assignments.
+
+Task startup, completion, and cancellation do not run roadmap maintenance or install skills. Optional prompt context reads only the root document with a 100 ms deadline, a 256 KiB size limit, and at most one pending read per workspace (16 globally). Concurrent consumers share the deadline. A stuck read cannot cause a queue of retries, and late results are discarded. There is no completed-context cache to serve an old revision as current. Slow, oversized, symlinked, missing, or unreadable documents simply contribute no prompt context.
+
+Explicit validation uses a SHA-256 content revision, not mtime. Missed, duplicated, delayed, and delete watcher events cannot certify different content or reopen an already checked revision. Local state updates are serialized and atomically replaced; unchanged validation does not renew state timestamps. If the derived state cache cannot be saved, the current in-memory validation still applies. Unreadable content is reported as unavailable, never as a missing file to overwrite.
+
+If another writer changes content during validation, reconciliation retries once with the new revision and then reports continuing contention. Bootstrap creation is exclusive, autofill preserves edits detected before writing, and nested/case-mismatched/symlink write targets are rejected. Local maintenance writers are serialized; this is not a distributed lock against independent editors. Autofill with no available replacements ends without another validate/autofill command. Context prose does not implicitly authorize writing.
+
+Calendar validity and project freshness are separate from schema health. Future and impossible dates are reported explicitly. Age without observed changes does not force an idle project's roadmap to be rewritten; unavailable git evidence is uncertain rather than proof of staleness. Freshness remains advisory. Never update a checkpoint date solely to make a check green.
+
+Progress and error logs live under workspace-keyed directories inside the session directory. Older shared logs are retained as history but are not used for current project decisions. Resolved failures have explicit resolution markers, normal mutations are not errors, and a torn journal record does not discard valid records. Diagnostic persistence is best-effort and cannot turn a successful operation into a failure that gets replayed.
+
+These choices adapt [controller reconciliation](https://kubernetes.io/docs/concepts/architecture/controller/), [idempotent retry design](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/), and [OpenTelemetry's isolation of runtime diagnostic failures](https://opentelemetry.io/docs/specs/otel/error-handling/) to roadmap handling. Regression coverage includes retired settings, unavailable services, bounded context reads, identical-mtime edits, delayed watchers, concurrent writes, malformed logs, and bounded real-tool request loops.
 
 Test only the affected behavior and any checks required by the workspace. Passing checks for unchanged code do not need another run. A roadmap prose update or research-only assignment does not require the full test suite.
 
-Subagents own a scoped assignment and independent retry state. Their handoff includes findings or changes, verification results, and limitations. The parent owns final workspace roadmap and audit checks.
+Subagents own a scoped assignment and independent retry state. Their handoff includes findings or changes, verification results, and limitations. Neither parent nor helper must finish roadmap maintenance to hand off the assigned outcome.
 
-The status display distinguishes required blockers from advisory warnings and provides separate links to each. This follows [GitHub's check statuses](https://docs.github.com/en/pull-requests/reference/status-checks) and [bounded agent stopping conditions](https://www.anthropic.com/engineering/building-effective-agents).
+Navigation uses status, findings, and optional actions rather than gates that lead to more gates. `explain_gate` remains a legacy action name for advisory findings; it has no completion authority.
 
 ## Agent tools
 
@@ -54,7 +81,7 @@ Examples:
 /roadmap explain-gate
 ```
 
-When completion is blocked, the agent receives guidance to run `roadmap(action='validate')` or `/roadmap validate`.
+Choose a useful view once. An unchanged finding does not require another diagnostic round trip or user sign-off.
 
 ## File watcher
 

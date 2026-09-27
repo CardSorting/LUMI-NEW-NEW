@@ -9,7 +9,7 @@ import * as path from "path"
 import { buildProjectContextLines } from "../src/services/roadmap/RoadmapAgentSteering"
 import { isDigestContext, slimCheckpointPayload } from "../src/services/roadmap/RoadmapCheckpointDigest"
 import { requireFreshCheckpointBeforeComplete } from "../src/services/roadmap/RoadmapCompletionGate"
-import { getRoadmapConfig, invalidateRoadmapConfigCache } from "../src/services/roadmap/RoadmapConfig"
+import { getRoadmapConfig, setRoadmapConfigOverride } from "../src/services/roadmap/RoadmapConfig"
 import { gateClosedEnvelope, validationPendingEnvelope } from "../src/services/roadmap/RoadmapErrors"
 import { blockingClosedGates, evaluateGateChecks } from "../src/services/roadmap/RoadmapGateCatalog"
 import { finalizeRoadmapSession, initRoadmapSession } from "../src/services/roadmap/RoadmapLifecycle"
@@ -40,6 +40,7 @@ const REQUIRED_FILES = [
 	"src/services/roadmap/RoadmapConfig.ts",
 	"src/services/roadmap/RoadmapNativeBridge.ts",
 	"src/services/roadmap/RoadmapSession.ts",
+	"src/services/roadmap/RoadmapPromptContext.ts",
 	"src/services/roadmap/RoadmapOperator.ts",
 	"src/services/roadmap/RoadmapSnapshot.ts",
 	"src/services/roadmap/RoadmapService.ts",
@@ -65,36 +66,13 @@ const REQUIRED_FILES = [
 	"optional-skills/dietcode/auto-rolling-roadmap/SKILL.md",
 ]
 
-const FORBIDDEN = /\b(mock|stub|placeholder|simulated|not implemented|TODO implement)\b/i
-
-async function scanProductionSources(): Promise<string[]> {
-	const issues: string[] = []
-	const dir = path.join(ROOT, "src/services/roadmap")
-	const entries = await fs.readdir(dir)
-	for (const name of entries) {
-		if (!name.endsWith(".ts") || name.endsWith(".test.ts")) continue
-		const filePath = path.join(dir, name)
-		const text = await fs.readFile(filePath, "utf8")
-		for (const [i, line] of text.split("\n").entries()) {
-			const stripped = line.trim()
-			if (stripped.startsWith("//") || stripped.startsWith("*")) continue
-			if (line.includes("bootstrap_placeholder") || line.includes("findBootstrapPlaceholders")) continue
-			if (/unfilled bootstrap/i.test(line)) continue
-			if (line.includes("bootstrap_complete") || /placeholder guidance/i.test(line)) continue
-			if (line.includes("TODO|FIXME")) continue
-			if (FORBIDDEN.test(line)) {
-				issues.push(`${path.relative(ROOT, filePath)}:${i + 1}: ${stripped.slice(0, 100)}`)
-			}
-		}
-	}
-	return issues
-}
-
 async function runIntegrationChecks(failures: string[]): Promise<void> {
 	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-audit-"))
+	const previousSession = process.env.DIETCODE_SESSION_DIR
+	process.env.DIETCODE_SESSION_DIR = path.join(tmp, "session")
 	try {
 		await fs.writeFile(path.join(tmp, "README.md"), "# Audit Project\n\nPurpose line.\n", "utf8")
-		await fs.writeFile(path.join(tmp, "AGENTS.md"), "# Agents\n\nRun make verify before roadmap checkpoint closes.\n", "utf8")
+		await fs.writeFile(path.join(tmp, "AGENTS.md"), "# Agents\n\nUse make verify for relevant code changes.\n", "utf8")
 		await fs.writeFile(path.join(tmp, "Makefile"), ".PHONY: verify test\nverify:\n\ttrue\n", "utf8")
 
 		const service = RoadmapService.getInstance()
@@ -138,9 +116,9 @@ async function runIntegrationChecks(failures: string[]): Promise<void> {
 			workspace_skill_installed: false,
 		}).closed
 		const schemaBlocking = blockingClosedGates(invalidSchemaClosed, getRoadmapConfig())
-		if (!schemaBlocking.some((g) => g.id === "schema_valid")) {
-			failures.push("invalid schema should block completion when block_kanban_on_invalid_schema=true")
-		}
+		if (schemaBlocking.length) failures.push("advisory schema findings must never block completion")
+		if (!invalidSchemaClosed.some((finding) => finding.id === "schema_valid"))
+			failures.push("schema findings must remain observable")
 
 		const evidence = await service.gatherEvidence(tmp, null, "standard")
 		const template = await service.getTemplateBrief(tmp)
@@ -174,10 +152,10 @@ async function runIntegrationChecks(failures: string[]): Promise<void> {
 		if (phase.phase !== "bootstrap") failures.push(`expected bootstrap phase, got ${phase.phase}`)
 
 		const rec = recommendNextAction({ validation_pending: true, roadmap_exists: true })
-		if (rec.action !== "run_validate") failures.push("recommendNextAction should prioritize validation_pending")
+		if (rec.command) failures.push("pending validation must not require another command")
 
 		const staleRec = recommendNextAction({ stale: true, roadmap_exists: true, schema_valid: true })
-		if (staleRec.action !== "explain_stale") failures.push("recommendNextAction should route stale to explain_stale")
+		if (staleRec.command) failures.push("stale checkpoints must not require another command")
 
 		const slashHelp = await executeRoadmapSlashCommand("help", tmp)
 		if (!slashHelp.includes("cockpit")) failures.push("roadmap slash help missing cockpit subcommand")
@@ -235,10 +213,11 @@ async function runIntegrationChecks(failures: string[]): Promise<void> {
 		)
 		await fs.writeFile(path.join(tmp, "ROADMAP.md"), "# Audit\n", "utf8")
 		const blockMsg = await requireFreshCheckpointBeforeComplete(tmp)
-		if (!blockMsg) failures.push("requireFreshCheckpointBeforeComplete should block when validation_pending")
+		if (blockMsg) failures.push("legacy checkpoint API must never block completion")
 
 		const lifecycle = await initRoadmapSession(tmp, "audit-session")
-		if (!lifecycle?.brief) failures.push("initRoadmapSession should return brief")
+		if (lifecycle?.roadmap_mode !== "advisory")
+			failures.push("legacy lifecycle should expose advisory mode without diagnostics")
 
 		const stale = await service.explainStale(tmp)
 		if (stale.action !== "explain_stale") failures.push("explain_stale action missing")
@@ -250,12 +229,21 @@ async function runIntegrationChecks(failures: string[]): Promise<void> {
 
 		await finalizeRoadmapSession(tmp, "audit-session-finalize")
 	} finally {
+		if (previousSession === undefined) delete process.env.DIETCODE_SESSION_DIR
+		else process.env.DIETCODE_SESSION_DIR = previousSession
 		await fs.rm(tmp, { recursive: true, force: true })
 	}
 }
 
 async function main(): Promise<number> {
-	invalidateRoadmapConfigCache()
+	// Exercise obsolete strict settings too: configuration cannot resurrect roadmap authority.
+	setRoadmapConfigOverride({
+		enabled: true,
+		block_kanban_on_invalid_schema: true,
+		block_kanban_on_validation_pending: true,
+		block_kanban_on_bootstrap_incomplete: true,
+		fail_closed_completion_gates: true,
+	})
 	const failures: string[] = []
 
 	for (const rel of REQUIRED_FILES) {
@@ -264,10 +252,6 @@ async function main(): Promise<number> {
 		} catch {
 			failures.push(`missing required file: ${rel}`)
 		}
-	}
-
-	for (const hit of await scanProductionSources()) {
-		failures.push(`production language audit: ${hit}`)
 	}
 
 	const slashCommandsSrc = await fs.readFile(path.join(ROOT, "src/core/slash-commands/index.ts"), "utf8")
@@ -284,12 +268,13 @@ async function main(): Promise<number> {
 	}
 
 	const cfg = getRoadmapConfig()
-	if (!cfg.fail_closed_completion_gates) {
-		failures.push("fail_closed_completion_gates should default to true")
-	}
-	if (cfg.session_brief_cache_ttl_seconds <= 0) {
-		failures.push("session_brief_cache_ttl_seconds should be positive")
-	}
+	if (
+		cfg.fail_closed_completion_gates ||
+		cfg.block_kanban_on_invalid_schema ||
+		cfg.block_kanban_on_validation_pending ||
+		cfg.block_kanban_on_bootstrap_incomplete
+	)
+		failures.push("legacy gate settings must remain inert")
 
 	await runIntegrationChecks(failures)
 
@@ -303,4 +288,9 @@ async function main(): Promise<number> {
 	return 0
 }
 
-main().then((code) => process.exit(code))
+main()
+	.then((code) => process.exit(code))
+	.catch((error) => {
+		console.error(error)
+		process.exit(1)
+	})

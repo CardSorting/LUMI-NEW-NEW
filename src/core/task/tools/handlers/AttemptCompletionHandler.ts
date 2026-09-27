@@ -22,7 +22,6 @@ import { detectReplanIntent } from "@shared/detectReplanIntent"
 import { COMPLETION_RESULT_CHANGES_FLAG, type DietCodeMessage, type TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { Logger } from "@shared/services/Logger"
 import { DietCodeDefaultTool } from "@shared/tools"
-import { finalizeRoadmapSession } from "@/services/roadmap/RoadmapLifecycle"
 import { buildUserFeedbackContent } from "../../utils/buildUserFeedbackContent"
 import {
 	buildCompletionGatePassedEnvelope,
@@ -431,7 +430,6 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 				}),
 			)
 			config.services.joyRideCache.flushTask(config.taskId, "task_completed")
-			await finalizeRoadmapSession(config.cwd, config.taskId)
 		} catch (error) {
 			Logger.warn("[AttemptCompletionHandler] Post-completion cleanup or telemetry skipped:", error)
 		}

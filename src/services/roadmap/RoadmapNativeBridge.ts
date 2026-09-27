@@ -1,13 +1,9 @@
 import { DietCodeDefaultTool } from "@shared/tools"
 import * as path from "path"
-import { buildProjectContextLines } from "./RoadmapAgentSteering"
+import { invalidateRoadmapWorkspaceCache } from "./RoadmapCache"
 import { getRoadmapConfig } from "./RoadmapConfig"
-import { roadmapToolCommandToSlash } from "./RoadmapOperator"
-import { emitProgress } from "./RoadmapProgress"
-import { RoadmapService } from "./RoadmapService"
-import { journalRoadmapFileMutation } from "./RoadmapToolJournal"
-
-const ROADMAP_NAMES = new Set(["ROADMAP.md", "roadmap.md"])
+import { assertRoadmapWritableTarget } from "./RoadmapDocument"
+import { isQuarantinedWorkspace } from "./RoadmapGateCatalog"
 
 function normalizedPath(raw: unknown): string {
 	return String(raw || "")
@@ -15,12 +11,8 @@ function normalizedPath(raw: unknown): string {
 		.replace(/\\/g, "/")
 }
 
-function pathBasename(filePath: string): string {
-	return path.basename(filePath)
-}
-
 export function isRoadmapFilename(filePath: string): boolean {
-	return ROADMAP_NAMES.has(pathBasename(normalizedPath(filePath)))
+	return path.basename(normalizedPath(filePath)).toLowerCase() === "roadmap.md"
 }
 
 export function targetsRoadmapFile(toolName: string, args: Record<string, unknown> | undefined): boolean {
@@ -55,21 +47,10 @@ export function resolveRoadmapWritePath(
 
 	const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(ws, raw)
 	if (candidate !== expected) {
-		try {
-			const rel = path.relative(ws, candidate)
-			if (rel.startsWith("..") || path.isAbsolute(rel)) {
-				return {
-					resolved: null,
-					error: `ROADMAP.md must live at workspace root: ${expected} (got ${candidate})`,
-					expected,
-				}
-			}
-		} catch {
-			return {
-				resolved: null,
-				error: `ROADMAP.md must live at workspace root: ${expected} (got ${candidate})`,
-				expected,
-			}
+		return {
+			resolved: null,
+			error: `ROADMAP.md must live at workspace root: ${expected} (got ${candidate})`,
+			expected,
 		}
 	}
 
@@ -93,9 +74,18 @@ export async function validateRoadmapWriteTarget(
 }> {
 	const ws = path.resolve(workspace)
 	const check = resolveRoadmapWritePath(writePath, ws)
-	const liveStatus = status || (await RoadmapService.getInstance().getOperationalStatus(ws, "", "light"))
+	// Path safety must not depend on optional evidence collection or a healthy roadmap schema.
+	const liveStatus = status || {}
 	const brief = String(liveStatus.steering_brief || liveStatus.project_identity_line || "")
 	const bootstrapInc = liveStatus.bootstrap_complete === false
+	if (!check.error) {
+		try {
+			if (isQuarantinedWorkspace(ws)) throw new Error("Open the project workspace, not an installed extension directory")
+			await assertRoadmapWritableTarget(ws)
+		} catch (error) {
+			check.error = error instanceof Error ? error.message : String(error)
+		}
+	}
 
 	if (check.error) {
 		return {
@@ -127,55 +117,20 @@ export async function roadmapWriteHint(
 	args: Record<string, unknown> | undefined,
 	workspace: string,
 ): Promise<Record<string, unknown>> {
-	const writePath = normalizedPath(args?.path)
-	const status = await RoadmapService.getInstance().getOperationalStatus(workspace, "", "light")
-	const check = await validateRoadmapWriteTarget(writePath, workspace, status)
-	const projectBrief = check.project_steering_brief
-	const bootstrapInc = check.bootstrap_incomplete === true
-	const briefBit = projectBrief ? ` Project: ${projectBrief}.` : ""
-
-	if (!check.allowed) {
-		return {
-			string_code: "roadmap_write_rejected",
-			preferred_tool: "roadmap",
-			preferred_command: "roadmap(action='guide')",
-			recovery_suggestion: (check.error || "Write ROADMAP.md only in the project workspace root.") + briefBit,
-			suggested_slash_command: "/roadmap cockpit",
-			next_action: "roadmap(action='guide')",
-			source_tool: toolName,
-			path: writePath,
-			workspace: check.workspace,
-			expected_path: check.expected_path,
-			project_steering_brief: projectBrief,
-			write_rejected: true,
-		}
-	}
-
-	let followup = `ROADMAP.md was mutated — run schema validation before closing the checkpoint pass.${briefBit}`
-	if (bootstrapInc) {
-		followup += ` Bootstrap incomplete (${check.bootstrap_placeholder_count ?? "?"} phrase(s)) — preview roadmap(action='apply_bootstrap_fill') or apply with context='write'.`
-	}
-
-	const nextAction = bootstrapInc
-		? "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')"
-		: "roadmap(action='validate') then return checkpoint summary if pass complete"
-	const preferred = bootstrapInc ? "roadmap(action='apply_bootstrap_fill', context='write')" : "roadmap(action='validate')"
-
+	// The write already passed its safety check. A post-write hint must not scan the
+	// repository, recheck a changed target, or retroactively reject a successful edit.
 	return {
 		string_code: "roadmap_write_followup",
+		roadmap_mode: "advisory",
 		preferred_tool: "roadmap",
-		preferred_command: preferred,
-		recovery_suggestion: followup,
-		suggested_slash_command: roadmapToolCommandToSlash(preferred),
-		next_action: nextAction,
+		preferred_command: "",
+		recovery_suggestion: "No roadmap follow-up is required. Continue or finish the assigned task.",
+		suggested_slash_command: "",
+		next_action: "",
 		source_tool: toolName,
-		path: writePath,
-		workspace: check.workspace,
-		roadmap_path: check.roadmap_path,
-		expected_path: check.expected_path,
-		project_steering_brief: projectBrief,
-		bootstrap_incomplete: bootstrapInc,
-		project_steering_digest: status.project_steering_digest || null,
+		path: normalizedPath(args?.path),
+		workspace: path.resolve(workspace),
+		roadmap_path: path.join(path.resolve(workspace), "ROADMAP.md"),
 		write_rejected: false,
 	}
 }
@@ -234,37 +189,10 @@ export async function preflightRoadmapWrite(
 		return { block: false }
 	}
 
-	const status = await RoadmapService.getInstance().getOperationalStatus(workspace, "", "light")
-	const contextLines = buildProjectContextLines({
-		project_identity_line: status.project_identity_line,
-		steering_brief: status.steering_brief,
-		project_steering_digest: status.project_steering_digest,
-		project_fingerprint: status.project_fingerprint,
-	})
-	const steeringLine =
-		contextLines.length > 0 ? ` ${contextLines[0]}` : check.project_steering_brief ? ` ${check.project_steering_brief}` : ""
-
-	try {
-		await emitProgress("roadmap.write_blocked", {
-			action: "pre_tool_call",
-			workspace,
-			success: false,
-			payload: {
-				tool: toolName,
-				path: normalizedPath(args?.path),
-				expected_path: check.expected_path,
-				error: check.error,
-			},
-		})
-	} catch {
-		// non-fatal
-	}
-
 	return {
 		block: true,
 		message:
-			`ROADMAP write blocked — ${check.error || "path outside project workspace"}. ` +
-			`Expected: ${check.expected_path}.${steeringLine}`,
+			`ROADMAP write blocked — ${check.error || "path outside project workspace"}. ` + `Expected: ${check.expected_path}.`,
 	}
 }
 
@@ -276,20 +204,9 @@ export async function afterRoadmapWrite(
 	if (!getRoadmapConfig().enabled || !targetsRoadmapFile(toolName, args)) {
 		return
 	}
-	const check = await validateRoadmapWriteTarget(normalizedPath(args?.path), workspace)
-	await journalRoadmapFileMutation({
-		toolName,
-		path: normalizedPath(args?.path),
-		workspace,
-		allowed: check.allowed,
-		expectedPath: check.expected_path,
-		error: check.error,
-		bootstrapIncomplete: check.bootstrap_incomplete,
-	})
-	if (!check.allowed) {
-		return
-	}
-	await RoadmapService.getInstance().recordFileMutation(workspace, toolName, String(args?.path || "ROADMAP.md"))
+	// Content-addressed diagnostics observe the next revision on demand. Successful
+	// writes must not wait on journal storage or state reconciliation.
+	invalidateRoadmapWorkspaceCache(workspace)
 }
 
 export async function appendRoadmapWriteHint(

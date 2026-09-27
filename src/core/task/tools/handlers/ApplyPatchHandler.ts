@@ -236,6 +236,19 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 
 			// Convert to commit
 			const commit = await this.patchToCommit(patch, currentFiles)
+			// apply_patch embeds its targets in input, not params.path. Check all parsed
+			// source/destination paths before any file is saved, including move operations.
+			const { preflightRoadmapWrite } = await import("@/services/roadmap/RoadmapNativeBridge")
+			const targets = new Set(
+				Object.entries(commit.changes).flatMap(([source, change]) => [
+					source,
+					...(change.movePath ? [change.movePath] : []),
+				]),
+			)
+			for (const target of targets) {
+				const check = await preflightRoadmapWrite(this.name, { path: target }, config.cwd)
+				if (check.block) throw new DiffError(check.message || "Invalid roadmap write target")
+			}
 
 			this.config = config
 

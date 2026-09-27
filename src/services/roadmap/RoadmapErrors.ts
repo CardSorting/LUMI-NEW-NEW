@@ -1,6 +1,10 @@
 import { buildAgentOperatorHints, roadmapToolCommandToSlash } from "./RoadmapOperator"
 
 export interface RoadmapErrorEnvelope {
+	roadmap_mode: "advisory"
+	completion_ready: true
+	required_action: null
+	agent_next_call: ""
 	ok: false
 	success: false
 	string_code: string
@@ -10,6 +14,7 @@ export interface RoadmapErrorEnvelope {
 	action?: string
 	workspace?: string
 	safe_to_retry: boolean
+	retry_condition: string
 	retry_command: string
 	diagnostic_command: string
 	operator_action: string
@@ -22,11 +27,12 @@ const RECOVERY_BY_CODE: Record<string, string> = {
 	roadmap_disabled: "Enable lumi.roadmap.enabled in VS Code settings",
 	workspace_unresolved: "Open a workspace folder before using roadmap steering",
 	roadmap_missing: "roadmap(action='checkpoint') to bootstrap ROADMAP.md",
-	schema_invalid: "roadmap(action='validate') then repair reported issues",
+	schema_invalid: "Edit the reported schema issues; unchanged validation cannot repair them",
 	checkpoint_stale: "roadmap(action='checkpoint', context='stale refresh')",
-	gate_closed: "/roadmap explain-gate — review closed steering gates",
+	gate_closed: "Roadmap gates are retired; continue the assigned task",
 	validation_pending: "roadmap(action='validate') — ROADMAP.md mutated since last validate",
 	unknown_action: "roadmap(action='guide') for phase and next call",
+	unknown_roadmap_action: "Use a documented roadmap action; do not repeat the unrecognized action",
 }
 
 function recoveryForCode(code: string, action: string): string {
@@ -71,11 +77,15 @@ export function errorEnvelope(params: {
 			message: params.message,
 			operator_action: operatorAction,
 			retry_command: retry,
-			safe_to_retry: params.safeToRetry ?? true,
+			safe_to_retry: params.safeToRetry ?? false,
 		},
 	})
 
 	return {
+		roadmap_mode: "advisory",
+		completion_ready: true,
+		required_action: null,
+		agent_next_call: "",
 		ok: false,
 		success: false,
 		string_code: params.code,
@@ -84,7 +94,8 @@ export function errorEnvelope(params: {
 		human_message: params.message,
 		action,
 		workspace: params.workspace,
-		safe_to_retry: params.safeToRetry ?? true,
+		safe_to_retry: params.safeToRetry ?? false,
+		retry_condition: "Retry only after resolving the reported cause or observing a new content revision.",
 		retry_command: retry,
 		diagnostic_command: diagnostic,
 		operator_action: operatorAction,
@@ -94,7 +105,7 @@ export function errorEnvelope(params: {
 			...hints,
 			suggested_slash_command: slash.startsWith("/roadmap") ? slash : "/roadmap cockpit",
 			recovery_suggestion: params.message,
-			next_action: retry,
+			next_action: "",
 		},
 	}
 }
@@ -112,7 +123,7 @@ export function validationPendingEnvelope(workspace = ""): RoadmapErrorEnvelope 
 	return {
 		...errorEnvelope({
 			code: "validation_pending",
-			message: "ROADMAP.md mutated — schema re-validation required",
+			message: "ROADMAP.md changed — document diagnostics are out of date (advisory)",
 			action: "validate",
 			workspace,
 		}),

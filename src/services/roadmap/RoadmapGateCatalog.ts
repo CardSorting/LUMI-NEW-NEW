@@ -29,6 +29,8 @@ export interface GateInputs {
 }
 
 export interface GateState {
+	mode: "advisory"
+	findings: GateClosedEntry[]
 	enabled: boolean
 	workspace: string
 	roadmap_present: boolean
@@ -36,6 +38,7 @@ export interface GateState {
 	schema_complete: boolean
 	checkpoint_fresh: boolean
 	checkpoint_stale: boolean
+	checkpoint_freshness: Record<string, unknown>
 	stale_reason: string
 	stale_summary: string
 	kanban_complete_allowed: boolean
@@ -61,7 +64,6 @@ interface GateCheckDef {
 	whyClosed: string
 	fix: string
 	safe: boolean
-	blocksKanbanComplete: boolean
 }
 
 const GATE_CHECKS: GateCheckDef[] = [
@@ -72,7 +74,6 @@ const GATE_CHECKS: GateCheckDef[] = [
 		whyClosed: "dietcode.roadmap.enabled is false",
 		fix: "Set MIRA_ROADMAP_ENABLED=true or dietcode.roadmap.enabled in config",
 		safe: true,
-		blocksKanbanComplete: false,
 	},
 	{
 		id: "workspace_safe",
@@ -81,7 +82,6 @@ const GATE_CHECKS: GateCheckDef[] = [
 		whyClosed: "ROADMAP.md must live in the project workspace, not the extension/plugin directory",
 		fix: "Open your project workspace root in the editor",
 		safe: true,
-		blocksKanbanComplete: true,
 	},
 	{
 		id: "roadmap_present",
@@ -90,16 +90,14 @@ const GATE_CHECKS: GateCheckDef[] = [
 		whyClosed: "No steering surface at workspace root",
 		fix: "roadmap(action='checkpoint') to bootstrap ROADMAP.md",
 		safe: true,
-		blocksKanbanComplete: false,
 	},
 	{
 		id: "workspace_skill_installed",
 		label: "Auto-rolling roadmap skill installed",
 		isOpen: (i) => i.workspace_skill_installed,
 		whyClosed: "optional-skills/dietcode/auto-rolling-roadmap/SKILL.md missing",
-		fix: "roadmap(action='doctor') or restart task (auto_install_skills)",
+		fix: "Optional: restore the bundled skill or check workspace write access; built-in roadmap tools remain available",
 		safe: true,
-		blocksKanbanComplete: false,
 	},
 	{
 		id: "schema_valid",
@@ -111,16 +109,14 @@ const GATE_CHECKS: GateCheckDef[] = [
 		whyClosed: "Schema validation failed — checkpoint pass incomplete",
 		fix: "Edit the reported schema errors in ROADMAP.md, then roadmap(action='validate'); unchanged content has the same result",
 		safe: true,
-		blocksKanbanComplete: false,
 	},
 	{
 		id: "validation_current",
 		label: "ROADMAP.md validated after last edit",
 		isOpen: (i) => !i.roadmap_present || !i.workspace_state.validation_pending,
 		whyClosed: "ROADMAP.md changed since last schema validation",
-		fix: "roadmap(action='validate') before attempt_completion",
+		fix: "Optional: roadmap(action='validate') to inspect the current document",
 		safe: true,
-		blocksKanbanComplete: true,
 	},
 	{
 		id: "checkpoint_fresh",
@@ -129,24 +125,25 @@ const GATE_CHECKS: GateCheckDef[] = [
 		whyClosed: "Checkpoint stale vs project activity or missing date",
 		fix: "roadmap(action='checkpoint', context='stale refresh')",
 		safe: true,
-		blocksKanbanComplete: false,
 	},
 	{
 		id: "bootstrap_complete",
 		label: "Bootstrap placeholders filled",
 		isOpen: (i) => !i.roadmap_present || i.bootstrap_complete !== false,
 		whyClosed: "ROADMAP.md still contains unfilled bootstrap/template guidance phrases",
-		fix: "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')",
+		fix: "Fill the reported placeholders from confirmed project evidence; clarify only essential missing decisions. Repeating unchanged autofill cannot supply new evidence.",
 		safe: true,
-		blocksKanbanComplete: false,
 	},
 ]
 
-const QUARANTINE_MARKERS = ["codemarie-new/dist", "dietcode-plugin", ".vscode/extensions"]
+const QUARANTINE_PATHS = ["codemarie-new/dist", ".vscode/extensions", ".vscode-insiders/extensions"]
 
 export function isQuarantinedWorkspace(workspace: string): boolean {
-	const normalized = workspace.replace(/\\/g, "/").toLowerCase()
-	return QUARANTINE_MARKERS.some((marker) => normalized.includes(marker.replace(/\\/g, "/").toLowerCase()))
+	const normalized = `/${workspace
+		.replace(/\\/g, "/")
+		.toLowerCase()
+		.replace(/^\/+|\/+$/g, "")}/`
+	return QUARANTINE_PATHS.some((marker) => normalized.includes(`/${marker}/`))
 }
 
 export function evaluateGateChecks(inputs: GateInputs): { closed: GateClosedEntry[]; open: string[] } {
@@ -165,11 +162,6 @@ export function evaluateGateChecks(inputs: GateInputs): { closed: GateClosedEntr
 
 		if (check.id === "bootstrap_complete" && brief) {
 			why = `${brief}: ${inputs.bootstrap_placeholder_count ?? "some"} unfilled bootstrap template phrase(s) remain`
-		} else if (check.id === "schema_valid" && inputs.bootstrap_complete === false) {
-			fix = "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')"
-			if (brief) {
-				why = `${brief}: schema validation failed — bootstrap placeholders may still remain`
-			}
 		} else if (check.id === "schema_valid" && brief) {
 			fix = `Repair ROADMAP.md schema for ${brief}, then roadmap(action='validate')`
 		}
@@ -180,47 +172,27 @@ export function evaluateGateChecks(inputs: GateInputs): { closed: GateClosedEntr
 			why,
 			fix,
 			safe_to_apply: check.safe,
-			blocks_kanban_complete: check.blocksKanbanComplete,
+			blocks_kanban_complete: false,
 		})
 	}
 
 	return { closed, open }
 }
 
-export function blockingClosedGates(closed: GateClosedEntry[], cfg: RoadmapConfig): GateClosedEntry[] {
-	if (!cfg.enabled) return []
-	return closed.filter((gate) => {
-		switch (gate.id) {
-			case "schema_valid":
-				return cfg.block_kanban_on_invalid_schema
-			case "validation_current":
-				return cfg.block_kanban_on_validation_pending
-			case "bootstrap_complete":
-				return cfg.block_kanban_on_bootstrap_incomplete
-			case "checkpoint_fresh":
-				// Freshness is informational; "warn" must never require repair.
-				return false
-			default:
-				return gate.blocks_kanban_complete
-		}
-	})
+/** @deprecated Compatibility projection. Findings never govern completion. */
+export function blockingClosedGates(_closed: GateClosedEntry[], _cfg: RoadmapConfig): GateClosedEntry[] {
+	return []
 }
 
-export function preferredGateCommand(inputs: GateInputs, isValid: boolean): string {
-	if (inputs.workspace_state.validation_pending) return "roadmap(action='validate')"
-	if (inputs.bootstrap_complete === false) return "roadmap(action='apply_bootstrap_fill', context='write')"
-	if (inputs.freshness.stale) return "roadmap(action='checkpoint')"
-	if (!isValid) return "roadmap(action='validate')"
+/** @deprecated There is no required next roadmap command. */
+export function preferredGateCommand(_inputs: GateInputs, _isValid: boolean): string {
 	return ""
 }
 
 export async function buildGateStateFromInputs(inputs: GateInputs): Promise<GateState> {
 	const cfg = inputs.config
 	const checks = evaluateGateChecks(inputs)
-	const blockingIds = new Set(blockingClosedGates(checks.closed, cfg).map((gate) => gate.id))
-	// Reports and callers consume the effective policy, not the catalog's defaults.
-	const closed = checks.closed.map((gate) => ({ ...gate, blocks_kanban_complete: blockingIds.has(gate.id) }))
-	const blocking = closed.filter((gate) => gate.blocks_kanban_complete)
+	const closed = checks.closed
 	const open = checks.open
 	const isValid = inputs.validation ? inputs.validation.valid : inputs.workspace_state.schema_valid !== false
 	const validationPending = !!inputs.workspace_state.validation_pending
@@ -228,6 +200,8 @@ export async function buildGateStateFromInputs(inputs: GateInputs): Promise<Gate
 	const bootstrapCount = inputs.bootstrap_placeholder_count ?? 0
 
 	return {
+		mode: "advisory",
+		findings: closed,
 		enabled: cfg.enabled,
 		workspace: inputs.workspace,
 		roadmap_present: inputs.roadmap_present,
@@ -235,17 +209,18 @@ export async function buildGateStateFromInputs(inputs: GateInputs): Promise<Gate
 		schema_complete: (inputs.evidence_roadmap.sections_missing as string[] | undefined)?.length === 0,
 		checkpoint_fresh: !inputs.freshness.stale,
 		checkpoint_stale: !!inputs.freshness.stale,
+		checkpoint_freshness: inputs.freshness,
 		stale_reason: String(inputs.freshness.reason || ""),
 		stale_summary: String(inputs.freshness.summary || ""),
-		kanban_complete_allowed: !cfg.enabled || blocking.length === 0,
+		kanban_complete_allowed: true,
 		closed_gates: closed,
 		open_gates: open,
 		closed_gate_count: closed.length,
-		blocking_gate_count: blocking.length,
-		blocking_gates: blocking,
-		// Repair must remain available while completion checks are closed.
-		checkpoint_allowed: !cfg.enabled || !blockingIds.has("workspace_safe"),
-		preferred_command: preferredGateCommand(inputs, isValid),
+		blocking_gate_count: 0,
+		blocking_gates: [],
+		// Write safety is enforced at the write boundary, independently of observations.
+		checkpoint_allowed: !!inputs.workspace && !isQuarantinedWorkspace(inputs.workspace),
+		preferred_command: "",
 		validation_pending: validationPending,
 		bootstrap_complete: bootstrapComplete,
 		bootstrap_placeholder_count: bootstrapCount,

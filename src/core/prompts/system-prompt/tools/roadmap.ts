@@ -11,7 +11,7 @@ const GENERIC: DietCodeToolSpec = {
 	id: DietCodeDefaultTool.ROADMAP,
 	name: "roadmap",
 	description:
-		"Per-project ROADMAP.md steering — living checkpoint for center of gravity, Now/Next/Later, code soup audit, and completion gates. Responses include project_identity_line, _roadmap_operator_hints, agent_playbook, and recommended_next_action.",
+		"Optional project ROADMAP.md context and maintenance: direction, Now/Next/Later, evidence, and document diagnostics. No roadmap action or finding gates task execution or completion. Choose a relevant action, not a ritual sequence; reuse evidence and finish the assigned task. Routine in-scope updates need no additional user approval.",
 	parameters: [
 		{
 			name: "action",
@@ -41,7 +41,7 @@ const CHECKPOINT: DietCodeToolSpec = {
 	id: DietCodeDefaultTool.ROADMAP_CHECKPOINT,
 	name: "roadmap_checkpoint",
 	description:
-		"Alias for roadmap(action='checkpoint') — full evidence bundle and checkpoint algorithm before editing ROADMAP.md.",
+		"Alias for roadmap(action='checkpoint') — optional evidence for roadmap work. Not a prerequisite to editing or completing the assigned task.",
 	parameters: [
 		{
 			name: "context",

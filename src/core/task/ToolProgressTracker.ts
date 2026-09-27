@@ -16,6 +16,41 @@ function canonical(value: unknown): string {
 
 const BOOKKEEPING_TOOLS = new Set(["focus_chain", "condense", "summarize_task", "get_execution_state"])
 
+// These fields describe observing the roadmap, not a change to the project. In particular,
+// progress/watch read the journal that their own invocation appends to.
+const ROADMAP_OBSERVATION_FIELDS = new Set([
+	"gathered_at",
+	"generated_at",
+	"updated_at",
+	"last_validated_at",
+	"last_mutated_at",
+	"recorded_at",
+	"ts_iso",
+	"event_id",
+	"task_progress",
+])
+const ROADMAP_PRESENTATION_FIELDS = new Set([
+	"current",
+	"last_progress",
+	"recent_events",
+	"events",
+	"report",
+	"user_request",
+	"context_mode",
+])
+
+function roadmapProgressResult(value: unknown, root = true): unknown {
+	if (Array.isArray(value)) return value.map((part) => roadmapProgressResult(part, false))
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value)
+				.filter(([key]) => !ROADMAP_OBSERVATION_FIELDS.has(key) && !(root && ROADMAP_PRESENTATION_FIELDS.has(key)))
+				.map(([key, part]) => [key, roadmapProgressResult(part, false)]),
+		)
+	}
+	return value
+}
+
 function commandProgressResult(result: unknown): unknown {
 	// Opaque receipt IDs do not change execution evidence. Omit generated receipt lines before hashing output.
 	if (typeof result === "string") return result.replace(/(?:^|\n\n)Execution ID: [a-f\d-]{36}\.[^\n]*/g, "")
@@ -43,6 +78,30 @@ export class ToolProgressTracker {
 
 	record(name: string, params: unknown, result: unknown): void {
 		if (isToolFailure(result) || result === undefined || BOOKKEEPING_TOOLS.has(name)) return
+		if (name === "roadmap" || name === "roadmap_checkpoint") {
+			try {
+				const payload = typeof result === "string" ? JSON.parse(result) : result
+				if (!payload || typeof payload !== "object" || Array.isArray(payload)) return
+				if (payload.success === false || payload.ok === false) return
+				const input = params as Record<string, unknown> | undefined
+				const action = String(payload.action || input?.action || (name === "roadmap_checkpoint" ? "checkpoint" : "guide"))
+					.trim()
+					.toLowerCase()
+					.replaceAll("-", "_")
+				name = "roadmap"
+				if (payload.progress_evidence?.version === 1 && typeof payload.progress_evidence.document_revision === "string") {
+					// All views of the same authoritative revision are one observation, not new work.
+					params = {}
+					result = payload.progress_evidence
+				} else {
+					params = { action }
+					result = roadmapProgressResult({ ...payload, action })
+				}
+			} catch {
+				// Unparseable diagnostic output cannot establish new roadmap evidence.
+				return
+			}
+		}
 		if ((name === "execute_command" || name === "read_command_output") && params && typeof params === "object") {
 			// Waiting longer or changing a risk hint is not new execution evidence.
 			const { timeout: _timeout, requires_approval: _approval, ...semanticParams } = params as Record<string, unknown>

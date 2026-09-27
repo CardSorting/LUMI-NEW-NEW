@@ -1,3 +1,8 @@
+---
+name: auto-rolling-roadmap
+description: Maintain ROADMAP.md as an evidence-backed project checkpoint when the user requests roadmap work or an assigned task changes project direction. Not a mandatory planning or completion checklist for unrelated tasks.
+---
+
 # DietCode Skill: Auto-Rolling Roadmap Checkpoint System
 
 ## Skill Purpose
@@ -29,15 +34,38 @@ It should help humans and agents answer:
 Use this workflow when the user requests roadmap work or the current task materially changes project direction. Roadmap maintenance must not expand unrelated tasks or delay a scoped subagent handoff.
 
 - Anti-goals are optional, evidence-backed scope notes. Accept familiar labels such as Non-goals or Out of scope. Do not invent restrictions or rewrite them merely to satisfy a schema.
-- Gather relevant evidence once, update affected sections, then validate once after the final edit. Repair an actual error before rerunning validation.
-- Placeholder text and checkpoint age are advisory by default. Only explicitly configured required checks block completion; diagnostic and repair tools remain available.
+- Gather relevant evidence once and update affected sections. Document validation is optional; live status may already have checked that revision. Never validate just to gain permission to continue or finish.
+- All roadmap findings are advisory, including schema errors, missing files, placeholder text, checkpoint age, and unavailable diagnostics. Legacy blocking settings are retired; no roadmap check governs another check or task completion.
 - Run the smallest relevant verification plus checks required by the user or workspace. Do not run the full suite for roadmap prose alone. Reuse passing results for unchanged code.
 - Finish when the requested changes and relevant checks are complete. Do not repeat audits or deepen investigation without new evidence. If a check cannot run or an unchanged failure has no available repair, report the limitation instead of retrying indefinitely.
-- The parent owns project-wide roadmap and completion checks. Helpers return their assigned findings, verification, and blockers without waiting for the parent's roadmap to be complete.
+- Helpers return their assigned findings, verification, and blockers without waiting for roadmap maintenance. The parent finishes the user's outcome, not every item in the roadmap.
+
+The formats and review questions below are reference material, not prerequisites or a checklist to exhaust. Use only the sections affected by the assignment. A roadmap update does not require a checkpoint tool call, a preview, a schema repair pass, a skill installation, or a user's sign-off. Existing workspace safety and permission boundaries still apply.
+
+## Autonomous handling and freshness
+
+Routine, reversible repairs and evidence-backed updates within the assigned task do not need ceremonial approval. Preserve user decisions, history, permissions, and task scope. Ask only for an essential missing decision or unavailable authority; record other uncertainty without stalling implementation.
+
+Use the live tool contract instead of inferring obligations from a warning:
+
+| Field | Meaning |
+| --- | --- |
+| `roadmap_mode` | Always `advisory`; roadmap observations have no execution authority |
+| `required_action` | Always `null`; there are no roadmap prerequisites |
+| `advisory_actions` | Optional context, never a new assignment or completion requirement |
+| `completion_ready` | Always `true` for roadmap purposes, not a claim that the task itself is finished |
+| `agent_next_call` | Always empty; do not substitute another guide/checkpoint call |
+| `progress_evidence` | Content revision and check results; multiple views of the same revision are one observation |
+
+Explicit diagnostics check current content by revision. Prompt context is a bounded read-only observation; missing or unavailable context does not stall execution. Task startup and shutdown do not create roadmaps, install skills, or run diagnostics. A delayed watcher event, observation timestamp, or progress-log entry does not make validated content stale. Calendar age alone is not evidence that an idle project's direction changed. Do not rewrite a date merely to appear fresh.
+
+Inspect relevant workspace context once and reuse it. A workspace containing only `ROADMAP.md` is a new project: implement the scoped request using the available direction, or ask for a genuinely essential requirement. Do not repeatedly search for absent starter code. Now/Next/Later guide selection but never authorize automatically starting another task.
+
+After a no-op autofill, repair a known cause or move on. An unchanged failed check cannot improve by rerunning it. Concurrent-edit conflicts require reading the new revision before another write. If no safe in-scope repair exists, report the specific limitation; do not keep cycling guide, doctor, checkpoint, and validate.
 
 ## Primary Output
 
-This skill must create or update:
+For requested roadmap changes, create or update:
 
 ```text
 ROADMAP.md
@@ -45,7 +73,7 @@ ROADMAP.md
 
 `ROADMAP.md` is the canonical checkpoint file for long-horizon project steering.
 
-If the file does not exist, create it.
+If the file does not exist and creation is in scope, create it. Read-only reviews do not require a write.
 
 If the file exists, evolve it carefully.
 
@@ -114,7 +142,7 @@ The roadmap should continuously protect:
 
 The system should feel extensible without becoming incoherent.
 
-## Required Inputs
+## Useful Inputs
 
 When invoked, inspect available project context before editing `ROADMAP.md`.
 
@@ -143,7 +171,7 @@ If evidence is missing, mark uncertainty explicitly.
 
 ## Per-Project Identity (DietCode native integration)
 
-Every `roadmap` tool response is scoped to the **Hermes project workspace**, not
+Every `roadmap` tool response is scoped to the **project workspace**, not
 the DietCode plugin install tree. Read these fields before editing:
 
 | Field | Use |
@@ -153,8 +181,8 @@ the DietCode plugin install tree. Read these fields before editing:
 | `project_fingerprint` | Raw signals in checkpoint `evidence` (README title, archetype, Makefile targets, …) |
 | `bootstrap_fill_plan` | When template phrases remain — use `tasks[].suggested_replacement` |
 
-Prefer evidence-backed replacements over generic text. When placeholders remain,
-call `roadmap(action='apply_bootstrap_fill')` before manual edits.
+Prefer evidence-backed replacements over generic text. When relevant placeholders remain,
+use the available fill plan or preview `roadmap(action='apply_bootstrap_fill')` once. No-op previews are not a reason to repeat the call.
 
 Operator reference: `docs/roadmap.md` in the DietCode plugin tree.
 
@@ -166,9 +194,9 @@ Key doc sections for agents:
 - **Write guard** — ROADMAP.md only at `{workspace}/ROADMAP.md`
 - **Anti-patterns** — backlog dumping, skipping §9 audit, plugin-tree writes
 
-## Required Update Algorithm
+## Checkpoint Review Guide
 
-Follow this sequence on every roadmap pass:
+For a requested checkpoint, use the relevant parts of this guide. Preserve unchanged sections and reuse available evidence; this is not a mandatory sequence of tool calls.
 
 1. Read the existing `ROADMAP.md`, if present.
 2. Identify the current stated center of gravity.
@@ -182,12 +210,12 @@ Follow this sequence on every roadmap pass:
 10. Demote items when uncertainty, risk, or entropy increases.
 11. Add new items only when they connect to the center of gravity.
 12. Rewrite technical implementation details into clear product and architecture language.
-13. Run a centralization and code soup audit.
-14. Update the recent checkpoint.
+13. Review centralization and code soup risks when architecture or risk changed.
+14. Update the recent checkpoint for a meaningful roadmap change, not merely a status read.
 15. Add decision log entries for meaningful direction changes.
 16. Return a concise summary of what changed.
 
-## ROADMAP.md Required Structure
+## ROADMAP.md Reference Structure
 
 The file should use this structure.
 
@@ -564,7 +592,7 @@ Use this checklist:
 
 Keep this section in the template; update its assessment when architecture or risk changes.
 
-If the roadmap does not audit code soup risk, the skill failed.
+An existing assessment may be retained when the affected architecture and risk are unchanged.
 
 ### 10. Decision Log
 
@@ -795,7 +823,7 @@ The roadmap should explain why the work matters.
 
 ## Agent Governance Rules
 
-Agents using this roadmap must optimize for coherence before completion.
+Agents using this roadmap should preserve coherence while completing the user's assigned outcome. Unrelated architectural improvement is advisory, not an open-ended prerequisite.
 
 Agents should:
 
@@ -870,9 +898,9 @@ When editing `ROADMAP.md`:
 
 The tone should feel like a calm senior product strategist, staff engineer, and technical program manager reviewed the system together.
 
-## Required Final Assistant Response
+## Checkpoint Summary
 
-After updating or drafting `ROADMAP.md`, respond with this summary:
+After a requested checkpoint, summarize the meaningful changes. Use this format when helpful; omit empty categories and follow the user's requested response format. Read-only reviews should report findings without claiming the file was updated.
 
 ```markdown
 ## Roadmap Checkpoint Updated
@@ -912,7 +940,7 @@ This skill fails if it:
 * creates a generic roadmap
 * produces a giant backlog
 * ignores center of gravity
-* skips the code soup audit
+* ignores an actual architecture or risk change in the affected area
 * invents project state
 * hides uncertainty
 * promotes vague ideas into Now
@@ -945,21 +973,20 @@ The highest goal is sustained coherence under long-horizon, agent-assisted devel
 
 When the DietCode plugin is active:
 
-1. Call `roadmap(action='guide')` to learn phase, health, `_roadmap_operator_hints`, and `agent_next_call`.
-2. Call `roadmap(action='cockpit')` or `/roadmap cockpit` for a one-screen operator summary.
-3. Call `roadmap(action='checkpoint', context=…)` before editing `ROADMAP.md` — returns evidence, `code_soup_pre_audit`, and the 16-step algorithm.
-4. Call `roadmap(action='template')` when bootstrapping the first `ROADMAP.md` — returns `project_steering_digest` and `bootstrap_autofill_preview`.
-5. When bootstrap template phrases remain, call `roadmap(action='apply_bootstrap_fill')` to preview evidence-backed replacements; pass `context='write'` to apply, then `roadmap(action='validate')`.
-6. Use `project_steering_digest` and `bootstrap_fill_plan.tasks[].suggested_replacement` for per-project fill — each task maps template text to README/git/fingerprint evidence.
-7. After editing, call `roadmap(action='validate')` to confirm schema compliance before finishing.
-8. Call `roadmap(action='doctor')` to install the skill and run production health checks.
-9. Call `roadmap(action='evidence')` for a read-only evidence bundle with `project_fingerprint`.
-10. Call `roadmap(action='status')` to parse the current roadmap without mutating it.
-11. Call `roadmap(action='explain_gate')` or `/roadmap explain-gate` when schema or freshness gates block progress (kernel explain-gate analogue).
-12. Call `joyzoning(action='roadmap')` for a native cockpit brief inside governed sessions.
+Choose one relevant view, not a sequence of all views:
 
-Workspace state persists at `.dietcode/roadmap-state.json` after each `validate` pass.
+- `guide` or `cockpit`: live status and optional advice, with no prerequisites.
+- `checkpoint`: evidence for a requested checkpoint or meaningful direction change. Context prose is not write authorization.
+- `template`: a bootstrap draft when creation is in scope; preserve any file another writer creates in the meantime.
+- `apply_bootstrap_fill`: preview evidence-backed replacements, or pass `context='write'` to apply. Successful writes are checked automatically. If nothing can be filled from evidence, do not repeat the request.
+- `validate`: inspect schema issues after an edit if needed. A live status already checks the current revision; do not validate it again just to keep working.
+- `doctor`: diagnose unavailable resources. It does not install the skill and is not a self-repair loop.
+- `evidence` or `status`: inspect project evidence or current state without editing roadmap content.
+- `explain_gate`: legacy name for explaining advisory findings. It never blocks completion.
+- `progress`, `watch`, or `last_error`: inspect this project's diagnostics. These views do not advance implementation or require another checkpoint.
 
-The skill file is installed to `optional-skills/dietcode/auto-rolling-roadmap/SKILL.md` in the workspace when `dietcode.roadmap.auto_install_skills` is enabled (default: true).
+Derived validation state persists at `.dietcode/roadmap-state.json` by content revision. Diagnostic storage is project-scoped and best-effort; a logging failure does not require replaying a successful edit.
+
+The bundled skill is available at `optional-skills/dietcode/auto-rolling-roadmap/SKILL.md`. Task startup does not install it or copy files into the workspace. The built-in roadmap tools remain available without it.
 
 Operator smoke: `python scripts/roadmap_smoke.py` · `python scripts/roadmap_operator_smoke.py`

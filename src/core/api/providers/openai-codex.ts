@@ -51,6 +51,8 @@ export class OpenAiCodexHandler implements ApiHandler {
 	// Track tool call identity for streaming
 	private pendingToolCallId: string | undefined
 	private pendingToolCallName: string | undefined
+	// Completion events contain snapshots of text already delivered by delta events.
+	private readonly streamedText = new Map<string, string>()
 
 	constructor(options: OpenAiCodexHandlerOptions) {
 		this.options = options
@@ -115,6 +117,7 @@ export class OpenAiCodexHandler implements ApiHandler {
 		// Reset state for this request
 		this.pendingToolCallId = undefined
 		this.pendingToolCallName = undefined
+		this.streamedText.clear()
 
 		// Get access token from OAuth manager
 		let accessToken = await openAiCodexOAuthManager.getAccessToken()
@@ -133,14 +136,18 @@ export class OpenAiCodexHandler implements ApiHandler {
 
 		// Make the request with retry on auth failure
 		for (let attempt = 0; attempt < 2; attempt++) {
+			let receivedOutput = false
 			try {
-				yield* this.executeRequest(requestBody, model, accessToken, useWebsocketMode)
+				for await (const chunk of this.executeRequest(requestBody, model, accessToken, useWebsocketMode)) {
+					receivedOutput = true
+					yield chunk
+				}
 				return
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
 				const isAuthFailure = /unauthorized|invalid token|not authenticated|authentication|401/i.test(message)
 
-				if (attempt === 0 && isAuthFailure) {
+				if (attempt === 0 && isAuthFailure && !receivedOutput) {
 					// Force refresh the token for retry
 					const refreshed = await openAiCodexOAuthManager.forceRefreshAccessToken()
 					if (!refreshed) {
@@ -232,16 +239,22 @@ export class OpenAiCodexHandler implements ApiHandler {
 			}
 
 			if (useWebsocketMode) {
+				let receivedOutput = false
 				try {
-					yield* this.createResponseStreamWebsocket(requestBody, accessToken, codexHeaders, model)
+					for await (const chunk of this.createResponseStreamWebsocket(requestBody, accessToken, codexHeaders, model)) {
+						receivedOutput = true
+						yield chunk
+					}
 					return
 				} catch (error) {
+					if (receivedOutput || this.abortController.signal.aborted) throw error
 					Logger.error("OpenAI Codex websocket mode failed, falling back to HTTP Responses API:", error)
 					this.closeResponsesWebsocket()
 				}
 			}
 
 			// Try using OpenAI SDK first
+			let receivedOutput = false
 			try {
 				const client =
 					this.client ??
@@ -267,11 +280,15 @@ export class OpenAiCodexHandler implements ApiHandler {
 					}
 
 					for await (const outChunk of this.processEvent(event, model)) {
+						receivedOutput = true
 						yield outChunk
 					}
 				}
 			} catch (_sdkErr) {
-				// Fallback to manual SSE via fetch
+				// Once output has reached the task, recovery must preserve its tool results.
+				// Replaying here would silently repeat the response and any completed writes.
+				if (receivedOutput || this.abortController.signal.aborted) throw _sdkErr
+				// Fallback to manual SSE via fetch only before delivering output.
 				yield* this.makeCodexRequest(requestBody, model, accessToken)
 			}
 		} finally {
@@ -285,15 +302,19 @@ export class OpenAiCodexHandler implements ApiHandler {
 		codexHeaders: Record<string, string>,
 		model: { id: string; info: ModelInfo },
 	): ApiStream {
+		let receivedOutput = false
 		try {
 			for await (const event of this.createResponseEventsViaWebsocket(primaryParams, accessToken, codexHeaders)) {
 				if (this.abortController?.signal.aborted) {
 					return
 				}
-				yield* this.processEvent(event, model)
+				for await (const chunk of this.processEvent(event, model)) {
+					receivedOutput = true
+					yield chunk
+				}
 			}
 		} catch (error) {
-			if (this.shouldRetryWebsocketAfterReset(error)) {
+			if (!receivedOutput && !this.abortController?.signal.aborted && this.shouldRetryWebsocketAfterReset(error)) {
 				Logger.log("Retrying Codex websocket response with the complete transcript after a socket reset")
 				this.closeResponsesWebsocket()
 				for await (const event of this.createResponseEventsViaWebsocket(primaryParams, accessToken, codexHeaders)) {
@@ -572,11 +593,23 @@ export class OpenAiCodexHandler implements ApiHandler {
 		}
 	}
 
+	private textDelta(event: any, text: string, kind: "text" | "reasoning", snapshot = false, contentIndex = 0): string {
+		const item = event.item_id ?? event.item?.id ?? event.output_index ?? "legacy"
+		const index = event.content_index ?? event.summary_index ?? contentIndex
+		const key = JSON.stringify([kind, item, index])
+		const previous = this.streamedText.get(key) || ""
+		// A finalized item is a full snapshot, not another delta. Retain any suffix
+		// missing from the stream, including providers that send only a final item.
+		const delta = snapshot ? (text.startsWith(previous) ? text.slice(previous.length) : "") : text
+		this.streamedText.set(key, previous + delta)
+		return delta
+	}
+
 	private async *processEvent(event: any, model: { id: string; info: ModelInfo }): ApiStream {
 		// Handle text deltas
 		if (event?.type === "response.text.delta" || event?.type === "response.output_text.delta") {
 			if (event?.delta) {
-				yield { type: "text", text: event.delta }
+				yield { type: "text", text: this.textDelta(event, event.delta, "text") }
 			}
 			return
 		}
@@ -589,7 +622,7 @@ export class OpenAiCodexHandler implements ApiHandler {
 			event?.type === "response.reasoning_summary_text.delta"
 		) {
 			if (event?.delta) {
-				yield { type: "reasoning", reasoning: event.delta }
+				yield { type: "reasoning", reasoning: this.textDelta(event, event.delta, "reasoning") }
 			}
 			return
 		}
@@ -639,13 +672,16 @@ export class OpenAiCodexHandler implements ApiHandler {
 				}
 
 				if (item.type === "text" && item.text) {
-					yield { type: "text", text: item.text }
+					const text = this.textDelta(event, item.text, "text", true)
+					if (text) yield { type: "text", text }
 				} else if (item.type === "reasoning" && item.text) {
-					yield { type: "reasoning", reasoning: item.text }
+					const reasoning = this.textDelta(event, item.text, "reasoning", true)
+					if (reasoning) yield { type: "reasoning", reasoning }
 				} else if (item.type === "message" && Array.isArray(item.content)) {
-					for (const content of item.content) {
+					for (const [index, content] of item.content.entries()) {
 						if ((content?.type === "text" || content?.type === "output_text") && content?.text) {
-							yield { type: "text", text: content.text }
+							const text = this.textDelta(event, content.text, "text", true, index)
+							if (text) yield { type: "text", text }
 						}
 					}
 				} else if (

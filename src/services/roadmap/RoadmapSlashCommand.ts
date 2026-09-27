@@ -22,12 +22,12 @@ Subcommands:
   template               Bootstrap skeleton for first-pass ROADMAP.md
   guide                  Phase, health, and recommended next agent call
   progress [--timeline]  Roadmap tool activity (current + optional timeline)
-  progress --current     Full progress + gate snapshot JSON
+  progress --current     Full progress + advisory findings JSON
   progress --tail        JSON tail of roadmap-progress.jsonl
   watch                  Compact live summary of last roadmap action
   last-error             Last roadmap failure or validation issue
   explain-stale          Why checkpoint may be stale vs git activity
-  explain-gate           Closed schema/freshness gates (kanban_complete policy)
+  explain-gate           Explain advisory schema/freshness findings (legacy name)
 `
 
 function splitSlashArgs(raw: string): string[] {
@@ -118,7 +118,7 @@ export async function executeRoadmapSlashCommand(rawArgs: string, workspace?: st
 				if (status.recent_checkpoint_date) lines.push(`Last checkpoint: ${status.recent_checkpoint_date}`)
 				const missing = (status.sections_missing as string[]) || []
 				if (missing.length > 0) lines.push(`Missing sections: ${missing.length}`)
-				lines.push("", `→ ${status.agent_next_call || "roadmap(action='guide')"}`)
+				lines.push("", "No required roadmap action. Continue or finish the assigned task.")
 				return lines.join("\n")
 			}
 			case "evidence": {
@@ -168,7 +168,7 @@ export async function executeRoadmapSlashCommand(rawArgs: string, workspace?: st
 				for (const issue of ((validation.issues as Array<Record<string, unknown>>) || []).slice(0, 8)) {
 					lines.push(`  • [${issue.severity}] ${issue.message}`)
 				}
-				lines.push(`Next: ${data.agent_next_call || "roadmap(action='guide')"}`)
+				lines.push("No required roadmap action. Continue or finish the assigned task.")
 				return lines.join("\n")
 			}
 			case "template": {
@@ -191,7 +191,7 @@ export async function executeRoadmapSlashCommand(rawArgs: string, workspace?: st
 					return payloadReport(payload) || JSON.stringify(payload, null, 2)
 				}
 				if (argv.includes("--tail")) {
-					return JSON.stringify(await readProgressTail(20), null, 2)
+					return JSON.stringify(await readProgressTail(20, ws), null, 2)
 				}
 				const timeline = argv.includes("--timeline")
 				const payload = await service.getProgressSnapshot(ws, timeline ? "--timeline" : context)

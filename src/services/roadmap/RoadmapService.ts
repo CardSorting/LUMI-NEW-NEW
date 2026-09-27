@@ -1,3 +1,4 @@
+import { writeAtomic } from "@utils/fs"
 import { execa } from "execa"
 import * as fs from "fs/promises"
 import * as path from "path"
@@ -6,8 +7,16 @@ import { isDigestContext, slimCheckpointPayload } from "./RoadmapCheckpointDiges
 import { buildCockpitPayload } from "./RoadmapCockpit"
 import { getRoadmapConfig, type RoadmapConfig } from "./RoadmapConfig"
 import { runDoctorChecks } from "./RoadmapDoctor"
+import {
+	assertRoadmapWritableTarget,
+	readRoadmapDocument,
+	readRoadmapState,
+	roadmapStatePath,
+	updateRoadmapState,
+	withRoadmapLock,
+} from "./RoadmapDocument"
 import { formatExplainStaleReport } from "./RoadmapFreshness"
-import { buildGateStateFromInputs, collectGateInputs } from "./RoadmapGateCatalog"
+import { buildGateStateFromInputs, collectGateInputs, isQuarantinedWorkspace } from "./RoadmapGateCatalog"
 import {
 	determinePhase,
 	formatExplainGateReport,
@@ -15,7 +24,7 @@ import {
 	wrapClarityEnvelope as operatorWrapClarityEnvelope,
 	recommendNextAction,
 } from "./RoadmapOperator"
-import { clearLastError, formatWatchReport, readCurrentProgress, readLastError, recordLastError } from "./RoadmapProgress"
+import { clearLastError, formatWatchReport, readCurrentProgress, readLastError } from "./RoadmapProgress"
 import {
 	bootstrapSkeleton,
 	findBootstrapPlaceholders,
@@ -47,6 +56,7 @@ const SKIP_DIRS = new Set([
 	"kernel/build",
 	"broccolidb/node_modules",
 	".cursor",
+	".dietcode",
 ])
 
 const SOURCE_SUFFIXES = new Set([".py", ".ts", ".js", ".mm", ".cpp", ".go", ".rs"])
@@ -277,7 +287,7 @@ async function runGit(cwd: string, args: string[]): Promise<string | null> {
 }
 
 async function getGitRemoteSummary(workspace: string): Promise<string | null> {
-	if (!(await isDir(path.join(workspace, ".git")))) {
+	if (!(await fileExists(path.join(workspace, ".git")))) {
 		return null
 	}
 	const url = await runGit(workspace, ["remote", "get-url", "origin"])
@@ -298,7 +308,7 @@ async function getGitRemoteSummary(workspace: string): Promise<string | null> {
 }
 
 async function getGitRecentChanges(workspace: string, light = false): Promise<any> {
-	if (!(await isDir(path.join(workspace, ".git")))) {
+	if (!(await fileExists(path.join(workspace, ".git")))) {
 		return {
 			available: false,
 			recent_commits: [],
@@ -1361,7 +1371,8 @@ export class RoadmapService {
 				success: true,
 				ok: true,
 				workspace,
-				events: await readProgressTail(20),
+				events: await readProgressTail(20, workspace),
+				agent_next_call: "",
 			})
 		}
 
@@ -1387,10 +1398,11 @@ export class RoadmapService {
 	}
 
 	public async getWatchReport(workspace: string): Promise<Record<string, unknown>> {
-		const current = await readCurrentProgress()
-		const lastError = await readLastError()
+		const current = await readCurrentProgress(workspace)
+		const lastError = await readLastError(workspace)
 		const status = await this.getOperationalStatus(workspace, "", "light")
 		return this.wrapClarityEnvelope({
+			...status,
 			action: "watch",
 			success: true,
 			ok: true,
@@ -1404,7 +1416,7 @@ export class RoadmapService {
 	}
 
 	public async getLastErrorBrief(workspace: string): Promise<Record<string, unknown>> {
-		const lastError = await readLastError()
+		const lastError = await readLastError(workspace)
 		if (!lastError) {
 			return this.wrapClarityEnvelope({
 				action: "last_error",
@@ -1413,17 +1425,18 @@ export class RoadmapService {
 				workspace,
 				last_error: null,
 				operator_summary: "No recorded roadmap errors.",
-				agent_next_call: "roadmap(action='guide')",
+				agent_next_call: "",
 			})
 		}
 		return this.wrapClarityEnvelope({
 			action: "last_error",
-			success: false,
-			ok: false,
+			success: true,
+			ok: true,
 			workspace,
 			last_error: lastError,
 			operator_summary: String(lastError.message || lastError.error),
-			agent_next_call: String(lastError.retry_command || "roadmap(action='guide')"),
+			agent_next_call: "",
+			repair_guidance: lastError.operator_action || lastError.message,
 		})
 	}
 
@@ -1496,6 +1509,7 @@ export class RoadmapService {
 		if (!cfg.enabled || !cfg.auto_bootstrap) {
 			return null
 		}
+		if (isQuarantinedWorkspace(workspace)) return null
 
 		const roadmapPath = path.join(workspace, "ROADMAP.md")
 		if (await fileExists(roadmapPath)) {
@@ -1510,7 +1524,14 @@ export class RoadmapService {
 
 		const evidence = await this.gatherEvidence(workspace, null, "full")
 		const skeleton = bootstrapSkeletonFromEvidenceAutofilled(evidence)
-		await fs.writeFile(roadmapPath, skeleton, "utf8")
+		try {
+			await assertRoadmapWritableTarget(workspace)
+			await fs.writeFile(roadmapPath, skeleton, { encoding: "utf8", flag: "wx" })
+		} catch (error) {
+			// Another task/editor won the creation race. Never replace its work.
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") return null
+			throw error
+		}
 		await this.recordFileMutation(workspace, "roadmap", "ROADMAP.md")
 
 		let result: Record<string, unknown> = {
@@ -1521,7 +1542,7 @@ export class RoadmapService {
 			roadmap_path: roadmapPath,
 			written: true,
 			operator_summary: "Created ROADMAP.md from workspace evidence.",
-			agent_next_call: "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')",
+			agent_next_call: "",
 		}
 
 		if (cfg.auto_bootstrap_fill) {
@@ -1529,63 +1550,45 @@ export class RoadmapService {
 			result = { ...result, bootstrap_autofill_applied: filled }
 			if ((filled as Record<string, unknown>).written) {
 				result.operator_summary = filled.operator_summary
-				result.agent_next_call = "roadmap(action='validate')"
+				result.agent_next_call = ""
 			}
 		}
 
-		return this.wrapClarityEnvelope(result)
+		return this.wrapClarityEnvelope({
+			...(await this.getOperationalStatus(workspace, "", "light")),
+			...result,
+			action: "auto_bootstrap",
+			written: true,
+		})
 	}
 
 	// State Operations
 	public getStatePath(workspace: string): string {
-		return path.join(workspace, ".dietcode", "roadmap-state.json")
+		return roadmapStatePath(workspace)
 	}
 
 	public async readState(workspace: string): Promise<any> {
-		const stateFile = this.getStatePath(workspace)
-		if (!(await fileExists(stateFile))) {
-			return {}
-		}
-		try {
-			const content = await fs.readFile(stateFile, "utf8")
-			return JSON.parse(content) || {}
-		} catch {
-			return {}
-		}
+		return readRoadmapState(workspace)
 	}
 
 	public async writeState(workspace: string, patch: any): Promise<any> {
-		const stateFile = this.getStatePath(workspace)
-		const current = await this.readState(workspace)
-		const merged = {
-			...current,
-			...patch,
-			updated_at: new Date().toISOString(),
-		}
-		try {
-			await fs.mkdir(path.dirname(stateFile), { recursive: true })
-			await fs.writeFile(stateFile, JSON.stringify(merged, null, 2), "utf8")
-		} catch (error) {
-			await recordLastError({
-				string_code: "roadmap_state_write_failed",
-				message: error instanceof Error ? error.message : String(error),
-				retry_command: "roadmap(action='validate')",
-				safe_to_retry: true,
-			})
-			return { ...merged, _write_failed: true }
-		}
-		invalidateRoadmapWorkspaceCache(workspace)
-		return merged
+		return updateRoadmapState(workspace, () => patch)
 	}
 
 	public async recordFileMutation(workspace: string, tool: string, filePath: string): Promise<any> {
-		invalidateRoadmapWorkspaceCache(workspace)
-		return this.writeState(workspace, {
-			validation_pending: true,
-			schema_valid: null,
-			last_mutated_at: new Date().toISOString(),
-			last_mutation_tool: tool,
-			last_mutation_path: filePath,
+		return updateRoadmapState(workspace, async (current) => {
+			const document = await readRoadmapDocument(workspace)
+			// Editors can deliver delayed/duplicate notifications after validation has completed.
+			if (current.observed_revision === document.revision) return {}
+			invalidateRoadmapWorkspaceCache(workspace)
+			return {
+				observed_revision: document.revision,
+				validation_pending: document.exists && current.validated_revision !== document.revision,
+				schema_valid: current.validated_revision === document.revision ? current.schema_valid : null,
+				last_mutated_at: new Date().toISOString(),
+				last_mutation_tool: tool,
+				last_mutation_path: filePath,
+			}
 		})
 	}
 
@@ -1597,17 +1600,27 @@ export class RoadmapService {
 		phase: string,
 		issue_count: number,
 		bootstrap_placeholder_count: number,
+		revision: string,
 	): Promise<any> {
-		return this.writeState(workspace, {
-			last_validated_at: new Date().toISOString(),
-			schema_valid: valid,
-			health_status,
-			recent_checkpoint_date,
-			phase,
-			validation_issue_count: issue_count,
-			bootstrap_placeholder_count,
-			bootstrap_complete: bootstrap_placeholder_count === 0,
-			validation_pending: false,
+		return updateRoadmapState(workspace, async (current) => {
+			const document = await readRoadmapDocument(workspace)
+			if (document.revision !== revision) {
+				return { observed_revision: document.revision, validation_pending: document.exists, schema_valid: null }
+			}
+			const checked = {
+				observed_revision: revision,
+				validated_revision: revision,
+				schema_valid: valid,
+				health_status,
+				recent_checkpoint_date,
+				phase,
+				validation_issue_count: issue_count,
+				bootstrap_placeholder_count,
+				bootstrap_complete: bootstrap_placeholder_count === 0,
+				validation_pending: false,
+			}
+			if (Object.entries(checked).every(([key, value]) => current[key] === value)) return {}
+			return { ...checked, last_validated_at: new Date().toISOString() }
 		})
 	}
 
@@ -1620,11 +1633,7 @@ export class RoadmapService {
 		const root = workspace
 		const roadmapPath = path.join(root, "ROADMAP.md")
 		let text = roadmapText
-		if (text === null && (await fileExists(roadmapPath))) {
-			text = await readText(roadmapPath, 500000)
-		} else if (text === null) {
-			text = ""
-		}
+		if (text === null) text = (await readRoadmapDocument(workspace)).text
 
 		const parsed = parseRoadmapText(text, roadmapPath)
 		const git = await getGitRecentChanges(root, tier === "light")
@@ -1722,9 +1731,10 @@ export class RoadmapService {
 	public assessFreshness(
 		recentCheckpointDate: string | null,
 		gitCommits: string[],
-		schemaValid: boolean | null,
+		_schemaValid: boolean | null,
 		staleDays = 7,
 		gitCommitsSinceCheckpoint: string[],
+		gitAvailable = true,
 	): any {
 		if (!recentCheckpointDate) {
 			return {
@@ -1738,34 +1748,39 @@ export class RoadmapService {
 			}
 		}
 
-		const parts = recentCheckpointDate.split("-")
-		if (parts.length !== 3) {
+		const checkpointDate = new Date(`${recentCheckpointDate}T00:00:00Z`)
+		if (
+			!/^\d{4}-\d{2}-\d{2}$/.test(recentCheckpointDate) ||
+			!Number.isFinite(checkpointDate.getTime()) ||
+			checkpointDate.toISOString().slice(0, 10) !== recentCheckpointDate
+		) {
 			return { stale: true, reason: "invalid_date", summary: "ROADMAP.md recent checkpoint date format is invalid." }
 		}
-		const checkpointDate = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
 		const today = new Date()
-		today.setHours(0, 0, 0, 0)
-		checkpointDate.setHours(0, 0, 0, 0)
-
-		const diffTime = Math.abs(today.getTime() - checkpointDate.getTime())
-		const daysSince = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
+		// Compare civil dates without DST drift or treating future dates as old checkpoints.
+		const daysSince = Math.floor(
+			(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()) - checkpointDate.getTime()) / 86_400_000,
+		)
+		if (daysSince < 0)
+			return {
+				stale: true,
+				reason: "future_checkpoint_date",
+				summary: "Checkpoint date is in the future; verify the date without inventing a new checkpoint.",
+			}
 
 		let stale = false
 		let reason = "fresh"
 		let summary = `Last checkpoint ${recentCheckpointDate} (${daysSince}d ago).`
 
-		if (schemaValid === false) {
-			stale = true
-			reason = "schema_invalid"
-			summary = "ROADMAP.md failed schema validation — checkpoint pass incomplete."
-		} else if (daysSince > staleDays && gitCommitsSinceCheckpoint.length >= 3) {
+		if (daysSince > staleDays && gitCommitsSinceCheckpoint.length > 0) {
 			stale = true
 			reason = "checkpoint_older_than_git_activity"
 			summary = `Checkpoint is ${daysSince}d old with ${gitCommitsSinceCheckpoint.length} git commit(s) since that date — roadmap may not reflect current direction.`
 		} else if (daysSince > staleDays * 2) {
-			stale = true
-			reason = "checkpoint_expired"
-			summary = `Checkpoint is ${daysSince}d old — schedule a roadmap refresh.`
+			reason = gitAvailable ? "no_observed_changes" : "activity_unknown"
+			summary = gitAvailable
+				? `Checkpoint is ${daysSince}d old with no observed commits since it. Age alone does not require rewriting an idle project's roadmap.`
+				: `Checkpoint is ${daysSince}d old; git activity is unavailable. Freshness is uncertain, not a completion blocker.`
 		}
 
 		return {
@@ -1775,24 +1790,31 @@ export class RoadmapService {
 			days_since_checkpoint: daysSince,
 			git_commits_since_checkpoint: gitCommitsSinceCheckpoint.length,
 			git_commits_in_window: gitCommits.length,
-			recommended_action: stale ? "roadmap(action='checkpoint', context='stale refresh')" : "roadmap(action='guide')",
+			recommended_action: stale ? "roadmap(action='checkpoint', context='stale refresh')" : "",
 			checkpoint_date: recentCheckpointDate,
 		}
 	}
 
 	// Gate State
-	public async buildRoadmapGateState(workspace: string, evidence: any, validation: RoadmapValidation | null): Promise<any> {
+	public async buildRoadmapGateState(
+		workspace: string,
+		evidence: any,
+		validation: RoadmapValidation | null,
+		current?: { present: boolean; state: Record<string, unknown> },
+	): Promise<any> {
 		const pathStr = path.join(workspace, "ROADMAP.md")
-		const present = await fileExists(pathStr)
-		const wsState = await this.readState(workspace)
+		const present = current?.present ?? (await fileExists(pathStr))
+		const wsState = current?.state ?? (await this.readState(workspace))
 
 		const roadmap = evidence.roadmap || {}
 		const checkpoint_date = roadmap.recent_checkpoint_date
 		const git_commits = (evidence.git || {}).recent_commits || []
 
 		let since_commits: string[] = []
-		if (checkpoint_date && present) {
+		let gitActivityAvailable = evidence.git?.available !== false
+		if (checkpoint_date && /^\d{4}-\d{2}-\d{2}$/.test(checkpoint_date) && present) {
 			const resCommits = await runGit(workspace, ["log", "--oneline", `--since=${checkpoint_date.trim()}`])
+			if (resCommits === null) gitActivityAvailable = false
 			since_commits = resCommits ? resCommits.split(/\r?\n/).filter(Boolean) : []
 		}
 
@@ -1802,6 +1824,7 @@ export class RoadmapService {
 			validation ? validation.valid : (wsState.schema_valid ?? null),
 			getRoadmapConfig().stale_checkpoint_days,
 			since_commits,
+			gitActivityAvailable,
 		)
 
 		const inputs = await collectGateInputs({
@@ -1843,10 +1866,8 @@ export class RoadmapService {
 				tasks.length > 0
 					? `${tasks.length} template phrase(s) remain — use tasks[].suggested_replacement from project evidence.`
 					: "Bootstrap fill complete — no template phrases detected.",
-			agent_next_call:
-				tasks.length > 0
-					? "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')."
-					: "roadmap(action='validate')",
+			agent_next_call: "",
+			optional_apply_command: tasks.length > 0 ? "roadmap(action='apply_bootstrap_fill', context='write')" : "",
 		}
 	}
 
@@ -1879,6 +1900,12 @@ export class RoadmapService {
 	}
 
 	public async writeBootstrapAutofill(workspace: string, dryRun: boolean): Promise<any> {
+		return withRoadmapLock(path.join(path.resolve(workspace), "ROADMAP.md"), () =>
+			this.writeBootstrapAutofillLocked(workspace, dryRun),
+		)
+	}
+
+	private async writeBootstrapAutofillLocked(workspace: string, dryRun: boolean): Promise<any> {
 		const roadmapPath = path.join(workspace, "ROADMAP.md")
 		if (!(await fileExists(roadmapPath))) {
 			return {
@@ -1911,7 +1938,22 @@ export class RoadmapService {
 			return result
 		}
 
-		await fs.writeFile(roadmapPath, draft.preview_text, "utf8")
+		if (isQuarantinedWorkspace(workspace)) throw new Error("Roadmap maintenance requires a project workspace")
+		await assertRoadmapWritableTarget(workspace)
+		if ((await fs.readFile(roadmapPath, "utf8")) !== text) {
+			return {
+				...result,
+				success: false,
+				ok: false,
+				written: false,
+				conflict: true,
+				operator_summary:
+					"ROADMAP.md changed while preparing autofill. Existing edits were preserved; review the new revision before applying.",
+				agent_next_call: "",
+				safe_to_retry: false,
+			}
+		}
+		await writeAtomic(roadmapPath, draft.preview_text)
 		await this.recordFileMutation(workspace, "roadmap", "ROADMAP.md")
 
 		result.written = true
@@ -1924,7 +1966,7 @@ export class RoadmapService {
 	private async resolveWorkspaceContext(
 		workspace: string,
 		tier: EvidenceTier = "standard",
-		roadmapText?: string | null,
+		attempt = 0,
 	): Promise<{
 		workspace: string
 		text: string
@@ -1933,51 +1975,38 @@ export class RoadmapService {
 		validation: RoadmapValidation
 		gateState: any
 		state: any
+		revision: string
 	}> {
-		const { key, roadmapPath } = await buildSnapshotKey(workspace, tier)
-		let state = await this.readState(workspace)
-
-		if (state.validation_pending && roadmapText === undefined) {
-			await this.validateRoadmap(workspace)
-			state = await this.readState(workspace)
-		}
-
+		const { key, roadmapPath, text, revision, exists } = await buildSnapshotKey(workspace, tier)
 		const cached = getSnapshotFromCache(key)
-		if (cached) {
-			return {
-				workspace,
-				text: String((cached.evidence as any)._roadmap_text || ""),
-				roadmapPath,
-				evidence: cached.evidence,
-				validation: cached.validation as RoadmapValidation,
-				gateState: cached.gateState,
-				state,
-			}
-		}
-
-		let text = roadmapText
-		if (text === undefined) {
-			text = (await fileExists(roadmapPath)) ? await readText(roadmapPath, 500000) : ""
-		} else if (text === null) {
-			text = ""
-		}
-
-		const evidence = await this.gatherEvidence(workspace, text, tier)
+		const evidence: any = cached?.evidence ?? (await this.gatherEvidence(workspace, text, tier))
 		const validation = validateRoadmapContent(text)
-		const gateState = await this.buildRoadmapGateState(workspace, evidence, validation)
-
-		setSnapshotCache(key, {
+		const placeholderCount = findBootstrapPlaceholders(text).length
+		const state = await this.recordValidation(
 			workspace,
-			roadmapPath,
-			roadmapMtimeMs: null,
-			tier,
-			evidence,
-			validation,
-			gateState,
-			cachedAt: Date.now(),
+			validation.valid,
+			validation.health_status || null,
+			evidence.roadmap.recent_checkpoint_date,
+			validation.valid ? (placeholderCount ? "bootstrap_fill" : "checkpoint") : "structure_repair",
+			validation.issues.length,
+			placeholderCount,
+			revision,
+		)
+		if (state.observed_revision !== revision) {
+			if (attempt === 0) return this.resolveWorkspaceContext(workspace, tier, 1)
+			throw new Error("ROADMAP.md is changing during validation. Retry only after the current edit settles.")
+		}
+		const gateState = await this.buildRoadmapGateState(workspace, evidence, validation, {
+			present: exists,
+			state,
 		})
-
-		return { workspace, text, roadmapPath, evidence, validation, gateState, state }
+		if ((await readRoadmapDocument(workspace)).revision !== revision) {
+			if (attempt === 0) return this.resolveWorkspaceContext(workspace, tier, 1)
+			throw new Error("ROADMAP.md is changing during validation. Retry only after the current edit settles.")
+		}
+		await clearLastError(workspace, "validate")
+		if (!cached) setSnapshotCache(key, { workspace, tier, evidence, cachedAt: Date.now() })
+		return { workspace, text, roadmapPath, evidence, validation, gateState, state, revision }
 	}
 
 	private buildOperationalPayload(
@@ -2032,9 +2061,10 @@ export class RoadmapService {
 			agent_next_call: state.validation_pending ? "roadmap(action='validate')" : next_rec.command,
 			recommended_next_action: next_rec,
 			schema_valid: validation.valid,
+			validation_pending: !!state.validation_pending,
 			prime_directive: "Did the latest work strengthen or weaken the project's center of gravity?",
 			uncertainty: evidence.uncertainty || [],
-			checkpoint_freshness: gateState.checkpoint_fresh ? { stale: false, summary: gateState.stale_summary } : gateState,
+			checkpoint_freshness: gateState.checkpoint_freshness,
 			roadmap_gate: gateState,
 			kanban_complete_allowed: gateState.kanban_complete_allowed,
 			workspace_state: gateState.workspace_state,
@@ -2099,142 +2129,55 @@ export class RoadmapService {
 			enrichWithBootstrapFill(payload, text, evidence, true)
 		}
 
-		const ctx_lower = (context || "").toLowerCase()
-		const autofill_write =
-			(ctx_lower.includes("apply autofill write") ||
-				ctx_lower.includes("apply bootstrap write") ||
-				ctx_lower.includes("autofill write") ||
-				ctx_lower.includes("write autofill") ||
-				ctx_lower.trim() === "apply autofill" ||
-				ctx_lower.trim() === "apply bootstrap" ||
-				ctx_lower.trim() === "autofill") &&
-			!ctx_lower.includes("preview")
+		// Legacy explicit commands only. Free-form task context must never imply permission to write.
+		const autofill_write = [
+			"apply autofill write",
+			"apply bootstrap write",
+			"autofill write",
+			"write autofill",
+			"apply autofill",
+			"apply bootstrap",
+			"autofill",
+		].includes(context.trim().toLowerCase())
 
 		if (autofill_write) {
 			const applied = await this.writeBootstrapAutofill(workspace, false)
 			payload.bootstrap_autofill_applied = applied
 			if (applied.written) {
-				payload.operator_summary = applied.operator_summary
-				payload.agent_next_call = "roadmap(action='validate')"
 				invalidateRoadmapWorkspaceCache(workspace)
 				const refreshed = await this.resolveWorkspaceContext(workspace, "full")
-				payload.phase = this.buildOperationalPayload("checkpoint", refreshed).phase
+				Object.assign(payload, this.buildOperationalPayload("checkpoint", refreshed), {
+					evidence: refreshed.evidence,
+					existing_roadmap_summary: refreshed.evidence.roadmap,
+					code_soup_pre_audit: refreshed.evidence.code_soup_audit,
+				})
 			}
 		}
 
+		const wrapped = this.wrapClarityEnvelope(payload)
 		if (isDigestContext(context)) {
-			return slimCheckpointPayload(payload)
+			return slimCheckpointPayload(wrapped)
 		}
 
-		return payload
+		return wrapped
 	}
 
 	public async validateRoadmap(workspace: string): Promise<any> {
-		const roadmapPath = path.join(workspace, "ROADMAP.md")
-		let text = ""
-		if (await fileExists(roadmapPath)) {
-			text = await fs.readFile(roadmapPath, "utf8")
-		}
-
-		const validation = validateRoadmapContent(text)
-		const placeholders = findBootstrapPlaceholders(text)
-		const bootstrap_placeholder_count = placeholders.length
-		const bootstrap_complete = bootstrap_placeholder_count === 0
-
-		const validation_dict: any = {
-			valid: validation.valid,
-			schema_complete: validation.schema_complete,
-			health_status: validation.health_status,
-			code_soup_risk: validation.code_soup_risk,
-			now_item_count: validation.now_item_count,
-			issues: validation.issues,
-		}
-
-		const completeness = {
-			bootstrap_complete,
-			bootstrap_placeholder_count,
-		}
-
-		const parsed = text ? parseRoadmapText(text, roadmapPath) : null
-
-		let phase = "validate_pending"
-		if (validation.valid) {
-			phase = bootstrap_complete ? "checkpoint" : "bootstrap_fill"
-		}
-
-		await this.recordValidation(
-			workspace,
-			validation.valid,
-			validation.health_status || null,
-			parsed ? parsed.recent_checkpoint_date : null,
-			phase,
-			validation.issues.length,
-			bootstrap_placeholder_count,
-		)
-		if (validation.valid) {
-			await clearLastError()
-		}
-		invalidateRoadmapWorkspaceCache(workspace)
-
-		const ctx = await this.resolveWorkspaceContext(workspace, "standard", text)
-		const evidence = ctx.evidence
-		const gateState = ctx.gateState
-
-		const bootstrap_inc = isBootstrapIncomplete({
-			roadmap_exists: gateState.roadmap_present,
-			bootstrap_complete: gateState.bootstrap_complete,
-			bootstrap_placeholder_count: gateState.bootstrap_placeholder_count,
+		const ctx = await this.resolveWorkspaceContext(workspace, "standard")
+		return this.wrapClarityEnvelope({
+			...this.buildOperationalPayload("validate", ctx),
+			// Finding schema issues is a successful diagnostic, not a failed operation.
+			success: true,
+			ok: true,
+			validation: ctx.validation,
+			bootstrap_completeness: {
+				bootstrap_complete: ctx.gateState.bootstrap_complete,
+				bootstrap_placeholder_count: ctx.gateState.bootstrap_placeholder_count,
+			},
+			operator_summary: ctx.validation.valid
+				? "ROADMAP.md passes schema validation for the current content revision."
+				: "ROADMAP.md has advisory schema findings. Repair only when relevant; no follow-up is required to finish the task.",
 		})
-
-		const phaseInfo = determinePhase({
-			roadmap_exists: !!text.trim(),
-			sections_missing: evidence.roadmap.sections_missing || [],
-			health_status: validation.health_status || null,
-			validation_valid: validation.valid,
-			bootstrap_incomplete: bootstrap_inc,
-		})
-
-		const next_rec = recommendNextAction({
-			phase: phaseInfo.phase,
-			roadmap_exists: !!text.trim(),
-			schema_valid: validation.valid,
-			stale: gateState.checkpoint_stale,
-			validation_pending: false,
-			bootstrap_incomplete: bootstrap_inc,
-		})
-
-		const payload: any = {
-			action: "validate",
-			success: validation.valid,
-			ok: validation.valid,
-			phase: phaseInfo.phase,
-			workspace,
-			roadmap_path: roadmapPath,
-			validation: validation_dict,
-			bootstrap_completeness: completeness,
-			recommended_next_action: next_rec,
-			operator_summary:
-				validation.valid && bootstrap_complete
-					? "ROADMAP.md passes schema validation."
-					: validation.valid
-						? "ROADMAP.md passes schema but unfilled bootstrap template text remains — apply evidence autofill."
-						: "ROADMAP.md has schema errors — fix before treating checkpoint as complete.",
-			agent_next_call:
-				validation.valid && bootstrap_complete
-					? "Return Required Final Assistant Response summary."
-					: validation.valid
-						? "roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')."
-						: "Fix validation issues and rerun roadmap(action='validate').",
-		}
-
-		if (bootstrap_inc && validation.valid) {
-			enrichWithBootstrapFill(payload, text, evidence, true)
-		} else if (validation.valid) {
-			payload.project_steering_digest = buildProjectSteeringDigest(evidence.project_fingerprint || {})
-			payload.project_identity_line = payload.project_steering_digest.identity_line
-		}
-
-		return this.wrapClarityEnvelope(payload)
 	}
 
 	public async getTemplateBrief(workspace: string): Promise<any> {
@@ -2255,7 +2198,7 @@ export class RoadmapService {
 				steering_brief: (evidence.project_fingerprint || {}).steering_brief,
 			},
 			operator_summary:
-				"Evidence-driven skeleton — write to ROADMAP.md, apply remaining autofill if needed, then validate.",
+				"Evidence-driven draft for in-scope roadmap work. Preserve existing history; document diagnostics are optional.",
 			agent_next_call:
 				"Write skeleton to ROADMAP.md, then roadmap(action='apply_bootstrap_fill', context='write') if placeholders remain.",
 		}
@@ -2276,7 +2219,9 @@ export class RoadmapService {
 	public async applyBootstrapFillBrief(workspace: string, context = ""): Promise<any> {
 		const dryRun = !["write", "apply", "commit"].includes((context || "").trim().toLowerCase())
 		const result = await this.writeBootstrapAutofill(workspace, dryRun)
+		const status = await this.getOperationalStatus(workspace, "", "light")
 		const payload: any = {
+			...status,
 			action: "apply_bootstrap_fill",
 			...result,
 		}
@@ -2295,15 +2240,18 @@ export class RoadmapService {
 			payload.operator_summary =
 				`Applied ${result.applied_count} evidence replacement(s); schema ${valid ? "valid" : "invalid"}.` +
 				(remaining ? ` ${remaining} bootstrap phrase(s) remain.` : " Bootstrap fill complete.")
-			payload.agent_next_call = (validated.recommended_next_action || {}).command || "roadmap(action='validate')"
+			payload.agent_next_call = validated.agent_next_call ?? ""
 		} else if (dryRun) {
 			payload.operator_summary = result.operator_summary || "Autofill preview — pass context='write' to apply."
-			payload.agent_next_call = "roadmap(action='apply_bootstrap_fill', context='write') to write preview_text"
+			payload.preview_apply_command = result.bootstrap_autofill_preview?.applied_count
+				? "roadmap(action='apply_bootstrap_fill', context='write')"
+				: ""
 		}
 
-		const evidence = await this.gatherEvidence(workspace, null, "light")
-		payload.steering_brief = (evidence.project_fingerprint || {}).steering_brief
-		payload.project_archetype = (evidence.project_fingerprint || {}).project_archetype
+		if (!result.written && !result.bootstrap_autofill_preview?.applied_count) {
+			payload.operator_summary =
+				"No evidence-backed autofill changes available. Repeating autofill cannot resolve missing project decisions. Continue scoped work or clarify only a decision essential to it."
+		}
 		return this.wrapClarityEnvelope(payload)
 	}
 }
@@ -2817,7 +2765,7 @@ function bootstrapSkeletonFromEvidenceAutofilled(evidence: any): string {
 		anti_goals: must_not,
 		health_summary: health,
 		now_section: nowSection,
-		checkpoint_next_move: "Complete ROADMAP.md bootstrap fill, resolve placeholders, then validate schema.",
+		checkpoint_next_move: "Continue the assigned implementation; maintain affected roadmap sections when useful.",
 		code_soup_risk: risk,
 		centralization_recommendation: centralize,
 		recent_git_summary: git_summary,
@@ -2835,19 +2783,19 @@ function algorithmSteps(): string[] {
 		"4. Assess maintenance hotspots, repeated friction, and agent confusion.",
 		"5. Run code soup pre-audit for centralization risks.",
 		"6. Document decisions, recent checkpoint, and next moves.",
-		"7. Run schema validation on the final ROADMAP.md.",
+		"7. Finish the assigned outcome. Document diagnostics are optional, never a completion prerequisite.",
 	]
 }
 
 function agentInstructions(phase: string, evidence: any): string[] {
 	const fp = evidence.project_fingerprint || {}
 	const instructions = [
-		"Create or evolve ROADMAP.md at the workspace root only.",
+		"Create or evolve ROADMAP.md at the workspace root only when relevant to the assigned task. This briefing does not mandate an edit.",
 		"Keep Now to 1–5 actionable items; archive stale work instead of appending endlessly.",
 		"Review section 9 when architecture or risk changes; preserve unchanged assessments.",
 		"Use code_soup_pre_audit signals when writing section 9.",
 		"Mark uncertainty explicitly when evidence is missing.",
-		"Validate once after the final ROADMAP.md edit. Rerun only after fixing an error or receiving new evidence; then return the checkpoint summary.",
+		"All roadmap findings are advisory. Inspect document diagnostics only when useful to the assignment; never require a repair or repeated validation to finish.",
 	]
 	if (fp.steering_brief) {
 		instructions.push(`Project identity: ${fp.steering_brief}`)
@@ -2867,23 +2815,25 @@ function agentInstructions(phase: string, evidence: any): string[] {
 
 	if (phase === "bootstrap") {
 		instructions.push(
-			"First pass: draft all 12 sections from README, architecture docs, configs, git history, and code_soup_pre_audit.",
+			"If creating a roadmap is in scope, use the reference sections and available evidence. Missing evidence is not a reason to stall implementation.",
 		)
 	} else if (phase === "structure_repair") {
-		instructions.push("Repair missing sections while preserving Decision Log and Archive strategic memory.")
+		instructions.push("Missing sections are optional maintenance; preserve Decision Log and Archive strategic memory.")
 	} else if (phase === "coherence_recovery") {
 		instructions.push("Demote overloaded Now items, strengthen Maintenance Gravity, and recommend convergence.")
 	} else if (phase === "validate_pending") {
-		instructions.push("Fix schema validation errors reported by roadmap(action='validate').")
+		instructions.push("Document validation is optional; no roadmap repair is required to finish the assigned task.")
 	} else if (phase === "bootstrap_fill") {
 		instructions.push(
-			"Preview evidence autofill: roadmap(action='apply_bootstrap_fill'); apply with context='write', then validate.",
+			"Evidence autofill is optional: roadmap(action='apply_bootstrap_fill', context='write'). No preview or follow-up validation is required.",
 		)
 		instructions.push(
 			"Use bootstrap_fill_plan.tasks — each template_phrase maps to suggested_replacement from project_fingerprint and evidence.",
 		)
 	} else {
-		instructions.push("Update Recent Checkpoint (section 11) — replace the previous checkpoint with today's pass only.")
+		instructions.push(
+			"Update Recent Checkpoint only for meaningful new evidence or a requested checkpoint; unchanged observations do not require another edit or date refresh.",
+		)
 	}
 	return instructions
 }

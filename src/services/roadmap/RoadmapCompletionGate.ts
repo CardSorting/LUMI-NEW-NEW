@@ -1,6 +1,4 @@
-import { getRoadmapConfig } from "./RoadmapConfig"
-import { blockingClosedGates } from "./RoadmapGateCatalog"
-import { RoadmapService } from "./RoadmapService"
+import type { RoadmapConfig } from "./RoadmapConfig"
 
 export interface RoadmapCompletionBlock {
 	blocked: boolean
@@ -9,73 +7,28 @@ export interface RoadmapCompletionBlock {
 	blockingGates?: Array<{ id?: string; label: string; why: string; fix: string }>
 }
 
+/**
+ * @deprecated Compatibility API for older integrations. Roadmap findings are advisory.
+ * Completion must never load roadmap status, perform filesystem I/O, or schedule repairs.
+ */
 export async function evaluateRoadmapCompletionBlock(
-	workspace: string,
-	status?: Record<string, unknown>,
+	_workspace: string,
+	_status?: Record<string, unknown>,
 ): Promise<RoadmapCompletionBlock> {
-	const cfg = getRoadmapConfig()
-	if (!cfg.enabled) {
-		return { blocked: false }
-	}
-
-	const liveStatus = status || (await RoadmapService.getInstance().getOperationalStatus(workspace, "", "light"))
-
-	if (liveStatus.validation_pending && cfg.block_kanban_on_validation_pending) {
-		return {
-			blocked: true,
-			message:
-				"Task completion blocked: ROADMAP.md has pending modifications that must be validated first.\n" +
-				"Run: roadmap(action='validate') or /roadmap validate\n" +
-				"Diagnostic: /roadmap explain-gate",
-			retryCommand: "roadmap(action='validate')",
-		}
-	}
-
-	if (liveStatus.kanban_complete_allowed === false) {
-		const gate = (liveStatus.roadmap_gate || {}) as Record<string, unknown>
-		const blockingGates = (gate.blocking_gates || []) as Array<{ label: string; why: string; fix: string; id?: string }>
-		const closedGatesMsg = blockingGates.map((g) => `- ${g.label}: ${g.why}. Fix: ${g.fix}`).join("\n")
-		return {
-			blocked: true,
-			message:
-				"Task completion blocked by Roadmap Governance Gates:\n" +
-				(closedGatesMsg || "- Unknown gate closed") +
-				"\n\nFix the reported cause before retrying. Repeating validation on unchanged content cannot resolve it. " +
-				"If repair needs unavailable access or a user decision, report that blocker instead of rerunning checks.",
-			retryCommand: "roadmap(action='explain_gate')",
-			blockingGates,
-		}
-	}
-
 	return { blocked: false }
 }
 
-/** Kernel-style pre-completion gate — mirrors dietcode require_fresh_checkpoint_before_complete. */
-export async function requireFreshCheckpointBeforeComplete(workspace: string): Promise<string | null> {
-	const cfg = getRoadmapConfig()
-	if (!cfg.enabled) return null
-
-	const block = await evaluateRoadmapCompletionBlock(workspace)
-	if (!block.blocked) return null
-
-	if (block.blockingGates && block.blockingGates.length > 0) {
-		const first = block.blockingGates[0]
-		return (
-			`ROADMAP steering gate closed (${first.label}) — ${first.why}. ` +
-			`Fix: ${first.fix}. Diagnostic: /roadmap explain-gate`
-		)
-	}
-
-	return block.message || "ROADMAP steering gate closed — /roadmap explain-gate"
+/** @deprecated No checkpoint is required to finish a task. */
+export async function requireFreshCheckpointBeforeComplete(_workspace: string): Promise<string | null> {
+	return null
 }
 
+/** @deprecated Retained for integrations that display an unavailable-context notice. */
 export function failClosedCompletionMessage(): string {
-	return (
-		"Task completion blocked: roadmap gate evaluation failed.\n" +
-		"Run /roadmap doctor to diagnose, then /roadmap explain-gate if gates remain closed."
-	)
+	return "Roadmap context unavailable. Continue scoped work; no roadmap repair is required to finish."
 }
 
-export function isGateBlockingSchema(closedGates: Array<{ id?: string }>, cfg = getRoadmapConfig()): boolean {
-	return blockingClosedGates(closedGates as never, cfg).some((g) => g.id === "schema_valid")
+/** @deprecated Schema findings do not block task completion. */
+export function isGateBlockingSchema(_closedGates: Array<{ id?: string }>, _cfg?: RoadmapConfig): boolean {
+	return false
 }

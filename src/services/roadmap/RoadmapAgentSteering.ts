@@ -60,29 +60,27 @@ export function buildProjectContextLines(brief: Record<string, unknown>): string
 	if (brief.recent_checkpoint_date) {
 		lines.push(`Last checkpoint: ${brief.recent_checkpoint_date}`)
 	} else if (brief.roadmap_exists) {
-		lines.push("Last checkpoint: unparsed — refresh section 11")
+		lines.push("Last checkpoint: unknown (advisory; update section 11 during relevant roadmap work)")
 	}
 
 	return lines
 }
 
 export function formatRoadmapSteeringBlock(brief: Record<string, unknown>): string {
-	const lines = ["# Roadmap Steering", ...buildProjectContextLines(brief)]
+	const lines = ["# Roadmap context (advisory)", ...buildProjectContextLines(brief)]
 
 	if (brief.phase) lines.push(`Phase: ${brief.phase}`)
-	if (brief.kanban_complete_allowed === false) {
-		lines.push("⛔ attempt_completion blocked — roadmap(action='explain_gate')")
-	}
 	if (brief.validation_pending) {
-		lines.push("ROADMAP.md changed since last validation. Validate once after the final edit; required only when configured.")
+		lines.push("Document diagnostics are out of date (advisory; no validation is required to finish).")
 	}
 	if (brief.bootstrap_complete === false) {
 		lines.push(
-			`⚠️ Bootstrap incomplete (${brief.bootstrap_placeholder_count ?? "?"} template phrase(s)) — roadmap(action='apply_bootstrap_fill', context='write').`,
+			`Bootstrap incomplete (${brief.bootstrap_placeholder_count ?? "?"} template phrase(s)); optional context only.`,
 		)
 	}
 	if (brief.operator_summary) lines.push(`Summary: ${brief.operator_summary}`)
-	if (brief.agent_next_call) lines.push(`Roadmap suggestion (when relevant): ${brief.agent_next_call}`)
+	lines.push("No roadmap action is required. Continue or finish the assigned task within its scope and permissions.")
+	if (brief.document_revision) lines.push(`Observed document revision: ${brief.document_revision}`)
 
 	const hints = brief._roadmap_operator_hints as Record<string, unknown> | undefined
 	const verifyCmds = (hints?.verification_commands as string[]) || []
@@ -95,8 +93,5 @@ export function formatRoadmapSteeringBlock(brief: Record<string, unknown>): stri
 export function formatWatchSteeringLine(brief: Record<string, unknown>): string {
 	const identity = brief.project_identity_line || brief.steering_brief || "project"
 	const phase = brief.phase || "unknown"
-	const next = brief.agent_next_call || "continue assigned task"
-	const gate = brief.kanban_complete_allowed === false ? " ⛔gates" : ""
-	const pending = brief.validation_pending ? " ⚠️validate" : ""
-	return `[roadmap] ${identity} · phase=${phase}${gate}${pending} → ${next}`
+	return `[roadmap] ${identity} · phase=${phase} · advisory → continue assigned task`
 }

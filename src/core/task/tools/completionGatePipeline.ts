@@ -11,8 +11,6 @@ import { buildCompletionGateMessage, runCompletionAudit } from "@shared/audit/co
 import { parseIntentThresholdOverrides } from "@shared/audit/gatePolicy"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { Logger } from "@shared/services/Logger"
-import { evaluateRoadmapCompletionBlock, failClosedCompletionMessage } from "@/services/roadmap/RoadmapCompletionGate"
-import { RoadmapService } from "@/services/roadmap/RoadmapService"
 import {
 	appendCompletionGateRetryGuidance,
 	buildCompletionAgentErrorMessage,
@@ -28,6 +26,7 @@ import {
 	recordCompletionAttemptTime,
 	recordCompletionGateBlockEvent,
 	recordCompletionPreflightFailure,
+	retireRoadmapCompletionState,
 	validateCompletionAttemptCooldown,
 	validateCompletionDemoCommand,
 	validateCompletionResultExcludesChecklist,
@@ -191,6 +190,9 @@ export function evaluateCompletionGateReadiness(
 	},
 	validateQuality: (result: string) => string | null = validateCompletionResultQuality,
 ): CompletionGateReadinessIssue[] {
+	// Readiness is non-mutating, including migration of legacy roadmap-only failures.
+	config = { ...config, taskState: { ...config.taskState } } as TaskConfig
+	retireRoadmapCompletionState(config)
 	if (isCompletionGateCircuitBreakerTripped(config)) {
 		const message = getCompletionGateCircuitBreakerError(config)
 		return message ? [{ stage: "circuit_breaker", message }] : []
@@ -213,7 +215,7 @@ export function evaluateCompletionGateReadiness(
 	return issues
 }
 
-/** Async dry-run — includes roadmap governance stage (mirrors full preflight minus audit). */
+/** Async API retained for callers; optional roadmap observations are not preflight work. */
 export async function evaluateCompletionGateReadinessAsync(
 	config: TaskConfig,
 	params: {
@@ -222,19 +224,9 @@ export async function evaluateCompletionGateReadinessAsync(
 		command?: string
 	},
 	validateQuality: (result: string) => string | null = validateCompletionResultQuality,
-	logPrefix = "CompletionGateReadiness",
+	_logPrefix = "CompletionGateReadiness",
 ): Promise<CompletionGateReadinessIssue[]> {
-	const issues = evaluateCompletionGateReadiness(config, params, validateQuality)
-	if (issues.some((issue) => issue.stage === "circuit_breaker")) {
-		return issues
-	}
-
-	const roadmapError = await evaluateRoadmapCompletionGateError(config, logPrefix, { dryRun: true })
-	if (roadmapError) {
-		issues.push({ stage: "roadmap", message: roadmapError })
-	}
-
-	return issues
+	return evaluateCompletionGateReadiness(config, params, validateQuality)
 }
 
 export async function runCompletionPreflightChecks(
@@ -244,7 +236,7 @@ export async function runCompletionPreflightChecks(
 		taskProgress?: string
 		command?: string
 	},
-	logPrefix: string,
+	_logPrefix: string,
 	checks: {
 		validateQuality: (result: string) => string | null
 		onFailure: (config: TaskConfig) => void
@@ -274,50 +266,15 @@ export async function runCompletionPreflightChecks(
 		}
 	}
 
-	const roadmapError = await evaluateRoadmapCompletionGateError(config, logPrefix)
-	if (roadmapError) {
-		return finalizePreflightError(roadmapError, config, gateContext)
-	}
-
 	return null
 }
 
+/** @deprecated Roadmap observations have no completion authority. No I/O or retry pressure. */
 export async function evaluateRoadmapCompletionGateError(
-	config: TaskConfig,
-	logPrefix: string,
-	options?: { dryRun?: boolean },
+	_config: TaskConfig,
+	_logPrefix: string,
+	_options?: { dryRun?: boolean },
 ): Promise<string | null> {
-	// A helper returns a scoped handoff. Workspace completion belongs to the parent,
-	// and helpers may not even have the roadmap tool needed to repair these gates.
-	if (config.isSubagentExecution) return null
-	const circuitBreakerMessage = getCompletionGateCircuitBreakerError(config)
-	if (circuitBreakerMessage) {
-		return circuitBreakerMessage
-	}
-
-	const roadmapService = RoadmapService.getInstance()
-	if (!roadmapService.isEnabled()) {
-		return null
-	}
-
-	try {
-		const block = await evaluateRoadmapCompletionBlock(config.cwd)
-		if (block.blocked) {
-			if (!options?.dryRun) {
-				config.taskState.consecutiveMistakeCount++
-			}
-			return block.message || failClosedCompletionMessage()
-		}
-	} catch (error) {
-		Logger.error(`[${logPrefix}] Failed to evaluate Roadmap Governance Gates:`, error)
-		if (roadmapService.getConfig().fail_closed_completion_gates) {
-			if (!options?.dryRun) {
-				config.taskState.consecutiveMistakeCount++
-			}
-			return failClosedCompletionMessage()
-		}
-	}
-
 	return null
 }
 

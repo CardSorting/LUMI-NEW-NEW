@@ -694,7 +694,6 @@ export class ToolExecutor {
 		) {
 			try {
 				const { preflightRoadmapWrite, targetsRoadmapFile } = require("@/services/roadmap/RoadmapNativeBridge")
-				const { getRoadmapConfig } = require("@/services/roadmap/RoadmapConfig")
 				if (targetsRoadmapFile(block.name, block.params)) {
 					const preflight = await preflightRoadmapWrite(block.name, block.params, this.cwd)
 					if (preflight.block) {
@@ -707,9 +706,9 @@ export class ToolExecutor {
 			} catch {
 				const { getRoadmapConfig } = require("@/services/roadmap/RoadmapConfig")
 				const cfg = getRoadmapConfig()
-				if (cfg.enabled && cfg.fail_closed_completion_gates) {
+				if (cfg.enabled && cfg.block_writes_outside_workspace) {
 					const message =
-						"ROADMAP write guard failed — cannot verify write target safely. Run roadmap(action='doctor')."
+						"ROADMAP write guard failed — cannot verify this write target safely. No file was changed. Continue independent work; retry this write only after the target is verifiable."
 					await this.say("error_retry" as any, message)
 					this.taskState.consecutiveMistakeCount++
 					this.pushToolResult(formatResponse.toolError(message), block)
@@ -744,7 +743,7 @@ export class ToolExecutor {
 			executionSuccess = !isToolFailure(toolResult)
 			this.taskState.executionProgress.record(block.name, block.params, toolResult)
 
-			// Roadmap post-write: record mutation and attach validate nudge
+			// Roadmap post-write: invalidate cached evidence and attach an advisory hint (no I/O).
 			if (
 				executionSuccess &&
 				(block.name === DietCodeDefaultTool.FILE_NEW ||

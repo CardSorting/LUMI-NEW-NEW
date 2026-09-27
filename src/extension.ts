@@ -75,6 +75,7 @@ function setupRoadmapFileWatcher(context: vscode.ExtensionContext): void {
 				const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspace, "ROADMAP.md"))
 				watcher.onDidChange(onChange)
 				watcher.onDidCreate(onChange)
+				watcher.onDidDelete(onChange)
 				context.subscriptions.push(watcher)
 				return { dispose: () => watcher.dispose() }
 			} catch {

@@ -18,27 +18,17 @@ export function formatCockpitReport(payload: Record<string, unknown>): string {
 	if (payload.recent_checkpoint_date) lines.push(`Last checkpoint: ${payload.recent_checkpoint_date}`)
 	if (payload.code_soup_risk) lines.push(`Code soup risk: ${payload.code_soup_risk}`)
 	if (payload.now_item_count !== undefined) lines.push(`Now items: ${payload.now_item_count}`)
-	if (payload.validation_pending) lines.push("⚠️ validation_pending — roadmap(action='validate')")
+	if (payload.validation_pending) lines.push("Document diagnostics out of date (advisory)")
 	if (payload.bootstrap_complete === false) {
 		lines.push(`⚠️ bootstrap incomplete (${payload.bootstrap_placeholder_count ?? "?"} phrases)`)
-	}
-
-	const gate = (payload.roadmap_gate || {}) as Record<string, unknown>
-	if (gate.kanban_complete_allowed === false) {
-		lines.push("", "⛔ attempt_completion blocked")
-		const blocking = (gate.blocking_gates as Array<Record<string, unknown>>) || []
-		for (const g of blocking.slice(0, 3)) {
-			lines.push(`  • ${g.label}: ${g.fix}`)
-		}
 	}
 
 	lines.push("", `Write guard: ROADMAP.md at ${payload.roadmap_path || "workspace root"}`)
 	const verify = ((payload.project_steering_digest as Record<string, unknown>)?.verification_commands as string[]) || []
 	if (verify.length > 0) lines.push(`Verify: ${verify[0]}`)
-	lines.push(
-		"",
-		`→ ${(payload.recommended_next_action as Record<string, unknown>)?.command || payload.agent_next_call || "roadmap(action='guide')"}`,
-	)
+	lines.push("", "No required roadmap action. Continue or finish the assigned task.")
+	const advisory = (payload.advisory_actions || []) as Array<Record<string, unknown>>
+	if (advisory.length) lines.push(`Optional advice: ${advisory.map((item) => item.label).join("; ")}`)
 	return lines.join("\n")
 }
 
@@ -46,8 +36,8 @@ export async function buildCockpitPayload(roadmapService: RoadmapService, worksp
 	const cfg = getRoadmapConfig()
 	const status = await roadmapService.getOperationalStatus(workspace, "", "standard")
 	const gate = (status.roadmap_gate || {}) as Record<string, unknown>
-	const lastError = await readLastError()
-	const currentProgress = await readCurrentProgress()
+	const lastError = await readLastError(workspace)
+	const currentProgress = await readCurrentProgress(workspace)
 
 	const nextRec =
 		(status.recommended_next_action as { command?: string; detail?: string }) ||

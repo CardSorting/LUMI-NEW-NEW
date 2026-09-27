@@ -55,12 +55,12 @@ export const COMPLETION_PREFLIGHT_STAGES = [
 	"cooldown",
 	"duplicate",
 	"demo_command",
-	"roadmap",
 	"audit",
 	"double_check",
 ] as const
 
-export type CompletionPreflightStage = (typeof COMPLETION_PREFLIGHT_STAGES)[number]
+// "roadmap" is retained only to decode legacy history; it is not an executable stage.
+export type CompletionPreflightStage = (typeof COMPLETION_PREFLIGHT_STAGES)[number] | "roadmap"
 
 /** Throttle-only blocks — do not consume circuit-breaker budget (mirrors HTTP 429 vs 4xx). */
 export const COMPLETION_SOFT_BLOCK_REASONS = new Set<CompletionPreflightReason>(["retry_cooldown", "double_check"])
@@ -464,9 +464,7 @@ const COMPLETION_GATE_PLAYBOOK_STEPS: Partial<Record<CompletionPreflightReason, 
 		"Retry attempt_completion with the live demo command.",
 	],
 	roadmap_gate: [
-		"Run the roadmap governance command suggested in the block message.",
-		"Confirm gates pass locally before retrying completion.",
-		"Update result to reflect governance clearance.",
+		"Roadmap completion gates have been retired. Continue or finish the assigned task; no roadmap repair is required.",
 	],
 	audit_gate: [
 		"Read critical audit violations and fix root causes in code.",
@@ -528,7 +526,7 @@ export function buildCompletionGatePipelineBrief(failedStage?: CompletionPreflig
 
 /** Returns stages that run after a failure — helps agents prioritize remaining work. */
 export function getRemainingCompletionGateStages(failedStage: CompletionPreflightStage): CompletionPreflightStage[] {
-	const index = COMPLETION_PREFLIGHT_STAGES.indexOf(failedStage)
+	const index = COMPLETION_PREFLIGHT_STAGES.indexOf(failedStage as (typeof COMPLETION_PREFLIGHT_STAGES)[number])
 	if (index === -1 || index >= COMPLETION_PREFLIGHT_STAGES.length - 1) {
 		return []
 	}
@@ -549,7 +547,7 @@ export const COMPLETION_PREFLIGHT_STAGE_HINTS: Partial<Record<CompletionPrefligh
 	cooldown: "Wait for backoff before retrying after a gate block",
 	duplicate: "Change result or workspace before re-submitting",
 	demo_command: "Demo must run real behavior — not echo/cat",
-	roadmap: "Clear roadmap governance gates locally",
+	roadmap: "Retired: roadmap observations are advisory",
 	audit: "Fix critical audit violations and re-verify",
 	double_check: "Re-verify checklist, then call attempt_completion again",
 }
@@ -604,7 +602,9 @@ export function getCompletionGatePressureLevel(config: TaskConfig): CompletionGa
 
 /** CI-style stage progress — shows passed/failed/pending per pipeline stage. */
 export function buildCompletionGateStageProgressBlock(failedStage?: CompletionPreflightStage): string {
-	const failedIndex = failedStage ? COMPLETION_PREFLIGHT_STAGES.indexOf(failedStage) : -1
+	const failedIndex = failedStage
+		? COMPLETION_PREFLIGHT_STAGES.indexOf(failedStage as (typeof COMPLETION_PREFLIGHT_STAGES)[number])
+		: -1
 	const stageElements = COMPLETION_PREFLIGHT_STAGES.map((stage, index) => {
 		let status: "passed" | "failed" | "pending" | "skipped" = "pending"
 		if (failedIndex === -1) {
@@ -1016,7 +1016,6 @@ export function classifyCompletionPreflightReason(message: string): CompletionPr
 	if (message.includes("task_progress has")) return "task_progress_incomplete"
 	if (message.includes("maximum completion gate retries")) return "circuit_breaker"
 	if (message.includes("re-verify your work")) return "double_check"
-	if (message.includes("Roadmap") || message.includes("roadmap")) return "roadmap_gate"
 	if (message.includes("hardening audit evaluation failed")) return "audit_error"
 	if (message.includes("hardening audit") || message.includes("Completion Gate") || message.includes("violations")) {
 		return "audit_gate"
@@ -1310,7 +1309,7 @@ export function buildCompletionPreflightRecoveryHint(reason: CompletionPreflight
 		case "circuit_breaker":
 			return "Fix the reported cause or run relevant validation, then retry completion in this task."
 		case "roadmap_gate":
-			return "Run the suggested roadmap command to clear governance gates."
+			return "Roadmap findings are advisory. Continue or finish the assigned task."
 		case "audit_gate":
 			return "Address critical audit violations in the workspace, run verification, then retry with an updated result."
 		case "double_check":
@@ -1458,11 +1457,42 @@ function getCompletionGateCircuitBreakerMessage(config: TaskConfig): string | nu
 }
 
 export function getCompletionGateCircuitBreakerError(config: TaskConfig): string | null {
+	retireRoadmapCompletionState(config)
 	return getCompletionGateCircuitBreakerMessage(config)
 }
 
+/** Remove obsolete roadmap retry pressure without discarding independent audit failures. */
+export function retireRoadmapCompletionState(config: TaskConfig): void {
+	const state = config.taskState
+	const history = state.completionGateBlockHistory ?? []
+	if (state.lastCompletionBlockReason !== "roadmap_gate" && !history.some((entry) => entry.reason === "roadmap_gate")) return
+	let retiredChain = false
+	let removed = 0
+	const retained = history.filter((entry) => {
+		if (entry.reason === "roadmap_gate") retiredChain = true
+		else if (!["duplicate_submission", "retry_cooldown", "circuit_breaker"].includes(entry.reason)) retiredChain = false
+		if (!retiredChain) return true
+		if (!entry.soft && entry.reason !== "circuit_breaker") removed++
+		return false
+	})
+	const hasIndependentFailure = retained.some((entry) => !entry.soft && entry.reason !== "circuit_breaker")
+	state.completionGateBlockCount = hasIndependentFailure ? Math.max(0, (state.completionGateBlockCount ?? 0) - removed) : 0
+	state.completionGateBlockHistory = retained
+	state.consecutiveMistakeCount = Math.max(0, state.consecutiveMistakeCount - removed)
+	state.completionGateObservabilityEnvelope = undefined
+	state.completionGatePressureLevel = undefined
+	state.lastProactiveGuidanceBlockCount = undefined
+	if (retiredChain || state.lastCompletionBlockReason === "roadmap_gate") {
+		clearCompletionGateObservabilityState(config)
+		clearBlockedCompletionResultFingerprint(config)
+		state.lastCompletionAttemptAt = undefined
+		state.lastGateBlockCheckpointHash = undefined
+		state.lastGateBlockWorkspaceRevision = undefined
+	}
+}
+
 export function checkCompletionGateCircuitBreaker(config: TaskConfig): ToolResponse | null {
-	const message = getCompletionGateCircuitBreakerMessage(config)
+	const message = getCompletionGateCircuitBreakerError(config)
 	if (!message) {
 		return null
 	}
@@ -1498,6 +1528,8 @@ export function recordCompletionGateBlockEvent(
 	reason: CompletionPreflightReason,
 	options?: { result?: string; checkpointHash?: string },
 ): number {
+	// Older callers must not recreate retired roadmap retry pressure.
+	if (reason === "roadmap_gate") return config.taskState.completionGateBlockCount ?? 0
 	if (reason === "circuit_breaker") {
 		config.taskState.consecutiveMistakeCount++
 		getOrCreateCompletionGateSessionId(config)

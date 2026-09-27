@@ -1,55 +1,43 @@
-import * as fs from "fs/promises"
 import * as path from "path"
 import { getRoadmapConfig } from "./RoadmapConfig"
-import type { RoadmapValidation } from "./RoadmapSchema"
+import { readRoadmapDocument } from "./RoadmapDocument"
 
 export type EvidenceTier = "light" | "standard" | "full"
 
 export interface WorkspaceSnapshot {
 	workspace: string
-	roadmapPath: string
-	roadmapMtimeMs: number | null
 	tier: EvidenceTier
 	evidence: Record<string, unknown>
-	validation: RoadmapValidation | null
-	gateState: Record<string, unknown>
 	cachedAt: number
 }
 
+// Cache expensive evidence, never decisions about current content or policy.
 const snapshotCache = new Map<string, WorkspaceSnapshot>()
-
-function cacheKey(workspace: string, tier: EvidenceTier, roadmapMtimeMs: number | null): string {
-	return `${path.resolve(workspace)}::${tier}::${roadmapMtimeMs ?? "none"}`
-}
-
-async function roadmapMtime(roadmapPath: string): Promise<number | null> {
-	try {
-		const stat = await fs.stat(roadmapPath)
-		return stat.mtimeMs
-	} catch {
-		return null
-	}
-}
+const MAX_SNAPSHOTS = 64
 
 export async function getCachedSnapshotKey(workspace: string, tier: EvidenceTier): Promise<string> {
-	const roadmapPath = path.join(workspace, "ROADMAP.md")
-	const mtime = await roadmapMtime(roadmapPath)
-	return cacheKey(workspace, tier, mtime)
+	return (await buildSnapshotKey(workspace, tier)).key
 }
 
 export function getSnapshotFromCache(key: string): WorkspaceSnapshot | undefined {
 	const entry = snapshotCache.get(key)
 	if (!entry) return undefined
 	const ttlMs = getRoadmapConfig().evidence_cache_ttl_seconds * 1000
-	if (Date.now() - entry.cachedAt > ttlMs) {
+	if (Date.now() - entry.cachedAt >= ttlMs) {
 		snapshotCache.delete(key)
 		return undefined
 	}
-	return entry
+	return structuredClone(entry)
 }
 
 export function setSnapshotCache(key: string, snapshot: WorkspaceSnapshot): void {
-	snapshotCache.set(key, snapshot)
+	snapshotCache.delete(key)
+	snapshotCache.set(key, structuredClone(snapshot))
+	while (snapshotCache.size > MAX_SNAPSHOTS) {
+		const oldest = snapshotCache.keys().next()
+		if (oldest.done) break
+		snapshotCache.delete(oldest.value)
+	}
 }
 
 export function invalidateSnapshotCache(workspace?: string): void {
@@ -65,11 +53,7 @@ export function invalidateSnapshotCache(workspace?: string): void {
 	}
 }
 
-export async function buildSnapshotKey(
-	workspace: string,
-	tier: EvidenceTier,
-): Promise<{ key: string; roadmapPath: string; mtime: number | null }> {
-	const roadmapPath = path.join(workspace, "ROADMAP.md")
-	const mtime = await roadmapMtime(roadmapPath)
-	return { key: cacheKey(workspace, tier, mtime), roadmapPath, mtime }
+export async function buildSnapshotKey(workspace: string, tier: EvidenceTier) {
+	const document = await readRoadmapDocument(workspace)
+	return { ...document, key: `${path.resolve(workspace)}::${tier}::${document.revision}` }
 }

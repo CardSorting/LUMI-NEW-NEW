@@ -3,7 +3,6 @@
  * One bundle for agents, operators, and progress snapshots.
  */
 import * as path from "path"
-import { recommendNextAction } from "./RoadmapOperator"
 import { RoadmapService } from "./RoadmapService"
 
 const STEERING_PAYLOAD_KEYS = [
@@ -67,25 +66,13 @@ export async function buildSteeringContext(workspace: string): Promise<Record<st
 	const digest = (status.project_steering_digest || {}) as Record<string, unknown>
 	const gate = (status.roadmap_gate || {}) as Record<string, unknown>
 
-	let agentNextCall = String(status.agent_next_call ?? "")
-	if (status.bootstrap_complete === false && status.roadmap_exists) {
-		const nextRec = recommendNextAction({
-			phase: "bootstrap_fill",
-			roadmap_exists: true,
-			bootstrap_incomplete: true,
-		})
-		agentNextCall = nextRec.command
-	} else if (!status.roadmap_exists) {
-		agentNextCall = recommendNextAction({ roadmap_exists: false }).command
-	}
-
 	return {
 		ok: true,
 		workspace: ws,
 		workspace_source: "explicit",
 		roadmap_path: roadmapPath,
 		roadmap_exists: !!status.roadmap_exists,
-		workspace_safe: true,
+		workspace_safe: gate.checkpoint_allowed === true,
 		bootstrap_complete: status.bootstrap_complete,
 		bootstrap_placeholder_count: status.bootstrap_placeholder_count,
 		health_status: status.health_status,
@@ -100,7 +87,7 @@ export async function buildSteeringContext(workspace: string): Promise<Record<st
 		kanban_complete_allowed: status.kanban_complete_allowed,
 		validation_pending: status.validation_pending,
 		phase: status.phase,
-		agent_next_call: agentNextCall,
+		agent_next_call: status.agent_next_call ?? "",
 		recommended_next_action: status.recommended_next_action,
 		...fp,
 	}
@@ -127,7 +114,7 @@ export function mergeSteeringFields(
 	if (steering.project_identity_line && !out.project_identity_line) {
 		out.project_identity_line = steering.project_identity_line
 	}
-	if (steering.agent_next_call && !out.agent_next_call) {
+	if (steering.agent_next_call != null && out.agent_next_call == null) {
 		out.agent_next_call = steering.agent_next_call
 	}
 	if (steering.recommended_next_action && !out.recommended_next_action) {

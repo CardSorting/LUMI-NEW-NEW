@@ -1,12 +1,6 @@
 import * as assert from "assert"
 import { DEFAULT_ROADMAP_CONFIG } from "../RoadmapConfig"
-import {
-	blockingClosedGates,
-	buildGateStateFromInputs,
-	evaluateGateChecks,
-	type GateClosedEntry,
-	type GateInputs,
-} from "../RoadmapGateCatalog"
+import { blockingClosedGates, buildGateStateFromInputs, evaluateGateChecks, type GateInputs } from "../RoadmapGateCatalog"
 
 function baseInputs(overrides: Partial<GateInputs> = {}): GateInputs {
 	return {
@@ -49,7 +43,7 @@ describe("RoadmapGateCatalog", () => {
 		assert.ok(state.closed_gates.every((gate) => !gate.blocks_kanban_complete))
 	})
 
-	it("keeps repair available while explicitly required checks block completion", async () => {
+	it("legacy gate flags cannot restore completion authority", async () => {
 		const state = await buildGateStateFromInputs(
 			baseInputs({
 				config: {
@@ -62,32 +56,34 @@ describe("RoadmapGateCatalog", () => {
 				freshness: { stale: true },
 			}),
 		)
-		assert.strictEqual(state.kanban_complete_allowed, false)
+		assert.strictEqual(state.kanban_complete_allowed, true)
 		assert.strictEqual(state.checkpoint_allowed, true)
-		assert.deepStrictEqual(
-			state.blocking_gates.map((gate) => gate.id),
-			["validation_current", "bootstrap_complete"],
-		)
+		assert.deepStrictEqual(state.blocking_gates, [])
+		assert.strictEqual(state.mode, "advisory")
+		assert.strictEqual(state.preferred_command, "")
+		assert.ok(state.findings.some((item) => item.id === "validation_current"))
+		assert.ok(state.findings.some((item) => item.id === "bootstrap_complete"))
 		assert.strictEqual(state.closed_gates.find((gate) => gate.id === "checkpoint_fresh")?.blocks_kanban_complete, false)
 	})
 
 	it("continues to guard checkpoint writes in an extension installation", async () => {
 		const state = await buildGateStateFromInputs(baseInputs({ workspace: "/tmp/.vscode/extensions/lumi" }))
 		assert.strictEqual(state.checkpoint_allowed, false)
-		assert.strictEqual(state.kanban_complete_allowed, false)
+		assert.strictEqual(state.kanban_complete_allowed, true)
 	})
 
-	it("blocks completion on validation_pending when configured", () => {
+	it("reports pending validation without blocking, even with a legacy override", () => {
 		const { closed } = evaluateGateChecks(
 			baseInputs({
 				workspace_state: { validation_pending: true },
 			}),
 		)
 		const blocking = blockingClosedGates(closed, { ...DEFAULT_ROADMAP_CONFIG, block_kanban_on_validation_pending: true })
-		assert.ok(blocking.some((g) => g.id === "validation_current"))
+		assert.deepStrictEqual(blocking, [])
+		assert.ok(closed.some((item) => item.id === "validation_current"))
 	})
 
-	it("blocks completion on invalid schema when block_kanban_on_invalid_schema is true", () => {
+	it("reports invalid schema without blocking, even with a legacy override", () => {
 		const { closed } = evaluateGateChecks(
 			baseInputs({
 				validation: {
@@ -103,10 +99,8 @@ describe("RoadmapGateCatalog", () => {
 			...DEFAULT_ROADMAP_CONFIG,
 			block_kanban_on_invalid_schema: true,
 		})
-		assert.ok(
-			blocking.some((g: GateClosedEntry) => g.id === "schema_valid"),
-			"invalid schema should block when block_kanban_on_invalid_schema=true",
-		)
+		assert.deepStrictEqual(blocking, [])
+		assert.ok(closed.some((item) => item.id === "schema_valid"))
 	})
 
 	it("does not block on invalid schema when block_kanban_on_invalid_schema is false", () => {

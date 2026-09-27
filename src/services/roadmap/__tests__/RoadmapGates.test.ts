@@ -16,7 +16,7 @@ describe("RoadmapGates", () => {
 			bootstrap_incomplete: false,
 		})
 		assert.strictEqual(phase.phase, "bootstrap")
-		assert.match(phase.agent_next_call, /checkpoint/)
+		assert.strictEqual(phase.agent_next_call, "")
 	})
 
 	it("determinePhase returns bootstrap_fill when placeholders remain", () => {
@@ -30,10 +30,10 @@ describe("RoadmapGates", () => {
 		assert.strictEqual(phase.phase, "bootstrap_fill")
 	})
 
-	it("recommendNextAction uses roadmap tool commands not slash paths", () => {
+	it("schema findings do not schedule a diagnostic loop", () => {
 		const rec = recommendNextAction({ schema_valid: false, roadmap_exists: true })
-		assert.match(rec.command, /roadmap\(action=/)
-		assert.doesNotMatch(rec.command, /^\/roadmap/)
+		assert.strictEqual(rec.command, "")
+		assert.strictEqual(rec.action, "continue_task")
 	})
 
 	it("roadmap evaluation errors are advisory by default", () => {

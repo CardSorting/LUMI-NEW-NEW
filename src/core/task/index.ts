@@ -1283,19 +1283,8 @@ export class Task {
 
 		this.taskState.isInitialized = true
 
-		// Auto-bootstrap ROADMAP.md when missing (evidence-driven, non-blocking)
-		try {
-			const { initRoadmapSession } = await import("@/services/roadmap/RoadmapLifecycle")
-			const initResult = await initRoadmapSession(this.cwd, this.taskId)
-			if (initResult?.bootstrap && (initResult.bootstrap as Record<string, unknown>).written) {
-				Logger.info("[Roadmap] Auto-bootstrapped ROADMAP.md from workspace evidence")
-			}
-			if (Array.isArray(initResult?.skills_installed) && (initResult.skills_installed as string[]).length > 0) {
-				Logger.info("[Roadmap] Installed workspace skill:", (initResult.skills_installed as string[]).join(", "))
-			}
-		} catch (error) {
-			Logger.warn("[Roadmap] Session roadmap init skipped:", error)
-		}
+		// Roadmap context is read-only and time-bounded during prompt assembly. Task
+		// startup never bootstraps files, installs skills, or waits for roadmap diagnostics.
 
 		const imageBlocks: DietCodeImageContentBlock[] = formatResponse.imageBlocks(images)
 
@@ -1938,13 +1927,6 @@ export class Task {
 				this.FocusChainManager.dispose()
 			}
 		} finally {
-			try {
-				const { finalizeRoadmapSession } = await import("@/services/roadmap/RoadmapLifecycle")
-				await finalizeRoadmapSession(this.cwd, this.taskId)
-			} catch (error) {
-				Logger.warn("[Roadmap] Session finalize skipped:", error)
-			}
-
 			// Release task folder lock
 			if (this.taskLockAcquired) {
 				try {

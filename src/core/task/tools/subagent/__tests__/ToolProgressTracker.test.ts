@@ -4,6 +4,81 @@ import { formatResponse } from "@/core/prompts/responses"
 import { ToolProgressTracker } from "../../../ToolProgressTracker"
 
 describe("agent progress tracking", () => {
+	it("stops roadmap rescans despite changing timestamps, echoed plans, formatting, or the checkpoint alias", () => {
+		const tracker = new ToolProgressTracker()
+		for (let i = 0; i < 9; i++) {
+			tracker.record(
+				i % 2 ? "roadmap" : "roadmap_checkpoint",
+				{ action: i % 2 ? "checkpoint" : undefined, context: `Re-map workspace ${i}`, user_request: `Plan ${i}` },
+				JSON.stringify(
+					{
+						action: "checkpoint",
+						success: true,
+						user_request: `Plan ${i}`,
+						evidence: { gathered_at: `${i}`, readmes: [], configs: [], _roadmap_text: "# Project direction" },
+						roadmap_gate: {
+							kanban_complete_allowed: true,
+							workspace_state: { updated_at: `${i}`, last_validated_at: `${i}`, schema_valid: true },
+						},
+					},
+					null,
+					i % 2 ? 2 : 0,
+				),
+			)
+			assert.equal(tracker.finishTurn(), i === 8 ? "handoff" : i === 3 ? "redirect" : "continue")
+		}
+	})
+
+	it("does not let self-generated roadmap activity renew a stalled loop", () => {
+		for (const action of ["progress", "watch"]) {
+			const tracker = new ToolProgressTracker()
+			for (let i = 0; i < 9; i++) {
+				tracker.record(
+					"roadmap",
+					{ action, context: `--view-${i}` },
+					JSON.stringify({
+						action,
+						success: true,
+						phase: "checkpoint",
+						context_mode: `--view-${i}`,
+						current: { action, event_id: `${i}`, payload: { task_progress: `Replanning ${i}` } },
+						recent_events: Array.from({ length: i }, (_, j) => ({ action, event_id: `${j}` })),
+						events: [{ event_id: `${i}` }],
+						report: `Timeline ${i}`,
+						workspace_state: { schema_valid: true, updated_at: `${i}`, last_validated_at: `${i}` },
+					}),
+				)
+				assert.equal(tracker.finishTurn(), i === 8 ? "handoff" : i === 3 ? "redirect" : "continue")
+			}
+		}
+	})
+
+	it("retains meaningful roadmap evidence, including changing gates and source contents", () => {
+		const tracker = new ToolProgressTracker()
+		for (const evidence of [
+			{ roadmap_gate: { kanban_complete_allowed: false } },
+			{ roadmap_gate: { kanban_complete_allowed: true } },
+			{ evidence: { _roadmap_text: "# New direction" } },
+			{ evidence: { configs: [{ path: "package.json", excerpt: "new starter" }] } },
+		]) {
+			for (let i = 0; i < 3; i++) tracker.finishTurn()
+			tracker.record("roadmap", { action: "checkpoint" }, JSON.stringify({ success: true, ...evidence }))
+			assert.equal(tracker.finishTurn(), "continue")
+		}
+	})
+
+	it("does not treat changing roadmap failures as progress or strip timestamps from ordinary file contents", () => {
+		const tracker = new ToolProgressTracker()
+		for (let i = 0; i < 8; i++) {
+			tracker.record("roadmap", { action: "checkpoint" }, JSON.stringify({ success: false, message: `failure ${i}` }))
+			assert.equal(tracker.finishTurn(), i === 7 ? "handoff" : i === 2 ? "redirect" : "continue")
+		}
+		for (let i = 0; i < 10; i++) {
+			tracker.record("read_file", { path: "data.json" }, JSON.stringify({ updated_at: i }))
+			assert.equal(tracker.finishTurn(), "continue")
+		}
+	})
+
 	it("does not renew work by polling execution inventory, even when sibling state changes", () => {
 		const tracker = new ToolProgressTracker()
 		for (let i = 0; i < 8; i++) {

@@ -3,7 +3,6 @@
  * Mirrors dietcode workspace_state.record_file_mutation for out-of-band edits.
  */
 import * as path from "path"
-import { invalidateRoadmapWorkspaceCache } from "./RoadmapCache"
 import { getRoadmapConfig } from "./RoadmapConfig"
 import { RoadmapService } from "./RoadmapService"
 
@@ -12,7 +11,6 @@ export async function handleExternalRoadmapChange(workspace: string, source = "e
 	if (!cfg.enabled) return
 
 	const ws = path.resolve(workspace)
-	invalidateRoadmapWorkspaceCache(ws)
 	await RoadmapService.getInstance().recordFileMutation(ws, source, "ROADMAP.md")
 }
 

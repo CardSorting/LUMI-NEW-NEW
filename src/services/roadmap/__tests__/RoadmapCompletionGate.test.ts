@@ -39,7 +39,7 @@ describe("RoadmapCompletionGate", () => {
 		assert.strictEqual(block.blocked, false)
 	})
 
-	it("blocks completion when validation_pending in workspace state", async () => {
+	it("ignores pending state and retired blocking settings without modifying the document", async () => {
 		await fs.mkdir(path.join(tmpDir, ".dietcode"), { recursive: true })
 		await fs.writeFile(
 			path.join(tmpDir, ".dietcode", "roadmap-state.json"),
@@ -49,11 +49,11 @@ describe("RoadmapCompletionGate", () => {
 		await fs.writeFile(path.join(tmpDir, "ROADMAP.md"), "# Roadmap\n", "utf8")
 
 		const block = await evaluateRoadmapCompletionBlock(tmpDir)
-		assert.strictEqual(block.blocked, true)
-		assert.match(block.message || "", /validate/)
+		assert.strictEqual(block.blocked, false)
+		assert.strictEqual(await fs.readFile(path.join(tmpDir, "ROADMAP.md"), "utf8"), "# Roadmap\n")
 	})
 
-	it("requireFreshCheckpointBeforeComplete returns diagnostic message", async () => {
+	it("legacy checkpoint prerequisite is inert", async () => {
 		await fs.mkdir(path.join(tmpDir, ".dietcode"), { recursive: true })
 		await fs.writeFile(
 			path.join(tmpDir, ".dietcode", "roadmap-state.json"),
@@ -63,24 +63,28 @@ describe("RoadmapCompletionGate", () => {
 		await fs.writeFile(path.join(tmpDir, "ROADMAP.md"), "# Roadmap\n", "utf8")
 
 		const msg = await requireFreshCheckpointBeforeComplete(tmpDir)
-		assert.ok(msg)
-		assert.match(msg, /explain_gate|validate/)
+		assert.strictEqual(msg, null)
 	})
 
-	it("failClosedCompletionMessage includes doctor recovery", () => {
-		assert.match(failClosedCompletionMessage(), /doctor/)
+	it("legacy unavailable-context notice does not send agents into diagnostic loops", () => {
+		assert.match(failClosedCompletionMessage(), /Continue scoped work/)
+		assert.doesNotMatch(failClosedCompletionMessage(), /Run|blocked|doctor/)
 	})
 })
 
 describe("RoadmapLifecycle", () => {
-	it("initRoadmapSession emits progress for temp workspace", async () => {
+	it("legacy lifecycle APIs never install skills, create roadmaps, or write diagnostics", async () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-lifecycle-"))
 		try {
 			await fs.writeFile(path.join(tmpDir, "README.md"), "# Lifecycle Test\n", "utf8")
-			const { initRoadmapSession } = await import("../RoadmapLifecycle")
+			setRoadmapConfigOverride({ enabled: true, auto_bootstrap: true, auto_install_skills: true })
+			const { initRoadmapSession, finalizeRoadmapSession } = await import("../RoadmapLifecycle")
 			const result = await initRoadmapSession(tmpDir, "task-test-1")
 			assert.ok(result)
 			assert.strictEqual(result.workspace, tmpDir)
+			assert.strictEqual(result.roadmap_mode, "advisory")
+			await finalizeRoadmapSession(tmpDir, "task-test-1")
+			assert.deepStrictEqual(await fs.readdir(tmpDir), ["README.md"])
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true })
 			setRoadmapConfigOverride(null)

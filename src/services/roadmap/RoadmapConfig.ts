@@ -10,6 +10,7 @@ export interface RoadmapConfig {
 	git_timeout_seconds: number
 	evidence_cache_ttl_seconds: number
 	session_brief_cache_ttl_seconds: number
+	/** @deprecated Compatibility fields only; roadmap observations never block task completion. */
 	block_kanban_on_invalid_schema: boolean
 	block_kanban_on_validation_pending: boolean
 	block_kanban_on_bootstrap_incomplete: boolean
@@ -29,7 +30,7 @@ export const DEFAULT_ROADMAP_CONFIG: RoadmapConfig = {
 	git_timeout_seconds: 5,
 	evidence_cache_ttl_seconds: 15,
 	session_brief_cache_ttl_seconds: 10,
-	// Roadmap maintenance is advisory unless the workspace opts into a required check.
+	// Legacy gate settings are inert, including persisted/environment overrides.
 	block_kanban_on_invalid_schema: false,
 	block_kanban_on_validation_pending: false,
 	block_kanban_on_bootstrap_incomplete: false,
@@ -70,11 +71,7 @@ function loadFromEnv(): Partial<RoadmapConfig> {
 		["progress_enabled", "MIRA_ROADMAP_PROGRESS_ENABLED"],
 		["nudge_on_roadmap_write", "MIRA_ROADMAP_NUDGE_ON_WRITE"],
 		["block_writes_outside_workspace", "MIRA_ROADMAP_BLOCK_WRITES_OUTSIDE_WORKSPACE"],
-		["block_kanban_on_invalid_schema", "MIRA_ROADMAP_BLOCK_KANBAN_ON_INVALID_SCHEMA"],
-		["block_kanban_on_validation_pending", "MIRA_ROADMAP_BLOCK_KANBAN_ON_VALIDATION_PENDING"],
-		["block_kanban_on_bootstrap_incomplete", "MIRA_ROADMAP_BLOCK_KANBAN_ON_BOOTSTRAP_INCOMPLETE"],
 		["warn_on_stale_before_complete", "MIRA_ROADMAP_WARN_ON_STALE_BEFORE_COMPLETE"],
-		["fail_closed_completion_gates", "MIRA_ROADMAP_FAIL_CLOSED_COMPLETION_GATES"],
 	]
 
 	for (const [field, envKey] of boolKeys) {
@@ -113,11 +110,7 @@ function loadFromVSCodeSettings(): Partial<RoadmapConfig> {
 			["progress_enabled", "progressEnabled"],
 			["nudge_on_roadmap_write", "nudgeOnRoadmapWrite"],
 			["block_writes_outside_workspace", "blockWritesOutsideWorkspace"],
-			["block_kanban_on_invalid_schema", "blockKanbanOnInvalidSchema"],
-			["block_kanban_on_validation_pending", "blockKanbanOnValidationPending"],
-			["block_kanban_on_bootstrap_incomplete", "blockKanbanOnBootstrapIncomplete"],
 			["warn_on_stale_before_complete", "warnOnStaleBeforeComplete"],
-			["fail_closed_completion_gates", "failClosedCompletionGates"],
 		]
 		for (const [field, vscodeKey] of mapping) {
 			if (cfg.has(vscodeKey)) {
@@ -139,7 +132,7 @@ function loadFromVSCodeSettings(): Partial<RoadmapConfig> {
 	}
 }
 
-/** Test-only or runtime override hook (cleared on invalidateRoadmapConfigCache). */
+/** Test-only or runtime override hook; pass null to clear. */
 export function setRoadmapConfigOverride(patch: Partial<RoadmapConfig> | null): void {
 	configOverride = patch
 	invalidateRoadmapConfigCache()
@@ -160,6 +153,10 @@ export function getRoadmapConfig(): RoadmapConfig {
 		...loadFromVSCodeSettings(),
 		...loadFromEnv(),
 		...(configOverride || {}),
+		block_kanban_on_invalid_schema: false,
+		block_kanban_on_validation_pending: false,
+		block_kanban_on_bootstrap_incomplete: false,
+		fail_closed_completion_gates: false,
 	}
 	configCacheAt = now
 	return { ...configCache }

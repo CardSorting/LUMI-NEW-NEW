@@ -1,26 +1,13 @@
 import * as path from "path"
 import { formatRoadmapSteeringBlock } from "./RoadmapAgentSteering"
 import { getRoadmapConfig } from "./RoadmapConfig"
+import { getRoadmapPromptContext } from "./RoadmapPromptContext"
 import { RoadmapService } from "./RoadmapService"
 import { WORKSPACE_SKILL_REL } from "./RoadmapSkillInstall"
-
-interface BriefCacheEntry {
-	brief: Record<string, unknown>
-	cachedAt: number
-}
-
-const briefCache = new Map<string, BriefCacheEntry>()
-
-function cacheKey(workspace: string): string {
-	return path.resolve(workspace)
-}
+import { invalidateSnapshotCache } from "./RoadmapSnapshot"
 
 export function invalidateSessionBriefCache(workspace?: string): void {
-	if (!workspace) {
-		briefCache.clear()
-		return
-	}
-	briefCache.delete(cacheKey(workspace))
+	invalidateSnapshotCache(workspace)
 }
 
 export async function sessionBrief(workspace: string, forceRefresh = false): Promise<Record<string, unknown> | null> {
@@ -29,13 +16,8 @@ export async function sessionBrief(workspace: string, forceRefresh = false): Pro
 		return null
 	}
 
-	const key = cacheKey(workspace)
-	if (!forceRefresh) {
-		const cached = briefCache.get(key)
-		if (cached && Date.now() - cached.cachedAt < cfg.session_brief_cache_ttl_seconds * 1000) {
-			return { ...cached.brief }
-		}
-	}
+	// Cache evidence in the service, never a completion decision or next action.
+	if (forceRefresh) invalidateSnapshotCache(workspace)
 
 	try {
 		const status = await RoadmapService.getInstance().getOperationalStatus(workspace, "", "light")
@@ -73,22 +55,27 @@ export async function sessionBrief(workspace: string, forceRefresh = false): Pro
 			recommended_next_action: status.recommended_next_action,
 			roadmap_gate: gate,
 			kanban_complete_allowed: status.kanban_complete_allowed,
-			first_call: nextRec.command ?? status.agent_next_call ?? "",
+			completion_ready: status.completion_ready,
+			required_action: status.required_action,
+			advisory_actions: status.advisory_actions,
+			stop_reason: status.stop_reason,
+			progress_evidence: status.progress_evidence,
+			first_call: status.agent_next_call ?? nextRec.command ?? "",
 			prime_directive: status.prime_directive,
 			agent_playbook: status.agent_playbook,
 			operator_playbook: status.operator_playbook,
 			_roadmap_operator_hints: hints,
 		}
 
-		briefCache.set(key, { brief, cachedAt: Date.now() })
-		return { ...brief }
+		return brief
 	} catch (error) {
 		return {
 			enabled: cfg.enabled,
 			success: false,
 			error: error instanceof Error ? error.message : String(error),
-			first_call: "roadmap(action='guide')",
-			agent_next_call: "roadmap(action='guide')",
+			first_call: "",
+			agent_next_call: "",
+			stop_reason: "Roadmap context unavailable. Continue scoped work; retry only after the reported cause changes.",
 		}
 	}
 }
@@ -102,7 +89,7 @@ export async function getRoadmapEnvironmentSection(workspace: string): Promise<s
 	if (!cfg.enabled) {
 		return ""
 	}
-	const brief = await sessionBrief(workspace)
+	const brief = await getRoadmapPromptContext(workspace)
 	if (!brief || brief.success === false) {
 		return ""
 	}

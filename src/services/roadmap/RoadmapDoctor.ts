@@ -16,7 +16,7 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 	}
 
 	addCheck("roadmap.enabled", cfg.enabled, cfg.enabled ? "enabled" : "disabled")
-	addCheck("auto_install_skills", true, cfg.auto_install_skills ? "enabled" : "disabled — install skill manually")
+	addCheck("skill_installation", true, "optional; task startup never installs skills")
 
 	try {
 		await fs.access(await bundledSkillPath())
@@ -30,9 +30,11 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 		await fs.access(workspaceSkillPath(workspace))
 		addCheck("workspace_skill_installed", true, workspaceSkillPath(workspace))
 	} catch {
-		addCheck("workspace_skill_installed", false, "not installed — session start or roadmap(action='doctor')")
+		addCheck("workspace_skill_installed", false, "optional skill not installed; built-in roadmap tools remain available")
 		if (cfg.auto_install_skills) {
-			recommendations.push("roadmap(action='doctor') after session start to install workspace skill")
+			recommendations.push(
+				"The bundled roadmap skill is optional; its absence does not restrict the agent or require installation.",
+			)
 		}
 	}
 
@@ -44,7 +46,7 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 		addCheck("roadmap_present", true, roadmapPath)
 		addCheck("roadmap_readable", true, roadmapPath)
 	} catch {
-		addCheck("roadmap_present", false, "ROADMAP.md not found — bootstrap required")
+		addCheck("roadmap_present", false, "ROADMAP.md not found (advisory)")
 		recommendations.push("roadmap(action='checkpoint') to bootstrap ROADMAP.md")
 	}
 
@@ -65,7 +67,7 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 		}
 	}
 
-	addCheck("progress_log_available", true, progressJsonlPath())
+	addCheck("progress_log_available", true, progressJsonlPath(workspace))
 
 	const statePath = roadmapService.getStatePath(workspace)
 	try {
@@ -75,7 +77,7 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 		addCheck("workspace_state_available", !roadmapExists, "run validate to persist roadmap-state.json")
 	}
 
-	const lastError = await readLastError()
+	const lastError = await readLastError(workspace)
 	if (lastError) {
 		addCheck("last_error_clear", false, String(lastError.message || lastError.error))
 		recommendations.push(String(lastError.retry_command || "roadmap(action='guide')"))
@@ -84,7 +86,9 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 	}
 
 	if (status.bootstrap_complete === false) {
-		recommendations.push("roadmap(action='apply_bootstrap_fill', context='write') then roadmap(action='validate')")
+		recommendations.push(
+			"Optional: roadmap(action='apply_bootstrap_fill', context='write') when evidence-backed maintenance is relevant",
+		)
 	}
 
 	const okCount = checks.filter((c) => c.ok).length
@@ -102,8 +106,9 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 
 	return wrapClarityEnvelope({
 		action: "doctor",
-		success: okCount === checks.length,
-		ok: okCount === checks.length,
+		success: true,
+		ok: true,
+		healthy: okCount === checks.length,
 		workspace,
 		checks,
 		checks_passed: okCount,
@@ -124,7 +129,7 @@ export async function runDoctorChecks(roadmapService: RoadmapService, workspace:
 export function formatDoctorReport(
 	checks: Array<{ name: string; ok: boolean; detail: string }>,
 	recommendations: string[],
-	nextRec: { command: string; detail: string },
+	_nextRec: { command: string; detail: string },
 	status: Record<string, unknown>,
 ): string {
 	const lines = ["🩺 Roadmap doctor", ""]
@@ -142,17 +147,17 @@ export function formatDoctorReport(
 		lines.push("", `Bootstrap: ${status.bootstrap_placeholder_count ?? "?"} template phrase(s) remain`)
 	}
 	const gate = (status.roadmap_gate || {}) as Record<string, unknown>
-	if (gate.kanban_complete_allowed === false) {
+	if ((gate.closed_gates as unknown[] | undefined)?.length) {
 		lines.push(
 			"",
 			formatExplainGateReport({
 				workspace: String(status.workspace || ""),
 				closed_gates: (gate.closed_gates as Array<Record<string, unknown>>) || [],
 				open_gates: (gate.open_gates as string[]) || [],
-				kanban_complete_allowed: false,
+				kanban_complete_allowed: true,
 			}),
 		)
 	}
-	lines.push("", `→ ${nextRec.command}`)
+	lines.push("", "No required roadmap action. Continue or finish the assigned task.")
 	return lines.join("\n")
 }

@@ -47,7 +47,7 @@ describe("RoadmapIntegration", () => {
 		}
 	})
 
-	it("blocks completion on invalid schema when explicitly required", async () => {
+	it("preserves invalid schema findings without creating completion prerequisites", async () => {
 		setRoadmapConfigOverride({ block_kanban_on_invalid_schema: true })
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-int-"))
 		try {
@@ -60,12 +60,14 @@ describe("RoadmapIntegration", () => {
 			await fs.writeFile(path.join(tmp, "ROADMAP.md"), "# Test\n", "utf8")
 
 			const block = await evaluateRoadmapCompletionBlock(tmp)
-			assert.strictEqual(block.blocked, true)
-			assert.match(block.message || "", /validate/i)
+			assert.strictEqual(block.blocked, false)
+			const status = await RoadmapService.getInstance().getOperationalStatus(tmp)
+			assert.strictEqual(status.schema_valid, false)
+			assert.strictEqual(status.required_action, null)
+			assert.ok(status.advisory_actions.some((item: { id: string }) => item.id === "schema_valid"))
 
 			const kernelBlock = await requireFreshCheckpointBeforeComplete(tmp)
-			assert.ok(kernelBlock)
-			assert.match(kernelBlock, /validate|explain-gate/i)
+			assert.strictEqual(kernelBlock, null)
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true })
 		}
@@ -81,7 +83,7 @@ describe("RoadmapIntegration", () => {
 
 			const enriched = await enrichPayloadWithSteering({ action: "guide", workspace: tmp })
 			assert.strictEqual(enriched.workspace, tmp)
-			assert.ok(enriched.agent_next_call)
+			assert.strictEqual(enriched.agent_next_call, "")
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true })
 		}

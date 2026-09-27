@@ -419,12 +419,12 @@
 				"lumi.roadmap.enabled": {
 					"type": "boolean",
 					"default": true,
-					"description": "Enable auto-rolling ROADMAP.md steering, gates, and checkpoint tools."
+					"description": "Enable advisory ROADMAP.md context and maintenance tools. Roadmap findings never block task execution or completion."
 				},
 				"lumi.roadmap.autoBootstrap": {
 					"type": "boolean",
 					"default": true,
-					"description": "Auto-create ROADMAP.md from workspace evidence when missing."
+					"description": "Allow the explicit bootstrap helper to create ROADMAP.md from evidence. Task startup never creates files."
 				},
 				"lumi.roadmap.autoBootstrapFill": {
 					"type": "boolean",
@@ -434,22 +434,26 @@
 				"lumi.roadmap.blockKanbanOnInvalidSchema": {
 					"type": "boolean",
 					"default": false,
-					"description": "Require ROADMAP.md schema errors to be repaired before task completion. Otherwise report them as advisory."
+					"description": "Retired. Schema findings are always advisory.",
+					"deprecationMessage": "Roadmap completion gates have been removed. This setting has no effect, including when true."
 				},
 				"lumi.roadmap.blockKanbanOnBootstrapIncomplete": {
 					"type": "boolean",
 					"default": false,
-					"description": "Require roadmap bootstrap placeholders to be filled before task completion. Otherwise report them as advisory."
+					"description": "Retired. Bootstrap findings are always advisory.",
+					"deprecationMessage": "Roadmap completion gates have been removed. This setting has no effect, including when true."
 				},
 				"lumi.roadmap.blockKanbanOnValidationPending": {
 					"type": "boolean",
 					"default": false,
-					"description": "Block attempt_completion when ROADMAP.md changed since last validate."
+					"description": "Retired. Roadmap validation is not required for completion.",
+					"deprecationMessage": "Roadmap completion gates have been removed. This setting has no effect, including when true."
 				},
 				"lumi.roadmap.failClosedCompletionGates": {
 					"type": "boolean",
 					"default": false,
-					"description": "Block attempt_completion when roadmap gate evaluation fails."
+					"description": "Retired. Unavailable roadmap diagnostics cannot block completion.",
+					"deprecationMessage": "Roadmap completion gates have been removed. This setting has no effect, including when true."
 				}
 			}
 		}
