@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Production guardrails for root README.md / readme.md parity and required content.
+ * Production guardrails for root README.md content and optional legacy readme.md parity.
  * Validates live metrics against package.json and src/shared/tools.ts.
  */
 import assert from "node:assert"
@@ -11,9 +11,10 @@ import { fileURLToPath } from "node:url"
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 const upper = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8")
-const lower = fs.readFileSync(path.join(repoRoot, "readme.md"), "utf8")
-
-assert.strictEqual(upper, lower, "README.md and readme.md must be identical")
+const legacyReadme = path.join(repoRoot, "readme.md")
+if (fs.existsSync(legacyReadme)) {
+	assert.strictEqual(upper, fs.readFileSync(legacyReadme, "utf8"), "README.md and readme.md must be identical")
+}
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"))
 const providers = JSON.parse(fs.readFileSync(path.join(repoRoot, "src/shared/providers/providers.json"), "utf8"))
