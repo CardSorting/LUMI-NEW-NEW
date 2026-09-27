@@ -2,6 +2,8 @@ import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import { WorkspacePathAdapter } from "@core/workspace/WorkspacePathAdapter"
 import { showSystemNotification } from "@integrations/notifications"
+import { resolveCommandTimeoutSeconds } from "@integrations/terminal/commandPolicy"
+import type { CommandExecutionResult } from "@integrations/terminal/types"
 import {
 	appendTextToToolResponse,
 	buildCommandOutputAuditAdvisory,
@@ -11,8 +13,10 @@ import { COMMAND_REQ_APP_STRING } from "@shared/combineCommandSequences"
 import { DietCodeAsk } from "@shared/ExtensionMessage"
 import { Logger } from "@shared/services/Logger"
 import { arePathsEqual } from "@utils/path"
+import pTimeout from "p-timeout"
 import { telemetryService } from "@/services/telemetry"
 import { DietCodeDefaultTool } from "@/shared/tools"
+import { ActionAlreadyActiveError } from "../../ActionExecutionRegistry"
 import { executor } from "../../ActionExecutor"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
@@ -20,45 +24,9 @@ import type { IFullyManagedTool, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
 import { recordExecutionEvidence } from "../utils/executionEvidence"
 import { applyModelContentFixes } from "../utils/ModelContentProcessor"
+import { ToolDisplay } from "../utils/ToolDisplay"
 import { ToolResultUtils } from "../utils/ToolResultUtils"
 import { getInitialTaskPreview } from "../utils/taskPreview"
-
-// Default timeout for commands in yolo mode and background exec mode
-const DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
-const LONG_RUNNING_COMMAND_TIMEOUT_SECONDS = 300
-
-const LONG_RUNNING_COMMAND_PATTERNS: RegExp[] = [
-	/\b(npm|pnpm|yarn|bun)\s+(install|ci|build|test)\b/i,
-	/\b(npm|pnpm|yarn|bun)\s+run\s+(build|test|lint|typecheck|check)\b/i,
-	/\b(pip|pip3|uv)\s+install\b/i,
-	/\b(poetry|pipenv)\s+install\b/i,
-	/\b(cargo|go|mvn|gradle|gradlew)\s+(build|test|check|install)\b/i,
-	/\b(make|cmake|ctest)\b/i,
-	/\b(pytest|tox|nox|jest|vitest|mocha)\b/i,
-	/\b(docker|podman)\s+build\b/i,
-	/\b(torchrun|deepspeed|accelerate\s+launch)\b/i,
-	/\bffmpeg\b/i,
-	/\bpython(?:\d+(?:\.\d+)?)?\s+.*\b(train|finetune)\b/i,
-]
-
-export function isLikelyLongRunningCommand(command: string): boolean {
-	const normalized = command.trim().replace(/\s+/g, " ")
-	return LONG_RUNNING_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))
-}
-
-export function resolveCommandTimeoutSeconds(
-	command: string,
-	timeoutParam: string | undefined,
-	useManagedTimeout: boolean,
-): number | undefined {
-	const parsed = timeoutParam?.trim() ? Number(timeoutParam) : Number.NaN
-	if (Number.isFinite(parsed) && parsed > 0) {
-		// Node timers overflow above this range and would otherwise return almost immediately.
-		return Math.min(parsed, 2_147_483_647 / 1000)
-	}
-	if (!useManagedTimeout) return undefined
-	return isLikelyLongRunningCommand(command) ? LONG_RUNNING_COMMAND_TIMEOUT_SECONDS : DEFAULT_COMMAND_TIMEOUT_SECONDS
-}
 
 export class ExecuteCommandToolHandler implements IFullyManagedTool {
 	readonly name = DietCodeDefaultTool.BASH
@@ -90,6 +58,8 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 	}
 
 	async execute(config: TaskConfig, block: ToolUse): Promise<ToolResponse> {
+		config.taskState.abortSignal.throwIfAborted()
+		const display = new ToolDisplay(config, "Command")
 		let command: string | undefined = block.params.command
 		const requiresApprovalRaw: string | undefined = block.params.requires_approval
 		// Missing or unrecognized model annotations defer to configured authority, not another model round-trip.
@@ -164,7 +134,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 					`Reason: ${permissionResult.reason}${matchedPattern}`
 			}
 			if (!config.isSubagentExecution) {
-				await config.callbacks.say("command_permission_denied", errorMessage)
+				await display.observe(() => config.callbacks.say("command_permission_denied", errorMessage))
 			}
 			return formatResponse.toolError(formatResponse.permissionDeniedError(errorMessage))
 		}
@@ -173,12 +143,13 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 		const commandValidation = this.validator.validateCommand(actualCommand)
 		if (!commandValidation.ok) {
 			if (!config.isSubagentExecution) {
-				await config.callbacks.say("dietcodeignore_error", commandValidation.error)
+				await display.observe(() => config.callbacks.say("dietcodeignore_error", commandValidation.error))
 			}
 			return formatResponse.toolError(commandValidation.error)
 		}
 
 		let didAutoApprove = false
+		let commandMessageTs: number | null | undefined
 
 		// If the model says this command is safe and auto approval for safe commands is true, execute the command
 		// If the model says the command is risky, but *BOTH* auto approve settings are true, execute the command
@@ -218,8 +189,10 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 		) {
 			// Auto-approve flow
 			if (!config.isSubagentExecution) {
-				await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "command")
-				await config.callbacks.say("command", actualCommand, undefined, undefined, false)
+				await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "command"))
+				commandMessageTs =
+					(await display.observe(() => config.callbacks.say("command", actualCommand, undefined, undefined, false))) ??
+					null
 			}
 			didAutoApprove = true
 			telemetryService.captureToolUsage(
@@ -277,59 +250,103 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 			throw error
 		}
 
-		// Automatic approvals and helpers need the same bounded foreground wait as autonomous mode.
-		const timeoutSeconds = resolveCommandTimeoutSeconds(actualCommand, timeoutParam, didAutoApprove || config.yoloModeToggled)
+		// Approval grants execution, not an unlimited foreground wait.
+		const timeoutSeconds = resolveCommandTimeoutSeconds(actualCommand, timeoutParam)
 
 		// Setup timeout notification for long-running auto-approved commands
 		let timeoutId: NodeJS.Timeout | undefined
 		if (didAutoApprove && config.autoApprovalSettings.enableNotifications && !config.isSubagentExecution) {
 			// if the command was auto-approved, and it's long running we need to notify the user after some time has passed without proceeding
 			timeoutId = setTimeout(() => {
-				showSystemNotification({
-					subtitle: "Command is still running",
-					message: "An auto-approved command has been running for 30s, and may need your attention.",
-				})
+				void display.observe(async () =>
+					showSystemNotification({
+						subtitle: "Command is still running",
+						message: "An auto-approved command has been running for 30s, and may need your attention.",
+					}),
+				)
 			}, 30_000)
 		}
 
-		// Execute the command in the correct directory
-		// If executionDir is different from cwd, prepend cd command
-		let finalCommand: string = actualCommand
-		if (executionDir !== config.cwd) {
-			// Use && to chain commands so they run in sequence
-			finalCommand = `cd "${executionDir}" && ${actualCommand}`
-		}
-
-		const [userRejected, result] = await executor
+		const [userRejected, rawResult, execution] = await executor
 			.execute(
 				config.ulid,
-				() =>
-					config.callbacks.executeCommandTool(
-						finalCommand,
-						timeoutSeconds,
-						didAutoApprove ? { interactive: false } : undefined,
-					),
+				(signal, actionId) =>
+					config.callbacks.executeCommandTool(actualCommand, timeoutSeconds, {
+						actionId,
+						owner: config.executionOwner ?? "parent",
+						cwd: executionDir,
+						commandMessageTs,
+						// Keep the task signal after this foreground action yields, so detached work stays cancellable.
+						signal: AbortSignal.any([signal, config.taskState.abortSignal]),
+						interactive: !didAutoApprove,
+					}),
 				{
 					concurrencyGroup: "shell",
+					execution: {
+						kind: "command",
+						input: { cwd: executionDir, command: actualCommand.trim() },
+						label: actualCommand,
+						owner: config.executionOwner,
+					},
 					signal: config.taskState.abortSignal,
 				},
 			)
+			.catch(async (error): Promise<CommandExecutionResult> => {
+				if (!(error instanceof ActionAlreadyActiveError)) throw error
+				const state = { status: "not_started" as const, detail: error.message }
+				if (typeof commandMessageTs === "number") {
+					await display.observe(async () => {
+						const messages = config.messageState
+						const index =
+							messages
+								?.getDietCodeMessages?.()
+								.findIndex(
+									(message) =>
+										message.ts === commandMessageTs &&
+										(message.say === "command" || message.ask === "command"),
+								) ?? -1
+						if (index < 0) return
+						await messages.updateDietCodeMessage(index, { commandExecution: state })
+						await config.callbacks.postStateToWebview()
+					})
+				}
+				return [false, error.message, state]
+			})
 			.finally(() => clearTimeout(timeoutId))
 
 		if (userRejected) {
 			config.taskState.didRejectTool = true
-		} else {
-			recordExecutionEvidence(config.taskState, "command", [executionDir, actualCommand], result)
+		} else if (execution?.status === "completed" && execution.exitCode === 0) {
+			recordExecutionEvidence(config.taskState, "command", [executionDir, actualCommand], {
+				exitCode: execution.exitCode,
+				output: execution.output ?? rawResult,
+			})
+		} else if (!execution) {
+			// Compatibility for hosts that have not yet adopted structured completion metadata.
+			recordExecutionEvidence(config.taskState, "command", [executionDir, actualCommand], rawResult)
+		}
+		const failed = execution && ["failed", "cancelled", "not_started"].includes(execution.status)
+		let result = rawResult
+		if (failed) {
+			const errorText = formatResponse.toolError(extractTextFromToolResponse(rawResult))
+			// Preserve image feedback supplied while stopping a command, alongside its failed status.
+			result =
+				typeof rawResult === "string"
+					? errorText
+					: [{ type: "text", text: errorText }, ...rawResult.filter((part) => part.type !== "text")]
 		}
 
 		if (!userRejected && config.auditToolOutputAdvisoryEnabled && !config.isSubagentExecution) {
 			try {
 				const outputText = extractTextFromToolResponse(result)
 				const taskPreview = getInitialTaskPreview(config) || ""
-				const advisory = await buildCommandOutputAuditAdvisory(config.taskId, taskPreview, finalCommand, outputText, {
-					cwd: config.cwd,
-					settings: config,
-				})
+				const advisory = await pTimeout(
+					buildCommandOutputAuditAdvisory(config.taskId, taskPreview, actualCommand, outputText, {
+						cwd: executionDir,
+						settings: config,
+					}),
+					{ milliseconds: 1_000, signal: config.taskState.abortSignal },
+				)
 				if (advisory) {
 					return appendTextToToolResponse(result, advisory) as ToolResponse
 				}

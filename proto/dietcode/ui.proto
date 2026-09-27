@@ -233,6 +233,20 @@ message DietCodeMessage {
   DietCodeApiReqInfo api_req_info = 22;
   DietCodeModelInfo model_info = 23;
   TaskAuditMetadataProto audit_metadata = 24;
+  optional bool command_completed = 25;
+  CommandExecutionStateProto command_execution = 26;
+  optional string command_output = 27;
+}
+
+message CommandExecutionStateProto {
+  string status = 1;
+  optional string detail = 2;
+  optional int32 exit_code = 3;
+  optional string signal = 4;
+  optional bool terminal_closed = 5;
+  optional string execution_id = 6;
+  optional string task_id = 7;
+  optional int32 terminal_id = 8;
 }
 
 // Message for TaskAuditMetadata

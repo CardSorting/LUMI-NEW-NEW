@@ -116,6 +116,66 @@ describe("CommandOrchestrator exit status messaging", () => {
 
 describe("CommandOrchestrator lifecycle", () => {
 	afterEach(() => sinon.restore())
+	it("bounds a silent manual wait and a stuck output prompt without cancelling or relaunching the command", async () => {
+		const clock = sinon.useFakeTimers()
+		for (const withOutput of [false, true]) {
+			const process = new FakeTerminalProcess()
+			const callbacks = { ...createCallbacks(), ask: sinon.stub().returns(new Promise(() => {})) }
+			const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+				command: "server",
+			})
+			if (withOutput) process.emit("line", "waiting for input")
+			await clock.tickAsync(30_000)
+			assert.equal((await pending).completed, false)
+			assert.equal(callbacks.ask.callCount, withOutput ? 1 : 0)
+			process.complete({ exitCode: 0 })
+		}
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("reports a late observation failure on the owning row without interrupting a newer conversation", async () => {
+		const clock = sinon.useFakeTimers()
+		const process = new FakeTerminalProcess()
+		const update = sinon.stub().resolves()
+		const say = sinon.stub().resolves()
+		const messages = [{ ts: 1, say: "command", text: "server" }]
+		const callbacks = { ...createCallbacks(), updateDietCodeMessage: update, say, getDietCodeMessages: () => messages }
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "server",
+			timeoutSeconds: 1,
+		})
+		assert.equal(update.lastCall.args[1].commandExecution.status, "running")
+		await clock.tickAsync(1000)
+		await pending
+		assert.equal(update.lastCall.args[1].commandExecution.status, "background")
+		messages.push({ ts: 2, say: "command", text: "other work" })
+		process.emit("no_shell_integration")
+		assert.equal(update.lastCall.args[0], 0)
+		assert.equal(update.lastCall.args[1].commandExecution.status, "unknown")
+		sinon.assert.notCalled(say)
+		process.complete({ exitCode: 9 })
+		assert.deepEqual(update.lastCall.args[1].commandExecution, {
+			status: "failed",
+			exitCode: 9,
+			signal: undefined,
+			terminalClosed: undefined,
+		})
+		assert.equal(process.listenerCount("no_shell_integration"), 0)
+	})
+	it("does not turn terminal closure into success or discard a known exit code", async () => {
+		for (const exitCode of [undefined, 7]) {
+			const process = new FakeTerminalProcess()
+			const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), createCallbacks(), {
+				command: "test",
+			})
+			process.complete({ terminalClosed: true, exitCode })
+			const result = await pending
+			assert.match(
+				String(result.result),
+				exitCode === undefined ? /Terminal closed.*not reported/ : /failed with exit code 7/,
+			)
+			assert.doesNotMatch(String(result.result), /successfully/)
+		}
+	})
 	it("finishes without opening an output prompt when completion precedes the display flush", async () => {
 		const process = new FakeTerminalProcess()
 		let asks = 0

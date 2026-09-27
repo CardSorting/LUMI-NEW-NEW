@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert"
+import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import * as coreApi from "@core/api"
 import { DietCodeSubagentUsageInfo } from "@shared/ExtensionMessage"
@@ -7,6 +8,7 @@ import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import * as telemetryModule from "@/services/telemetry"
+import { executor } from "../../../ActionExecutor"
 import { TaskState } from "../../../TaskState"
 import { AgentConfigLoader } from "../../subagent/AgentConfigLoader"
 import { SubagentBuilder } from "../../subagent/SubagentBuilder"
@@ -53,7 +55,7 @@ function createConfig(options?: {
 
 	const config = {
 		taskId: "task-1",
-		ulid: "ulid-1",
+		ulid: randomUUID(),
 		cwd: "/tmp",
 		mode: "act",
 		strictPlanModeEnabled: false,
@@ -120,6 +122,52 @@ describe("SubagentToolHandler", () => {
 		params: { prompt_1: "one", prompt_2: "two", prompt_3: "three", prompt_4: "four", prompt_5: "five" },
 		partial: false,
 	}
+	it("coalesces repeated assignments in one batch and reserves queued helpers across batches", async () => {
+		const { config, taskState } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers()
+		let finish!: (result: ReturnType<typeof completed>) => void
+		const work = new Promise<ReturnType<typeof completed>>((resolve) => {
+			finish = resolve
+		})
+		const run = sinon.stub(SubagentRunner.prototype, "run").returns(work)
+		const first = new UseSubagentsToolHandler().execute(config, batch)
+		await clock.tickAsync(0)
+		assert.equal(run.callCount, 3)
+		const inventory = executor.executions.list(config.ulid).active
+		assert.equal(inventory.length, 5)
+		assert.equal(inventory.filter((entry) => entry.status === "queued").length, 2)
+		const queued = inventory.find((entry) => entry.label === "five")!
+		assert.match(queued.owner, /^helper:/)
+		const duplicate = await new UseSubagentsToolHandler().execute(config, {
+			...batch,
+			params: { prompt_1: "five", prompt_2: " five " },
+		})
+		assert.match(String(duplicate), /Total Agents: 1/)
+		assert.match(String(duplicate), /No duplicate was started/)
+		assert.ok(String(duplicate).includes(queued.execution_id))
+		assert.equal(run.callCount, 3)
+		taskState.abort = true
+		assert.match(String(await first), /cancelled/)
+		await clock.tickAsync(0)
+		assert.equal(executor.executions.list(config.ulid).active.length, 3)
+		assert.equal(executor.executions.get(config.ulid, queued.execution_id)?.status, "not_started")
+		finish(completed())
+		await clock.tickAsync(0)
+		assert.equal(executor.executions.list(config.ulid).active.length, 0)
+		assert.equal(run.callCount, 3, "cancelled queued helpers must never start after a slot is freed")
+		assert.equal(executor.executions.get(config.ulid, inventory[0].execution_id)?.status, "completed")
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("runs identical prompts only once within a successful batch", async () => {
+		const { config } = createConfig({ autoApproveSafe: true })
+		const run = sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		const result = await new UseSubagentsToolHandler().execute(config, {
+			...batch,
+			params: { prompt_1: "one", prompt_2: " one ", prompt_3: "one" },
+		})
+		assert.match(String(result), /Total Agents: 1 \(Success: 1, Fail: 0\)/)
+		sinon.assert.calledOnce(run)
+	})
 	it("gives each helper its own provider and retry cancellation signal", async () => {
 		const { config } = createConfig({ autoApproveSafe: true })
 		const signals: AbortSignal[] = []
@@ -421,6 +469,53 @@ describe("SubagentToolHandler", () => {
 		assert.equal(run.callCount, 1)
 		const usage = callbacks.say.getCalls().find((call) => call.args[0] === "subagent_usage")!
 		assert.equal(JSON.parse(usage.args[1]).cost, 0.1)
+	})
+
+	it("shares the token budget across helpers including cache usage and retains partial handoffs", async () => {
+		const { config, callbacks, taskState } = createConfig({ autoApproveSafe: true })
+		taskState.maxTokens = 100
+		const run = sinon.stub(SubagentRunner.prototype, "run").callsFake(async (_prompt, progress) => {
+			progress({
+				status: "running",
+				result: "Found the cause in saved.ts",
+				stats: { ...completed().stats, inputTokens: 25, cacheReadTokens: 25 },
+			})
+			return new Promise(() => {})
+		})
+		sinon.stub(SubagentRunner.prototype, "abort").resolves()
+		const result = await new UseSubagentsToolHandler().execute(config, batch)
+		assert.equal(run.callCount, 2)
+		assert.match(String(result), /token budget reached/)
+		assert.match(String(result), /Found the cause in saved.ts/)
+		const usage = callbacks.say.getCalls().find((call) => call.args[0] === "subagent_usage")!
+		assert.equal(JSON.parse(usage.args[1]).tokensIn, 50)
+		assert.equal(JSON.parse(usage.args[1]).cacheReads, 50)
+	})
+
+	it("preserves a completed handoff when the batch stops before the runner promise resolves", async () => {
+		const { config, callbacks, taskState } = createConfig({ autoApproveSafe: true })
+		taskState.maxCost = 0.1
+		sinon.stub(SubagentRunner.prototype, "run").callsFake(async (_prompt, progress) => {
+			progress({ status: "completed", result: "Verified result", stats: { ...completed().stats, totalCost: 0.1 } })
+			return new Promise(() => {})
+		})
+		sinon.stub(SubagentRunner.prototype, "abort").resolves()
+		const result = await new UseSubagentsToolHandler().execute(config, batch)
+		assert.match(String(result), /Success: 1, Fail: 4/)
+		assert.match(String(result), /Verified result/)
+		const final = callbacks.say
+			.getCalls()
+			.filter((call) => call.args[0] === "subagent")
+			.at(-1)!
+		assert.equal(JSON.parse(final.args[1]).items[0].status, "completed")
+	})
+
+	it("does not dispatch helpers when the token budget is already exhausted", async () => {
+		const { config, taskState } = createConfig({ autoApproveSafe: true })
+		taskState.maxTokens = 0
+		const run = sinon.stub(SubagentRunner.prototype, "run").resolves(completed())
+		await new UseSubagentsToolHandler().execute(config, batch)
+		sinon.assert.notCalled(run)
 	})
 
 	it("rejects a depth limit before requesting approval or creating a running row", async () => {

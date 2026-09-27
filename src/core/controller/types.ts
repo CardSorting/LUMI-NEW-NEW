@@ -73,7 +73,7 @@ export interface IController {
 	deleteTaskFromState(id: string): Promise<HistoryItem[]>
 
 	// ─── Mode / settings ───
-	updateBackgroundCommandState(isRunning: boolean, taskId?: string): void
+	updateBackgroundCommandState(isRunning: boolean, taskId?: string, sourceTask?: Task): void
 	toggleActModeForYoloMode(): Promise<boolean>
 	switchToPlanModeForAgent(): Promise<boolean>
 	togglePlanActMode(modeToSwitchTo: Mode, chatContent?: ChatContent): Promise<boolean>

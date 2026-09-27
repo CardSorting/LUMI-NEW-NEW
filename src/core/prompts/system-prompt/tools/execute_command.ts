@@ -15,7 +15,7 @@ const timeoutParameter: DietCodeToolSpecParameter = {
 	required: false,
 	type: "number",
 	instruction:
-		"Positive seconds to wait in the foreground. This does not kill the command. If it is still running, inspect the existing terminal output or continue independent work; do not launch a duplicate. Automatically approved commands use a managed wait when omitted.",
+		"Positive seconds to wait in the foreground, capped at 300. This does not kill the command. All commands use a bounded wait when omitted (30 seconds, or 300 for builds and tests). If still running, use read_command_output with the returned execution_id or continue independent work; do not launch a duplicate. A stop request or missing exit code is not proof of success.",
 	usage: "30",
 }
 

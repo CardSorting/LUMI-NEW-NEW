@@ -1,4 +1,5 @@
 import { ApiHandler, ApiProviderInfo, buildApiHandler } from "@core/api"
+import { guardedStream } from "@core/api/guardedStream"
 import { GeminiHandler } from "@core/api/providers/gemini"
 import { OpenAiHandler } from "@core/api/providers/openai"
 import { getApiRetryDelay, shouldRetryApiError, waitForApiRetry } from "@core/api/retry"
@@ -101,6 +102,8 @@ import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { FileEditProvider } from "@/integrations/editor/FileEditProvider"
 import {
 	type CommandExecutionOptions,
+	type CommandExecutionResult,
+	type CommandExecutionSnapshot,
 	CommandExecutor,
 	CommandExecutorCallbacks,
 	FullCommandExecutorConfig,
@@ -131,8 +134,12 @@ import { EmbeddingHandler, KnowledgeGraphService } from "../context/KnowledgeGra
 import { IController } from "../controller/types"
 import { executeHook } from "../hooks/hook-executor"
 import { StateManager } from "../storage/StateManager"
+import { executor } from "./ActionExecutor"
+import { withExecutionContext } from "./ExecutionContext"
+import { type ExecutionState, type ExecutionStateResult, getExecutionAuthority } from "./ExecutionState"
 import { FocusChainManager } from "./focus-chain"
 import { MessageStateHandler } from "./message-state"
+import { reconcileCommandExecutions } from "./reconcileCommandExecutions"
 import { StreamResponseHandler } from "./StreamResponseHandler"
 import { buildInterruptedAssistantContent, STREAM_RECOVERY_INSTRUCTION } from "./streamRecovery"
 import { TaskState } from "./TaskState"
@@ -523,9 +530,14 @@ export class Task {
 				}
 			},
 			updateBackgroundCommandState: (isRunning: boolean) =>
-				this.controller.updateBackgroundCommandState(isRunning, this.taskId),
-			updateDietCodeMessage: async (index: number, updates: { commandCompleted?: boolean; text?: string }) => {
+				this.controller.updateBackgroundCommandState(isRunning, this.taskId, this),
+			updateDietCodeMessage: async (index, updates) => {
+				// Detached observers from a closed instance must not rewrite the
+				// history or controls of a reopened task with the same persisted ID.
+				if (this.controller.task !== this) return
 				await this.messageStateHandler.updateDietCodeMessage(index, updates)
+				// Status-only changes have no subsequent output message to refresh the view.
+				await this.postStateToWebview()
 			},
 			getDietCodeMessages: () =>
 				this.messageStateHandler.getDietCodeMessages() as Array<{ ask?: string; say?: string; text?: string }>,
@@ -574,6 +586,8 @@ export class Task {
 			this.getActiveHookExecution.bind(this),
 			this.runUserPromptSubmitHook.bind(this),
 			this.getKnowledgeGraphService.bind(this),
+			this.readCommandOutput.bind(this),
+			this.getExecutionState.bind(this),
 		)
 
 		// V190: Non-Blocking Pre-flight Boot
@@ -866,12 +880,14 @@ export class Task {
 		return { userContent: steeringUserContent }
 	}
 
+	private activeApiRequestSignal?: AbortSignal
+
 	/** Rebuild providers without dropping task-scoped cancellation or retry progress. */
 	updateApiHandler(configuration: ApiConfiguration, mode: Mode): void {
 		const effectiveApiConfiguration: ApiConfiguration = {
 			...configuration,
 			ulid: this.ulid,
-			getRetrySignal: () => this.taskState.abortSignal,
+			getRetrySignal: () => this.activeApiRequestSignal ?? this.taskState.abortSignal,
 			onRetryAttempt: async (attempt: number, maxRetries: number, delay: number, error: Error | unknown) => {
 				const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
 				const lastApiReqStartedIndex = findLastIndex(dietcodeMessages, (m) => m.say === "api_req_started")
@@ -1393,7 +1409,9 @@ export class Task {
 			// Optionally, inform the user or handle the error appropriately
 		}
 
-		const savedDietCodeMessages = stripPartialPlanSummaryMessages(await getSavedDietCodeMessages(this.taskId))
+		const savedDietCodeMessages = reconcileCommandExecutions(
+			stripPartialPlanSummaryMessages(await getSavedDietCodeMessages(this.taskId)),
+		)
 
 		// Remove any resume messages that may have been added before
 
@@ -1952,40 +1970,110 @@ export class Task {
 		command: string,
 		timeoutSeconds: number | undefined,
 		options?: CommandExecutionOptions,
-	): Promise<[boolean, DietCodeToolResponseContent]> {
+	): Promise<CommandExecutionResult> {
 		const result = await this.commandExecutor.execute(command, timeoutSeconds, {
 			interactive:
 				!this.stateManager.getGlobalSettingsKey("yoloModeToggled") &&
 				!this.stateManager.getGlobalSettingsKey("autoApproveAllToggled"),
-			signal: this.taskState.abortSignal,
 			...options,
+			signal: options?.signal ? AbortSignal.any([this.taskState.abortSignal, options.signal]) : this.taskState.abortSignal,
 		})
-		this.recordCommandResultInJoyRide(command, result)
+		this.recordCommandResultInJoyRide(command, result, options?.cwd ?? this.cwd)
 
 		// V191 Hardening: Auto-Revoke environmental lease for sensitive commands
 		// If command contains tools that likely alter the environment, revoke the lease for fresh probing.
 		const envAlteringTerms = ["npm ", "yarn ", "pnpm ", "nvm ", "brew ", "fvm ", "bun ", "git config"]
 		const isEnvAltering = envAlteringTerms.some((term) => command.includes(term))
 
-		if (isEnvAltering && result[0]) {
+		if (isEnvAltering) {
 			Logger.info(
 				`[Task ${this.taskId}] Env-altering command detected (\`${command}\`). Revoking environmental lease for re-probe.`,
 			)
-			this.toolExecutor.getGuard().engine.revokeLease()
+			try {
+				this.toolExecutor.getGuard().engine.revokeLease()
+			} catch (error) {
+				Logger.warn("Environmental lease observer failed after command execution:", error)
+			}
 		}
 
 		return result
 	}
 
-	private recordCommandResultInJoyRide(command: string, result: [boolean, DietCodeToolResponseContent]): void {
+	async readCommandOutput(
+		executionId: string,
+		timeoutSeconds?: number,
+		signal?: AbortSignal,
+	): Promise<CommandExecutionSnapshot> {
+		return this.commandExecutor.readCommandOutput(
+			executionId,
+			timeoutSeconds,
+			signal ? AbortSignal.any([this.taskState.abortSignal, signal]) : this.taskState.abortSignal,
+		)
+	}
+
+	getExecutionState(executionId?: string): ExecutionStateResult {
+		if (executionId) {
+			const action = executor.executions.get(this.ulid, executionId)
+			if (action && action.kind !== "command") return action
+			let command: ReturnType<CommandExecutor["getExecutionSummary"]>
+			try {
+				command = this.commandExecutor?.getExecutionSummary?.(executionId)
+			} catch (error) {
+				Logger.warn("[Task] Command inspection unavailable:", error)
+				if (!action)
+					throw new Error(
+						"Command observation is unavailable. Inspect the existing terminal and known results before resubmitting work; this does not mean the execution has expired or stopped.",
+					)
+			}
+			if (command && action)
+				return {
+					action,
+					command,
+					detail: "action.status describes the foreground request only. command.status describes the terminal execution. Use read_command_output with command.execution_id to inspect that run; a completed foreground request does not prove command completion.",
+				}
+			if (command) return command
+			if (action)
+				return {
+					...action,
+					detail: "This receipt describes the foreground request only. A linked terminal snapshot is unavailable; inspect the original command result and terminal before repeating it.",
+				}
+			throw new Error(
+				"Execution ID is not tracked by this task or has expired. Use get_execution_state without an ID to inspect tracked work. Do not resubmit work just to inspect it.",
+			)
+		}
+		let commands: ExecutionState["commands"] = { active: [], recent: [] }
+		let commandCoverage: "available" | "unavailable" = "unavailable"
+		try {
+			if (this.commandExecutor?.getExecutionInventory) {
+				commands = this.commandExecutor.getExecutionInventory()
+				commandCoverage = "available"
+			}
+		} catch (error) {
+			Logger.warn("[Task] Command inventory unavailable:", error)
+		}
+		const actions = executor.executions.list(this.ulid)
+		const linked = new Set([...commands.active, ...commands.recent].map((command) => command.action_id).filter(Boolean))
+		return {
+			coverage: { commands: commandCoverage, scope: "current_task_instance" },
+			authority: getExecutionAuthority(this.stateManager),
+			queues: executor.getQueues(this.ulid),
+			commands,
+			actions: {
+				active: actions.active.filter((action) => !linked.has(action.execution_id)),
+				recent: actions.recent.filter((action) => !linked.has(action.execution_id)),
+			},
+		}
+	}
+
+	private recordCommandResultInJoyRide(command: string, result: CommandExecutionResult, cwd = this.cwd): void {
 		try {
 			const [userRejected, toolResponse] = result
 			const outputText = typeof toolResponse === "string" ? toolResponse : JSON.stringify(toolResponse)
 			const summary = summarizeJoyRideCommandOutput(outputText)
-			const environmentFingerprint = createJoyRideFingerprint({ cwd: this.cwd, terminalMode: this.terminalExecutionMode })
+			const environmentFingerprint = createJoyRideFingerprint({ cwd, terminalMode: this.terminalExecutionMode })
 			const key = createCommandResultCacheKey({
 				command,
-				cwd: this.cwd,
+				cwd,
 				environmentFingerprint,
 				runtimeVersion: process.version,
 			})
@@ -1994,7 +2082,7 @@ export class Task {
 				key.key,
 				{
 					command,
-					cwd: this.cwd,
+					cwd,
 					userRejected,
 					outputSummary: summary,
 					capturedAt: Date.now(),
@@ -2006,7 +2094,7 @@ export class Task {
 					ttlMs: 5 * 60 * 1000,
 					estimatedBytes: summary.summaryBytes + 512,
 					fingerprint: key.fingerprint,
-					workspaceFingerprint: createJoyRideFingerprint({ cwd: this.cwd }),
+					workspaceFingerprint: createJoyRideFingerprint({ cwd }),
 					approvalBoundaryId: `task:${this.taskId}:command:${this.taskState.apiRequestCount}`,
 					durability: "memoryOnly",
 					invalidationReason: [
@@ -2035,6 +2123,10 @@ export class Task {
 	 */
 	public async cancelBackgroundCommand(): Promise<boolean> {
 		return this.commandExecutor.cancelBackgroundCommand()
+	}
+
+	public controlCommand(executionId: string, action: "show" | "stop"): void {
+		this.commandExecutor.controlCommand(executionId, action)
 	}
 
 	/**
@@ -2409,7 +2501,25 @@ export class Task {
 		}
 
 		// Response API requires native tool calls to be enabled
-		const stream = this.api.createMessage(systemPrompt, contextManagementMetadata.truncatedConversationHistory, tools)
+		const api = this.api
+		let requestSignal: AbortSignal | undefined
+		const stream = guardedStream(
+			(signal) => {
+				requestSignal = signal
+				this.activeApiRequestSignal = signal
+				return api.createMessage(
+					systemPrompt,
+					withExecutionContext(
+						contextManagementMetadata.truncatedConversationHistory,
+						() => this.getExecutionState(),
+						"parent",
+						api.getModel().info.contextWindow,
+					),
+					tools,
+				)
+			},
+			{ signal: this.taskState.abortSignal, abort: api.abort?.bind(api) },
+		)
 
 		const iterator = stream[Symbol.asyncIterator]()
 
@@ -2423,6 +2533,7 @@ export class Task {
 				yield firstChunk.value
 			} catch (error) {
 				this.taskState.isWaitingForFirstChunk = false
+				if (this.activeApiRequestSignal === requestSignal) this.activeApiRequestSignal = undefined
 				this.taskState.abortSignal.throwIfAborted()
 				const isContextWindowExceededError = checkContextWindowExceededError(error)
 				const { model, providerId } = this.getCurrentProviderInfo()
@@ -2489,7 +2600,7 @@ export class Task {
 						// Auto-retry enabled with max 3 attempts: automatically approve the retry
 						this.taskState.autoRetryAttempts++
 
-						// Calculate delay: 2s, 4s, 8s
+						// Use bounded backoff with jitter, or the provider's minimum delay.
 						const delay = retryDelay!
 
 						await updateApiReqMsg({
@@ -2595,6 +2706,7 @@ export class Task {
 		} finally {
 			this.taskState.isWaitingForFirstChunk = false
 			await iterator.return?.(undefined)
+			if (this.activeApiRequestSignal === requestSignal) this.activeApiRequestSignal = undefined
 		}
 	}
 
@@ -3962,19 +4074,28 @@ export class Task {
 			details += "\n(No open tabs)"
 		}
 
-		const busyTerminals = this.terminalManager.getTerminals(true)
-		const inactiveTerminals = this.terminalManager.getTerminals(false)
+		const executionState = this.getExecutionState() as ExecutionState
+		const representedTerminals = new Set(
+			[...executionState.commands.active, ...executionState.commands.recent].map((command) => command.terminal_id),
+		)
+		const busyTerminals = this.terminalManager.getTerminals(true).filter((terminal) => !representedTerminals.has(terminal.id))
+		const inactiveTerminals = this.terminalManager
+			.getTerminals(false)
+			.filter((terminal) => !representedTerminals.has(terminal.id))
 		// Environment snapshots must not wait for unrelated servers, watchers, or builds.
 		// Each command owns its wait; collect whatever output is currently available.
 		this.taskState.didEditFile = false
 
 		// Take a non-blocking snapshot of terminal state.
 		let terminalDetails = ""
+		const backgroundCompletions = this.commandExecutor?.takeBackgroundCompletions()
+		if (backgroundCompletions) terminalDetails += `\n\n# Commands completed since the last request\n${backgroundCompletions}`
 		if (busyTerminals.length > 0) {
 			// Running commands remain visible while independent work continues.
-			terminalDetails += "\n\n# Actively Running Terminals"
+			terminalDetails +=
+				"\n\n# Active Terminals\nThese commands have not been confirmed finished. Inspect existing output; do not relaunch them."
 			for (const busyTerminal of busyTerminals) {
-				terminalDetails += `\n## Original command: \`${busyTerminal.lastCommand}\``
+				terminalDetails += `\n## Terminal ${busyTerminal.id}: \`${busyTerminal.lastCommand}\``
 				const newOutput = this.terminalManager.getUnretrievedOutput(busyTerminal.id)
 				if (newOutput) {
 					terminalDetails += `\n### New Output\n${newOutput}`

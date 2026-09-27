@@ -14,6 +14,8 @@ service TaskService {
   rpc cancelTask(EmptyRequest) returns (Empty);
   // Cancels the currently running background command
   rpc cancelBackgroundCommand(EmptyRequest) returns (Empty);
+  // Controls one currently owned command. Run IDs cannot be reused across sessions.
+  rpc controlCommand(CommandControlRequest) returns (Empty);
   // Clears the current task
   rpc clearTask(EmptyRequest) returns (Empty);
   // Gets the total size of all tasks
@@ -42,6 +44,14 @@ service TaskService {
   rpc deleteAllTaskHistory(EmptyRequest) returns (DeleteAllTaskHistoryCount);
   // Explains changes with AI and adds inline comments to the diff view
   rpc explainChanges(ExplainChangesRequest) returns (Empty);
+}
+
+message CommandControlRequest {
+  Metadata metadata = 1;
+  string task_id = 2;
+  string execution_id = 3;
+  // "show" focuses the command's terminal; "stop" requests termination once.
+  string action = 4;
 }
 
 // Request message for creating a new task

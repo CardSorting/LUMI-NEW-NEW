@@ -1,62 +1,54 @@
 ---
 title: "Terminal Quick Fixes"
 sidebarTitle: "Terminal Quick Fixes"
-description: "Quick solutions for common terminal issues"
+description: "Understand command status, bounded waits, and terminal recovery."
 ---
 
-## Try This First: Background Execution Mode
+LUMI executes commands in VS Code's integrated terminal. Use **Open terminal** on an active command to inspect that exact terminal. **Stop command** closes only that command's terminal; the parent and other commands can continue. Do not rerun a command just because the agent stopped waiting for it.
 
-The simplest fix for most terminal issues is switching to **Background Execution Mode**:
+## Understand the status
 
-1. Click **Settings** (top right of LUMI chat)
-2. Go to **Terminal Settings**
-3. Set **Terminal Execution Mode** → **Background Exec**
+| Status | Meaning | Next step |
+| --- | --- | --- |
+| Running | The command is executing within its foreground wait. | Let it finish, or inspect the terminal if it needs input. |
+| Running in terminal | The agent has continued while the command remains active. | Continue independent work; inspect the existing command before starting dependent work. |
+| Stop requested | Cancellation was requested, but closure is not confirmed. | Check the existing terminal. Do not assume the command stopped. |
+| Could not stop | The host rejected the stop request. The command remains tracked. | Open its terminal to inspect it, or choose **Retry stop**. Stops are never automatically retried. |
+| Stopped | The terminal closed following a stop request. | Check any partial changes before continuing. |
+| Completed · exit 0 | The host reported success. | Continue with the result. |
+| Failed · exit N | The host reported a nonzero exit code. | Diagnose the output before trying a corrected command. |
+| Finished · exit unknown / Status unavailable | The host did not provide a reliable exit status or output tracking was lost. | Inspect the existing terminal and verify the result. |
+| Not started | Terminal setup failed, execution capacity was reached, or the same command is already active. | Read the explanation in the command card. |
 
-This runs commands in a background process instead of VSCode's terminal, bypassing most integration issues.
+Approval and waiting are separate. Once approved, commands have a bounded foreground wait: normally 30 seconds, or 300 seconds for recognized builds, tests, and installs. Explicit waits are capped at 300 seconds. Reaching that limit leaves the command running and lets the agent continue; it does not retry or terminate the command.
 
----
+The agent can use `read_command_output` with the returned `execution_id` to inspect that same run. A read waits up to 5 seconds by default, at most 30 seconds, or returns immediately with `timeout: 0`. It reports status, exit code when known, and bounded output without launching another command or consuming another reader's output. Cancelling a read only cancels that wait. The command card refreshes with the observed output.
 
-## Other Fixes
+The parent and helpers receive a fresh execution inventory when each model request is dispatched. `get_execution_state` lists tracked commands, MCP requests, helper assignments, input previews, retry attempts, current approval settings, and queue capacity and occupants. Duplicate action requests return the original execution ID. Use either an action ID or a command ID with `get_execution_state`; use the command ID with `read_command_output` for its retained output. Summary flags identify truncated command text and output. A completed foreground action does not prove its linked terminal command has finished.
 
-If you need VSCode's integrated terminal, try these:
+An action marked `awaiting_completion` is still unresolved after its caller stopped waiting and holds its execution slot until it settles. Inspect the existing run or continue independent work instead of resubmitting it. Queues show wait order and explicitly count occupants that have no action receipt. Missing observation is labeled unavailable, which must not be treated as an empty inventory. Repeated inventory checks do not reset stall recovery.
 
--   **Switch to bash** (solves most instances)
+Automatic snapshots prioritize the observing agent's work and unresolved outcomes. Totals and omission counts show when more records are available, and `details_omitted` indicates that a summary needs explicit inspection. Failed command admission stays visible even when no terminal was created. If terminal observation fails, retained foreground evidence remains available, but it cannot prove the command stopped.
 
-    1. Within LUMI, left-click the **Settings** button in the top right-hand corner of the chat window
-    2. Once in the **Settings** window, left-click the **"Terminal Settings"** tab from the left-hand column
-    3. Navigate to **"Default Terminal Profile"** and select **"bash"** from the drop-down
+Completed results remain available for the latest 64 executions in the current task session, even after a terminal is reused. Either linked ID can find a retained command beyond the recent summary, even if its separate action receipt has expired. Expired IDs and IDs from a previous session return an explicit error; they never target a newer terminal occupant. Unchanged reads count toward the agent's stall recovery window, even when it changes the wait duration. After repeated unchanged reads, the agent should do independent work, diagnose the blocker, or report what remains unresolved.
 
--   **Increase timeout**
+## If shell integration is unavailable
 
-    1. Within LUMI, left-click the **Settings** button in the top right-hand corner of the chat window
-    2. Once in the **Settings** window, left-click the **"Terminal Settings"** tab from the left-hand column
-    3. Navigate to "Shell integration timeout (seconds)" and enter **"10"** into the text field
+1. Inspect the existing terminal first. The command may already have run.
+2. Open **Settings → Terminal Settings → Default Terminal Profile** and select a supported shell.
+3. If your shell starts slowly, increase **Shell integration timeout (seconds)**, up to 30 seconds.
+4. If reused terminals have unexpected state, disable **Enable aggressive terminal reuse**.
 
--   **Disable terminal reuse**
-    1. Within LUMI, left-click the **Settings** button in the top right-hand corner of the chat window
-    2. Once in the **Settings** window, left-click the **"Terminal Settings"** tab from the left-hand column
-    3. Look for **"Enable aggressive terminal reuse"**, and **uncheck** this option
+VS Code uses shell integration to track commands, working directories, and exit status. Some shells provide only partial integration. Follow the [VS Code shell integration guide](https://code.visualstudio.com/docs/terminal/shell-integration) for your shell and platform.
 
-## Platform-Specific Fixes
+## Recovery limits
 
-### macOS + Oh-My-Zsh
+Commands are not automatically replayed after a timeout or tracking failure. The same command in the same working directory cannot be launched again while its previous execution remains active. Parent and helper commands retain cancellation ownership after continuing in the terminal.
 
-```bash
-# Create minimal config for VSCode
-echo 'export TERM=xterm-256color' > ~/.zshrc-vscode
-echo 'export PAGER=cat' >> ~/.zshrc-vscode
-```
+An output stream ending without a confirmed command exit does not make its terminal available for reuse. A missing exit code can also indicate a nested shell, so LUMI retains the command's controls until an exit or terminal closure is confirmed. This follows the distinctions in the [VS Code terminal execution API](https://code.visualstudio.com/api/references/vscode-api#TerminalShellExecutionEndEvent).
 
-### Windows PowerShell
+Reopening a task cannot restore ownership of a previous session's command. Its card shows **Status unavailable**, with guidance to inspect **View → Terminal**. Saved controls cannot target a newer command that happens to reuse the same terminal.
 
-```powershell
-# Run as Administrator
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+Each task allows at most 12 active commands. Terminal acquisition and launch-queue waits each have a 15-second limit. The general action queue waits up to 30 seconds by default and removes expired work without running it later. These limits release the agent to diagnose or continue independent work; they do not declare an unfinished operation complete.
 
-### WSL
-
--   Open folder from WSL: `code .`
--   Select **"WSL Bash"** in LUMI settings, under **"Terminal Settings"**
--   Increase **"Shell integration timeout (seconds)"** to **15**
-
+Quiet background exits are included in the parent's next environment snapshot. Large output is summarized, with an **Open output log** button when a captured log is available. Logs are limited to 16 MB; the terminal remains the place to inspect output beyond the capture limit.

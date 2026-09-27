@@ -416,6 +416,37 @@
     }
   },
   {
+    "name": "read_command_output",
+    "description": "Read bounded output and authoritative status for an existing execute_command execution in this task. Never starts, restarts, or stops a command. Use its execution_id after a foreground timeout instead of running the command again. Completed receipts remain available for the latest 64 runs in this session. Exit code 0 confirms success; unknown or missing exit codes do not. After unchanged output, do independent work or diagnose the blocker; do not poll indefinitely.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "execution_id": {
+          "type": "STRING"
+        },
+        "timeout": {
+          "type": "NUMBER"
+        }
+      },
+      "required": [
+        "execution_id"
+      ]
+    }
+  },
+  {
+    "name": "get_execution_state",
+    "description": "Inspect tracked work shared by this task's parent and helpers: commands, action input previews, attempt limits, queue capacity and occupants, current approval settings, and recent results. Returns immediately and never starts or cancels work. Accepts either a command or action execution_id, including IDs from duplicate-action errors. Use read_command_output with the command's execution_id for full command output. Missing or unavailable observation does not prove no work is running. Caller cancellation or timeout does not prove an action stopped; awaiting_completion means its underlying operation is unresolved. Do independent work between checks; inventory polling is not task progress.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "execution_id": {
+          "type": "STRING"
+        }
+      },
+      "required": []
+    }
+  },
+  {
     "name": "12345670mcp0test_tool",
     "description": "test-server: A test tool",
     "parameters": {

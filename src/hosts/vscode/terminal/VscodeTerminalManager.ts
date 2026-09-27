@@ -105,25 +105,15 @@ export class VscodeTerminalManager implements ITerminalManager {
 	private terminalOutputLineLimit = 500
 	private defaultTerminalProfile = "default"
 
-	constructor() {
-		let disposable: vscode.Disposable | undefined
-		try {
-			disposable = (vscode.window as vscode.Window).onDidStartTerminalShellExecution?.(async (e) => {
-				// Creating a read stream here results in a more consistent output. This is most obvious when running the `date` command.
-				e?.execution?.read()
-			})
-		} catch (_error) {
-			// Logger.error("Error setting up onDidEndTerminalShellExecution", error)
-		}
-		if (disposable) {
-			this.disposables.push(disposable)
-		}
-	}
-
 	runCommand(terminalInfo: ITerminalInfo, command: string): ITerminalProcessResultPromise {
 		// Cast to VSCode-specific TerminalInfo for internal use
 		// Using unknown as intermediate cast due to structural differences between ITerminal and vscode.Terminal
 		const vscodeTerminalInfo = terminalInfo as unknown as TerminalInfo
+		if (vscodeTerminalInfo.busy || vscodeTerminalInfo.terminal.exitStatus !== undefined) {
+			throw new Error(
+				"Command did not start: the selected terminal is busy or closed. Inspect the existing terminal before retrying.",
+			)
+		}
 		Logger.log(`[TerminalManager] Running command on terminal ${vscodeTerminalInfo.id}: "${command}"`)
 		Logger.log(`[TerminalManager] Terminal ${vscodeTerminalInfo.id} busy state before: ${vscodeTerminalInfo.busy}`)
 
@@ -134,7 +124,7 @@ export class VscodeTerminalManager implements ITerminalManager {
 
 		process.once("completed", (details) => {
 			vscodeTerminalInfo.busy = false
-			if (details?.signal === "SIGTERM") {
+			if (details?.terminalClosed) {
 				TerminalRegistry.removeTerminal(vscodeTerminalInfo.id)
 				this.terminalIds.delete(vscodeTerminalInfo.id)
 				this.processes.delete(vscodeTerminalInfo.id)
@@ -255,7 +245,7 @@ export class VscodeTerminalManager implements ITerminalManager {
 	}
 
 	setShellIntegrationTimeout(timeout: number): void {
-		this.shellIntegrationTimeout = timeout
+		this.shellIntegrationTimeout = Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 30_000) : 4_000
 	}
 
 	setTerminalReuseEnabled(enabled: boolean): void {

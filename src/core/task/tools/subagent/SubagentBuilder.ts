@@ -2,7 +2,7 @@ import { buildApiHandler } from "@core/api"
 import { PromptRegistry } from "@core/prompts/system-prompt"
 import { DietCodeToolSet } from "@core/prompts/system-prompt/registry/DietCodeToolSet"
 import type { SystemPromptContext } from "@core/prompts/system-prompt/types"
-import { DietCodeDefaultTool } from "@shared/tools"
+import { DietCodeDefaultTool, withExecutionObservation } from "@shared/tools"
 import { ApiConfiguration, ApiProvider } from "@/shared/api"
 import { getProviderModelIdKey } from "@/shared/storage/provider-keys"
 import type { TaskConfig } from "../types/TaskConfig"
@@ -21,6 +21,8 @@ export const SUBAGENT_DEFAULT_ALLOWED_TOOLS: DietCodeDefaultTool[] = [
 	DietCodeDefaultTool.LIST_CODE_DEF,
 	DietCodeDefaultTool.PROJECT_MAP,
 	DietCodeDefaultTool.BASH,
+	DietCodeDefaultTool.READ_COMMAND_OUTPUT,
+	DietCodeDefaultTool.GET_EXECUTION_STATE,
 	DietCodeDefaultTool.WEB_FETCH,
 	DietCodeDefaultTool.WEB_SEARCH,
 	DietCodeDefaultTool.USE_SKILL,
@@ -42,6 +44,7 @@ export const SUBAGENT_SYSTEM_SUFFIX = `
 - Follow the workspace's existing architecture and documentation conventions. Update documentation only when your assignment changes documented behavior; do not create a new wiki or audit every file by default.
 - Run the smallest meaningful checks for your changes. Reuse passing evidence for unchanged code. Run broader checks only when required by the assignment, workspace policy, or a concrete failure.
 - After a failed check, fix its cause before rerunning it. If the same failure remains and no new evidence or repair is available, stop retrying and report the blocker to the parent. Never claim an unavailable check passed.
+- If a command continues after its foreground wait, use read_command_output with its execution_id to inspect that same run. Do independent work between unchanged reads. Do not execute the command again just to check completion.
 - Finish once the assigned deliverable and relevant verification are complete. A research-only assignment can finish with findings and limitations without code changes or tests.
 - Handoff: outcome, evidence or changed paths, checks and results, and remaining blockers. Report uncertainty explicitly. Use [SIGNAL: ARCHITECTURE_VIOLATION] or [SIGNAL: SECURITY_RISK] only for supported findings.
 `
@@ -50,8 +53,10 @@ export class SubagentBuilder {
 	private readonly agentConfig: AgentConfig = {}
 	private allowedTools: DietCodeDefaultTool[]
 	private readonly retryAbortController = new AbortController()
+	private requestRetrySignal?: AbortSignal
 	private readonly apiHandler: ReturnType<typeof buildApiHandler>
 	private parentStreamContext: string | null = null
+	private retryObserver?: (attempt: number, maxAttempts: number, delayMs: number) => void
 
 	constructor(
 		private readonly baseConfig: TaskConfig,
@@ -66,7 +71,9 @@ export class SubagentBuilder {
 		const effectiveApiConfiguration = {
 			...apiConfiguration,
 			ulid: this.baseConfig.ulid,
-			getRetrySignal: () => this.retryAbortController.signal,
+			getRetrySignal: () => this.requestRetrySignal ?? this.retryAbortController.signal,
+			onRetryAttempt: (attempt: number, maxAttempts: number, delayMs: number) =>
+				this.retryObserver?.(attempt, maxAttempts, delayMs),
 		}
 
 		this.applyModelOverride(effectiveApiConfiguration as Record<string, unknown>, mode, this.agentConfig.modelId)
@@ -77,8 +84,16 @@ export class SubagentBuilder {
 		this.retryAbortController.abort()
 	}
 
+	setRetryObserver(observer?: (attempt: number, maxAttempts: number, delayMs: number) => void): void {
+		this.retryObserver = observer
+	}
+
+	setRequestRetrySignal(signal?: AbortSignal): void {
+		this.requestRetrySignal = signal ? AbortSignal.any([signal, this.retryAbortController.signal]) : undefined
+	}
+
 	setAllowedTools(tools: DietCodeDefaultTool[]): void {
-		this.allowedTools = Array.from(new Set([...tools, DietCodeDefaultTool.ATTEMPT]))
+		this.allowedTools = Array.from(new Set([...withExecutionObservation(tools), DietCodeDefaultTool.ATTEMPT]))
 	}
 
 	getApiHandler(): ReturnType<typeof buildApiHandler> {
@@ -140,7 +155,7 @@ export class SubagentBuilder {
 
 	private resolveAllowedTools(configuredTools?: DietCodeDefaultTool[]): DietCodeDefaultTool[] {
 		const sourceTools = configuredTools && configuredTools.length > 0 ? configuredTools : SUBAGENT_DEFAULT_ALLOWED_TOOLS
-		return Array.from(new Set([...sourceTools, DietCodeDefaultTool.ATTEMPT]))
+		return Array.from(new Set([...withExecutionObservation(sourceTools), DietCodeDefaultTool.ATTEMPT]))
 	}
 
 	private buildAgentIdentitySystemPrefix(): string {

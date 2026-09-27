@@ -169,7 +169,16 @@ export class UseMcpToolHandler implements IFullyManagedTool {
 			const result = await executor.execute(
 				config.ulid,
 				(signal) => config.services.mcpHub.callTool(server_name, tool_name, parsedArguments, config.ulid, signal),
-				{ concurrencyGroup: `mcp:${server_name}`, signal: config.taskState.abortSignal },
+				{
+					concurrencyGroup: `mcp:${server_name}`,
+					signal: config.taskState.abortSignal,
+					execution: {
+						kind: "mcp_tool",
+						input: { cwd: config.cwd, server: server_name, tool: tool_name, arguments: parsedArguments },
+						label: `${server_name}/${tool_name}`,
+						owner: config.executionOwner,
+					},
+				},
 			)
 			const formatted = formatMcpToolResult(result, config.api.getModel().info.supportsImages ?? false)
 			await display.notifications(server_name)

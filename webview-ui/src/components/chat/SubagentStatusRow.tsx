@@ -3,6 +3,7 @@ import {
 	DietCodeAskUseSubagents,
 	DietCodeMessage,
 	DietCodeSaySubagentStatus,
+	SubagentActivity,
 	SubagentExecutionStatus,
 	SubagentStatusItem,
 } from "@shared/ExtensionMessage"
@@ -44,7 +45,12 @@ interface SubagentPromptTextProps {
 const statusIcon = (status: DisplayStatus) => {
 	switch (status) {
 		case "running":
-			return <LoaderCircleIcon className="size-2 animate-spin text-link shrink-0 mt-[1px]" />
+			return (
+				<LoaderCircleIcon
+					aria-hidden="true"
+					className="size-3 animate-spin motion-reduce:animate-none text-link shrink-0 mt-[1px]"
+				/>
+			)
 		case "completed":
 			return <CheckIcon className="size-2 text-success shrink-0 mt-[1px]" />
 		case "failed":
@@ -75,6 +81,25 @@ const formatCost = (value: number | undefined): string => {
 	}).format(normalized)
 }
 
+function activityLabel(activity?: SubagentActivity): string | undefined {
+	switch (activity?.phase) {
+		case "preparing":
+			return "Preparing"
+		case "waiting":
+			return "Waiting for response"
+		case "responding":
+			return "Working"
+		case "tool":
+			return "Running tool"
+		case "recovering":
+			return "Changing approach"
+		case "retrying":
+			return Number.isFinite(activity.attempt) && Number.isFinite(activity.maxAttempts)
+				? `Retrying · attempt ${activity.attempt} of ${activity.maxAttempts}`
+				: "Retrying automatically"
+	}
+}
+
 function parseSubagentRowData(message: DietCodeMessage): SubagentRowData | null {
 	if (!message.text) {
 		return null
@@ -86,7 +111,10 @@ function parseSubagentRowData(message: DietCodeMessage): SubagentRowData | null 
 			if (!Array.isArray(parsed.prompts)) {
 				return null
 			}
-			const prompts = parsed.prompts.map((prompt) => prompt?.trim()).filter((prompt): prompt is string => !!prompt)
+			const prompts = parsed.prompts
+				.filter((prompt): prompt is string => typeof prompt === "string")
+				.map((prompt) => prompt.trim())
+				.filter(Boolean)
 			if (prompts.length === 0) {
 				return null
 			}
@@ -115,9 +143,29 @@ function parseSubagentRowData(message: DietCodeMessage): SubagentRowData | null 
 			return null
 		}
 
+		const items = parsed.items
+			.filter(
+				(entry) =>
+					entry &&
+					typeof entry.prompt === "string" &&
+					["pending", "running", "completed", "failed"].includes(entry.status),
+			)
+			.map((entry, index) => ({
+				...entry,
+				id: typeof entry.id === "string" ? entry.id : `helper-${index}`,
+				index: index + 1,
+				name: typeof entry.name === "string" ? entry.name : `Helper ${index + 1}`,
+				result: typeof entry.result === "string" ? entry.result : undefined,
+				error: typeof entry.error === "string" ? entry.error : undefined,
+				latestToolCall: typeof entry.latestToolCall === "string" ? entry.latestToolCall : undefined,
+				criticalSignals: Array.isArray(entry.criticalSignals)
+					? entry.criticalSignals.filter((signal) => typeof signal === "string")
+					: [],
+			}))
+		if (!items.length) return null
 		return {
 			status: parsed.status,
-			items: parsed.items,
+			items,
 		}
 	} catch {
 		return null
@@ -187,6 +235,19 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 
 	const singular = data.items.length === 1
 	const title = singular ? "Helper progress" : "Helpers progress"
+	const completedCount = data.items.filter((entry) => entry.status === "completed").length
+	const failedCount = data.items.filter((entry) => entry.status === "failed").length
+	const queuedCount = wasCancelled ? 0 : data.items.filter((entry) => entry.status === "pending").length
+	const runningCount = wasCancelled ? 0 : data.items.filter((entry) => entry.status === "running").length
+	const summary = [
+		`${completedCount} of ${data.items.length} completed`,
+		runningCount ? `${runningCount} running` : "",
+		queuedCount ? `${queuedCount} queued` : "",
+		failedCount ? `${failedCount} stopped` : "",
+		wasCancelled ? "Interrupted" : "",
+	]
+		.filter(Boolean)
+		.join(" · ")
 	const isPromptConstructionRow = message.ask === "use_subagents" || message.say === "use_subagents"
 	const toggleItem = (index: number) => {
 		setExpandedItems((prev) => ({
@@ -208,13 +269,19 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 				<span className="font-medium text-foreground">{title}</span>
 				<ParentAuditGateBadge />
 			</div>
+			<div aria-atomic="true" aria-live="polite" className="mb-2 text-xs text-description" role="status">
+				{summary}
+			</div>
+			{failedCount > 0 && (
+				<div className="mb-2 text-xs text-description">
+					Completed work is available below. The parent can continue from these results.
+				</div>
+			)}
 			<div className="space-y-2">
 				{data.items.map((entry, index) => {
 					const displayStatus: DisplayStatus =
 						wasCancelled && (entry.status === "running" || entry.status === "pending") ? "cancelled" : entry.status
-					const hasDetails = Boolean(
-						(entry.result && entry.status === "completed") || (entry.error && entry.status === "failed"),
-					)
+					const hasDetails = Boolean(entry.result)
 					const isExpanded = expandedItems[entry.index] === true
 					const isStreamingPromptUnderConstruction =
 						isPromptConstructionRow && message.partial === true && index === data.items.length - 1
@@ -230,8 +297,12 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 								{statusIcon(displayStatus)}
 								<div className="min-w-0 flex-1">
 									<div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
-										<span className="font-medium">{entry.name || `Helper ${index + 1}`}</span>
-										<span className="text-description capitalize">{displayStatus}</span>
+										<span className="font-medium min-w-0 wrap-anywhere">
+											{entry.name || `Helper ${index + 1}`}
+										</span>
+										<span className="text-description capitalize">
+											{displayStatus === "pending" ? "queued" : displayStatus}
+										</span>
 									</div>
 									<SubagentPromptText
 										isExpanded={expandedPrompts[entry.index] === true}
@@ -240,6 +311,12 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 									/>
 								</div>
 							</div>
+							{displayStatus === "running" && activityLabel(entry.activity) && (
+								<div className="mt-1 text-xs text-description">{activityLabel(entry.activity)}</div>
+							)}
+							{entry.status === "failed" && entry.error && (
+								<div className="mt-2 text-xs text-error whitespace-pre-wrap wrap-anywhere">{entry.error}</div>
+							)}
 							{shouldShowStats && (
 								<div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] min-w-0">
 									<span className="opacity-70 whitespace-pre-wrap break-words">{statsText}</span>
@@ -281,17 +358,15 @@ export default function SubagentStatusRow({ message, lastModifiedMessage }: Suba
 									<span className="shrink-0">{isExpanded ? "Hide output" : "Show output"}</span>
 								</button>
 							)}
-							{shouldShowStats && !hasDetails && latestToolCallText && (
+							{shouldShowStats && (!hasDetails || displayStatus === "running") && latestToolCallText && (
 								<div className="mt-1 text-[10px] opacity-70 min-w-0 truncate font-mono">{latestToolCallText}</div>
 							)}
 							<div hidden={!isExpanded} id={`${outputId}-${entry.index}`}>
-								{entry.result && entry.status === "completed" && (
+								{entry.result && (
 									<div className="mt-2 text-xs opacity-80 wrap-anywhere overflow-hidden">
+										{entry.status !== "completed" && <div className="font-medium mb-1">Partial work</div>}
 										<MarkdownBlock markdown={entry.result} />
 									</div>
-								)}
-								{entry.error && entry.status === "failed" && (
-									<div className="mt-2 text-xs text-error whitespace-pre-wrap break-words">{entry.error}</div>
 								)}
 							</div>
 						</div>

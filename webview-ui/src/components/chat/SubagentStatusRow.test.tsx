@@ -66,7 +66,49 @@ describe("SubagentStatusRow", () => {
 	it("keeps failure details available for the parent handoff", () => {
 		render(<SubagentStatusRow isLast message={message("failed")} />)
 		expect(screen.getByText("failed")).toBeInTheDocument()
-		fireEvent.click(screen.getByRole("button", { name: "Show subagent output" }))
 		expect(screen.getByText("The required tool is unavailable")).toBeVisible()
+		fireEvent.click(screen.getByRole("button", { name: "Show subagent output" }))
+		expect(screen.getByText("Partial work")).toBeVisible()
+		expect(screen.getByText("No regressions found")).toBeVisible()
+	})
+
+	it("shows retry attempts and a stable live summary without claiming completion", () => {
+		const data = message("running")
+		const payload = JSON.parse(data.text!)
+		payload.items[0].activity = { phase: "retrying", attempt: 2, maxAttempts: 3 }
+		payload.items.push({ id: "next", index: 2, prompt: "Read the next file", status: "pending" })
+		data.text = JSON.stringify(payload)
+		render(<SubagentStatusRow isLast message={data} />)
+		expect(screen.getByText("Retrying · attempt 2 of 3")).toBeVisible()
+		expect(screen.getByText("queued")).toBeVisible()
+		expect(screen.getByRole("status")).toHaveTextContent("0 of 2 completed · 1 running · 1 queued")
+	})
+
+	it("keeps valid helper results visible when another stored entry is malformed", () => {
+		const data = message("completed")
+		const payload = JSON.parse(data.text!)
+		payload.items.unshift(null, { status: "running", prompt: 123 })
+		payload.items[2].criticalSignals = { invalid: true }
+		data.text = JSON.stringify(payload)
+		render(<SubagentStatusRow isLast message={data} />)
+		expect(screen.getByText("Schema review")).toBeVisible()
+		fireEvent.click(screen.getByRole("button", { name: "Show subagent output" }))
+		expect(screen.getByText("No regressions found")).toBeVisible()
+	})
+
+	it("handles malformed streamed prompts without hiding usable assignments", () => {
+		render(
+			<SubagentStatusRow
+				isLast
+				message={{
+					ts: 1,
+					type: "ask",
+					ask: "use_subagents",
+					text: JSON.stringify({ prompts: [null, 42, "Read the config"] }),
+				}}
+			/>,
+		)
+		expect(screen.getByText('"Read the config"')).toBeVisible()
+		expect(screen.getByText("queued")).toBeVisible()
 	})
 })

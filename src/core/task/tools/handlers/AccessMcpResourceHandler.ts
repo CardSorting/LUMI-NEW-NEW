@@ -152,7 +152,16 @@ export class AccessMcpResourceHandler implements IFullyManagedTool {
 			const result = await executor.execute(
 				config.ulid,
 				(signal) => config.services.mcpHub.readResource(server_name, uri, signal),
-				{ concurrencyGroup: `mcp:${server_name}`, signal: config.taskState.abortSignal },
+				{
+					concurrencyGroup: `mcp:${server_name}`,
+					signal: config.taskState.abortSignal,
+					execution: {
+						kind: "mcp_resource",
+						input: { server: server_name, uri },
+						label: `${server_name}: ${uri}`,
+						owner: config.executionOwner,
+					},
+				},
 			)
 			const text = formatMcpResourceResult(result)
 			await display.observe(() => config.callbacks.say("mcp_server_response", text))

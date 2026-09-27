@@ -13,6 +13,8 @@ export type {
 	// Command Executor types
 	AskResponse,
 	CommandExecutionOptions,
+	CommandExecutionResult,
+	CommandExecutionSnapshot,
 	CommandExecutorCallbacks,
 	CommandExecutorConfig,
 	FullCommandExecutorConfig,

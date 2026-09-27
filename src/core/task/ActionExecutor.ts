@@ -1,8 +1,13 @@
 import { Logger } from "@/shared/services/Logger"
+import { ActionExecutionRegistry, type ActionIdentity } from "./ActionExecutionRegistry"
 
 export interface ExecuteOptions {
+	/** Stable semantic input. Duplicate queued/running work is rejected with its existing execution ID. */
+	execution?: ActionIdentity
 	/** Optional caller deadline. Tools otherwise own their operation timeout. */
 	timeoutMs?: number
+	/** Maximum wait for a slot, separate from the operation deadline. Defaults to 30 seconds. */
+	queueTimeoutMs?: number
 	/** Total attempts, including the first. Repetition requires idempotent: true. */
 	maxRetries?: number
 	idempotent?: boolean
@@ -15,76 +20,218 @@ export interface ExecuteOptions {
 
 interface Waiter {
 	start: () => void
+	executionId?: string
 }
 interface Lane {
+	taskId: string
+	group: string
+	concurrency: number
 	active: number
+	running: Set<Waiter>
 	queue: Waiter[]
+}
+
+export interface ActionQueueSnapshot {
+	group: string
+	concurrency: number
+	occupied_slots: number
+	active_execution_ids: string[]
+	untracked_active: number
+	queue: { position: number; execution_id?: string }[]
 }
 
 /** Task-scoped FIFO scheduling. Mutating actions execute once unless explicitly safe to repeat. */
 export class ActionExecutor {
+	readonly executions = new ActionExecutionRegistry()
 	private lanes = new Map<string, Lane>()
 	private readonly concurrency = 5
 
-	async execute<T>(taskId: string, operation: (signal: AbortSignal) => Promise<T>, options: ExecuteOptions = {}): Promise<T> {
+	getQueues(taskId: string): ActionQueueSnapshot[] {
+		return [...this.lanes.values()]
+			.filter((lane) => lane.taskId === taskId)
+			.map((lane) => {
+				const activeIds = [...lane.running].flatMap((waiter) => (waiter.executionId ? [waiter.executionId] : []))
+				return {
+					group: lane.group,
+					concurrency: lane.concurrency,
+					occupied_slots: lane.active,
+					active_execution_ids: activeIds,
+					untracked_active: lane.active - activeIds.length,
+					queue: lane.queue.map((waiter, index) => ({ position: index + 1, execution_id: waiter.executionId })),
+				}
+			})
+	}
+
+	async execute<T>(
+		taskId: string,
+		operation: (signal: AbortSignal, executionId?: string) => Promise<T>,
+		options: ExecuteOptions = {},
+	): Promise<T> {
+		options.signal?.throwIfAborted()
 		const requestedAttempts = options.maxRetries ?? 3
 		const attempts =
 			options.idempotent && Number.isFinite(requestedAttempts) ? Math.max(1, Math.min(5, Math.floor(requestedAttempts))) : 1
-		const lane = JSON.stringify([taskId, options.concurrencyGroup ?? "default"])
+		const group = options.concurrencyGroup ?? "default"
+		const helperLane = /^helpers(?::\d+)?$/.test(group)
+		const requestedWait = options.queueTimeoutMs ?? 30_000
+		const queueTimeout =
+			Number.isFinite(requestedWait) && requestedWait > 0
+				? Math.min(requestedWait, helperLane ? 20 * 60_000 : 300_000)
+				: 30_000
+		const entry = options.execution
+			? this.executions.claim(taskId, options.execution, {
+					concurrency_group: group,
+					max_attempts: attempts,
+					queue_timeout_ms: queueTimeout,
+				})
+			: undefined
 		for (let attempt = 1; ; attempt++) {
-			options.signal?.throwIfAborted()
-			const release = await this.acquire(lane, options.signal)
+			let release: () => void
+			try {
+				options.signal?.throwIfAborted()
+				this.executions.update(
+					entry,
+					"queued",
+					attempt > 1 ? "Waiting for a slot for the next permitted attempt." : undefined,
+				)
+				release = await this.acquire(
+					taskId,
+					group,
+					options.signal,
+					queueTimeout,
+					helperLane ? 3 : this.concurrency,
+					entry?.snapshot.execution_id,
+				)
+			} catch (error) {
+				this.executions.finish(
+					entry,
+					attempt > 1 ? "failed" : "not_started",
+					error instanceof Error ? error.message : String(error),
+				)
+				throw error
+			}
 			const controller = new AbortController()
+			let retrying = false
+			let started = false
 			// Retain the slot until the actual work settles, even if its caller stops waiting.
 			const work = Promise.resolve()
 				.then(() => {
 					options.signal?.throwIfAborted()
 					controller.signal.throwIfAborted()
-					return operation(controller.signal)
+					started = true
+					this.executions.update(entry, "running", undefined, attempt)
+					return operation(controller.signal, entry?.snapshot.execution_id)
 				})
+				.then(
+					(result) => {
+						let failed = false
+						try {
+							failed =
+								!!result &&
+								typeof result === "object" &&
+								((entry?.snapshot.kind === "helper" && "status" in result && result.status === "failed") ||
+									(entry?.snapshot.kind === "mcp_tool" && "isError" in result && result.isError === true))
+						} catch {
+							// Unreadable SDK metadata must not discard a settled operation or keep its identity active.
+						}
+						this.executions.finish(entry, failed ? "failed" : "completed", result)
+						return result
+					},
+					(error) => {
+						retrying =
+							attempt < attempts &&
+							!options.signal?.aborted &&
+							!controller.signal.aborted &&
+							this.isRetryable(error)
+						if (retrying)
+							this.executions.update(
+								entry,
+								"retrying",
+								"Retrying an explicitly idempotent operation within its attempt limit.",
+							)
+						else
+							this.executions.finish(
+								entry,
+								started ? "failed" : "not_started",
+								error instanceof Error ? error.message : String(error),
+							)
+						throw error
+					},
+				)
 				.finally(release)
 			try {
 				return await this.observe(work, controller, options)
 			} catch (error) {
-				if (attempt >= attempts || options.signal?.aborted || controller.signal.aborted || !this.isRetryable(error))
+				if (!retrying) {
+					this.executions.update(
+						entry,
+						"awaiting_completion",
+						"Caller stopped waiting; the underlying action has not settled. Do not resubmit it.",
+					)
 					throw error
+				}
 				const base = options.backoffMs ?? 500
 				const delay = Math.min(30_000, (Number.isFinite(base) ? Math.max(0, base) : 500) * 2 ** (attempt - 1))
 				Logger.warn(`[ActionExecutor] Retrying idempotent action for ${taskId} (${attempt + 1}/${attempts})`)
-				await new Promise<void>((resolve, reject) => {
-					const finish = () => {
-						options.signal?.removeEventListener("abort", cancel)
-						resolve()
-					}
-					const timer = setTimeout(finish, delay)
-					const cancel = () => {
-						clearTimeout(timer)
-						options.signal?.removeEventListener("abort", cancel)
-						reject(options.signal?.reason)
-					}
-					options.signal?.addEventListener("abort", cancel, { once: true })
-					if (options.signal?.aborted) cancel()
-				})
+				try {
+					await new Promise<void>((resolve, reject) => {
+						const finish = () => {
+							options.signal?.removeEventListener("abort", cancel)
+							resolve()
+						}
+						const timer = setTimeout(finish, delay)
+						const cancel = () => {
+							clearTimeout(timer)
+							options.signal?.removeEventListener("abort", cancel)
+							reject(options.signal?.reason)
+						}
+						options.signal?.addEventListener("abort", cancel, { once: true })
+						if (options.signal?.aborted) cancel()
+					})
+				} catch (error) {
+					this.executions.finish(
+						entry,
+						"failed",
+						"Action cancelled during retry backoff; no further attempt was started.",
+					)
+					throw error
+				}
 			}
 		}
 	}
 
-	private acquire(key: string, signal?: AbortSignal): Promise<() => void> {
+	private acquire(
+		taskId: string,
+		group: string,
+		signal?: AbortSignal,
+		queueTimeoutMs = 30_000,
+		concurrency = this.concurrency,
+		executionId?: string,
+	): Promise<() => void> {
 		signal?.throwIfAborted()
+		const key = JSON.stringify([taskId, group])
 		let lane = this.lanes.get(key)
 		if (!lane) {
-			lane = { active: 0, queue: [] }
+			lane = { taskId, group, concurrency, active: 0, running: new Set(), queue: [] }
 			this.lanes.set(key, lane)
 		}
 		const current = lane
 		return new Promise((resolve, reject) => {
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const cleanup = () => {
+				clearTimeout(timer)
+				signal?.removeEventListener("abort", cancel)
+			}
 			const waiter: Waiter = {
+				executionId,
 				start: () => {
-					signal?.removeEventListener("abort", cancel)
+					cleanup()
+					current.running.add(waiter)
 					let released = false
 					resolve(() => {
 						if (released) return
 						released = true
+						current.running.delete(waiter)
 						const next = current.queue.shift()
 						// Transfer the occupied slot directly; a new arrival cannot jump the queue.
 						if (next) next.start()
@@ -92,18 +239,37 @@ export class ActionExecutor {
 					})
 				},
 			}
-			const cancel = () => {
+			const remove = (reason: unknown) => {
 				const index = current.queue.indexOf(waiter)
 				if (index !== -1) current.queue.splice(index, 1)
-				signal?.removeEventListener("abort", cancel)
-				reject(signal?.reason)
+				cleanup()
+				reject(reason)
 			}
-			if (current.active < this.concurrency) {
+			const cancel = () => remove(signal?.reason)
+			if (current.active < concurrency) {
 				current.active++
 				waiter.start()
 			} else {
+				if (current.queue.length >= 100) {
+					reject(
+						new Error(
+							"Action did not start: the task execution queue is full. Inspect existing work before submitting more actions.",
+						),
+					)
+					return
+				}
 				current.queue.push(waiter)
 				signal?.addEventListener("abort", cancel, { once: true })
+				timer = setTimeout(
+					() =>
+						remove(
+							new Error(
+								"Action did not start: waiting for an execution slot timed out. Earlier work may still be running. Inspect it or continue independent work; do not repeatedly resubmit this action.",
+							),
+						),
+					queueTimeoutMs,
+				)
+				if (signal?.aborted) cancel()
 			}
 		})
 	}
@@ -135,7 +301,7 @@ export class ActionExecutor {
 								"Action deadline exceeded. The operation may still be running; inspect its result before retrying.",
 							),
 						),
-					options.timeoutMs,
+					Math.min(options.timeoutMs, 2_147_483_647),
 				)
 			}
 			work.then(

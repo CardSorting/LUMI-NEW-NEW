@@ -6,7 +6,7 @@ import { DietCodeMessage } from "./ExtensionMessage"
  * This function processes an array of DietCodeMessages objects, looking for sequences
  * where a 'command' message is followed by one or more 'command_output' messages.
  * When such a sequence is found, it combines them into a single message, merging
- * their text contents.
+ * their output while keeping the original shell text separate.
  *
  * @param messages - An array of DietCodeMessage objects to process.
  * @returns A new array of DietCodeMessage objects with command sequences combined.
@@ -18,7 +18,7 @@ import { DietCodeMessage } from "./ExtensionMessage"
  *   { type: 'ask', ask: 'command_output', text: 'file2.txt', ts: 1625097602000 }
  * ];
  * const result = simpleCombineCommandSequences(messages);
- * // Result: [{ type: 'ask', ask: 'command', text: 'ls\nfile1.txt\nfile2.txt', ts: 1625097600000 }]
+ * // Result: [{ type: 'ask', ask: 'command', text: 'ls', commandOutput: 'file1.txt\nfile2.txt', ts: 1625097600000 }]
  */
 export function combineCommandSequences(messages: DietCodeMessage[]): DietCodeMessage[] {
 	const combinedCommands: DietCodeMessage[] = []
@@ -26,8 +26,7 @@ export function combineCommandSequences(messages: DietCodeMessage[]): DietCodeMe
 	// First pass: combine commands with their outputs
 	for (let i = 0; i < messages.length; i++) {
 		if (messages[i].ask === "command" || messages[i].say === "command") {
-			let combinedText = messages[i].text || ""
-			let didAddOutput = false
+			const outputChunks: string[] = messages[i].commandOutput ? [messages[i].commandOutput!] : []
 			let j = i + 1
 
 			while (j < messages.length) {
@@ -36,15 +35,10 @@ export function combineCommandSequences(messages: DietCodeMessage[]): DietCodeMe
 					break
 				}
 				if (messages[j].ask === "command_output" || messages[j].say === "command_output") {
-					if (!didAddOutput) {
-						// Add a newline before the first output
-						combinedText += `\n${COMMAND_OUTPUT_STRING}`
-						didAddOutput = true
-					}
 					// handle cases where we receive empty command_output (ie when extension is relinquishing control over exit command button)
 					const output = messages[j].text || ""
-					if (output.length > 0) {
-						combinedText += `\n${output}`
+					if (output.length > 0 && messages[i].commandOutput === undefined) {
+						outputChunks.push(output)
 					}
 				}
 				j++
@@ -52,7 +46,7 @@ export function combineCommandSequences(messages: DietCodeMessage[]): DietCodeMe
 
 			combinedCommands.push({
 				...messages[i],
-				text: combinedText,
+				commandOutput: outputChunks.join("\n"),
 			})
 
 			i = j - 1 // Move to the index just before the next command or end of array

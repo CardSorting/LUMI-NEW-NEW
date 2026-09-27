@@ -5,7 +5,7 @@ import { DietCodeIgnoreController } from "@core/ignore/DietCodeIgnoreController"
 import { getJoyRideCache } from "@core/joyride"
 import { CommandPermissionController } from "@core/permissions"
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
-import type { CommandExecutionOptions } from "@integrations/terminal"
+import type { CommandExecutionOptions, CommandExecutionResult, CommandExecutionSnapshot } from "@integrations/terminal"
 import { BrowserSession } from "@services/browser/BrowserSession"
 import { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import { McpHub } from "@services/mcp/McpHub"
@@ -23,6 +23,7 @@ import { formatResponse } from "../prompts/responses"
 import { StateManager } from "../storage/StateManager"
 import { WorkspaceRootManager } from "../workspace"
 import { ToolResponse } from "."
+import type { ExecutionStateResult } from "./ExecutionState"
 import { MessageStateHandler } from "./message-state"
 import { TaskState } from "./TaskState"
 import { canonicalizeAttemptCompletionParams, checkCompletionGateCircuitBreaker } from "./tools/attemptCompletionUtils"
@@ -118,7 +119,7 @@ export class ToolExecutor {
 			command: string,
 			timeoutSeconds: number | undefined,
 			options?: CommandExecutionOptions,
-		) => Promise<[boolean, any]>,
+		) => Promise<CommandExecutionResult>,
 		private cancelRunningCommandTool: () => Promise<boolean>,
 		private doesLatestTaskCompletionHaveNewChanges: () => Promise<boolean>,
 		private updateFCListFromToolResponse: (taskProgress: string | undefined) => Promise<void>,
@@ -133,6 +134,12 @@ export class ToolExecutor {
 			context: "initial_task" | "resume" | "feedback",
 		) => Promise<{ cancel?: boolean; wasCancelled?: boolean; contextModification?: string; errorMessage?: string }>,
 		private getKnowledgeGraphService: () => Promise<KnowledgeGraphService | undefined>,
+		private readCommandOutput?: (
+			executionId: string,
+			timeoutSeconds?: number,
+			signal?: AbortSignal,
+		) => Promise<CommandExecutionSnapshot>,
+		private getExecutionState?: (executionId?: string) => ExecutionStateResult,
 	) {
 		this.autoApprover = new AutoApprove(this.stateManager)
 		this.guard = new UniversalGuard(cwd, taskId, this.stateManager)
@@ -205,6 +212,8 @@ export class ToolExecutor {
 				cancelTask: this.cancelTask,
 				updateTaskHistory: async () => [],
 				executeCommandTool: this.executeCommandTool,
+				readCommandOutput: this.readCommandOutput,
+				getExecutionState: this.getExecutionState,
 				cancelRunningCommandTool: this.cancelRunningCommandTool,
 				doesLatestTaskCompletionHaveNewChanges: this.doesLatestTaskCompletionHaveNewChanges,
 				updateFCListFromToolResponse: this.updateFCListFromToolResponse,

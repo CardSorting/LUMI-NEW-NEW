@@ -3,9 +3,10 @@ import { formatResponse } from "@core/prompts/responses"
 import { processFilesIntoText } from "@integrations/misc/extract-text"
 import { TerminalHangStage, TerminalUserInterventionAction, telemetryService } from "@services/telemetry"
 import { findLastIndex } from "@shared/array"
-import { COMMAND_CANCEL_TOKEN } from "@shared/ExtensionMessage"
+import { COMMAND_CANCEL_TOKEN, type CommandExecutionState } from "@shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
 import { CommandOutputCollector } from "./CommandOutputCollector"
+import { resolveCommandTimeoutSeconds } from "./commandPolicy"
 import { BUFFER_STUCK_TIMEOUT_MS, CHUNK_BYTE_SIZE, CHUNK_DEBOUNCE_MS, CHUNK_LINE_COUNT, COMPLETION_TIMEOUT_MS } from "./constants"
 import type {
 	CommandExecutorCallbacks,
@@ -22,7 +23,8 @@ export async function orchestrateCommandExecution(
 	callbacks: CommandExecutorCallbacks,
 	options: OrchestrationOptions,
 ): Promise<OrchestrationResult> {
-	const { timeoutSeconds, showShellIntegrationSuggestion, terminalType = "vscode", suppressUserInteraction = false } = options
+	const { showShellIntegrationSuggestion, terminalType = "vscode", suppressUserInteraction = false } = options
+	const timeoutSeconds = resolveCommandTimeoutSeconds(options.command, options.timeoutSeconds)
 	const output = new CommandOutputCollector()
 	let observing = true
 	let completed = false
@@ -30,6 +32,7 @@ export async function orchestrateCommandExecution(
 	let didContinue = false
 	let didCancelViaUi = false
 	let timedOut = false
+	let trackingLost = false
 	let userFeedback: { text?: string; images?: string[]; files?: string[] } | undefined
 	let outputBuffer: string[] = []
 	let outputBufferSize = 0
@@ -45,6 +48,10 @@ export async function orchestrateCommandExecution(
 		resolveTerminalEvent = resolve
 		rejectTerminalEvent = reject
 	})
+	let resolveCancellation!: () => void
+	const cancellation = new Promise<void>((resolve) => {
+		resolveCancellation = resolve
+	})
 
 	// EventEmitter ignores returned promises. Every observer handles both sync throws and rejected promises.
 	const observe = (label: string, action: () => unknown) => {
@@ -59,26 +66,48 @@ export async function orchestrateCommandExecution(
 	}
 	observe("Status display unavailable", () => callbacks.updateBackgroundCommandState(true))
 	let commandRow: ReturnType<CommandExecutorCallbacks["getDietCodeMessages"]>[number] | undefined
-	if (!suppressUserInteraction)
+	if (!suppressUserInteraction && !options.onStateChange)
 		observe("Command row unavailable", () => {
 			const messages = callbacks.getDietCodeMessages()
-			commandRow = messages[findLastIndex(messages, (message) => message.ask === "command" || message.say === "command")]
+			commandRow =
+				options.commandMessageTs !== undefined
+					? messages.find((message) => message.ts === options.commandMessageTs)
+					: messages[findLastIndex(messages, (message) => message.ask === "command" || message.say === "command")]
 		})
 	let commandStateCleared = false
-	const clearCommandState = () => {
-		if (commandStateCleared) return
-		commandStateCleared = true
-		process.removeListener("completed", onCompleted)
-		process.removeListener("error", onError)
-		observe("Status display unavailable", () => callbacks.updateBackgroundCommandState(false))
+	const updateCommandState = (state: CommandExecutionState) => {
+		if (options.onStateChange) {
+			observe("Command state observer unavailable", () => options.onStateChange!(state))
+			return
+		}
 		if (!commandRow) return
 		observe("Command row update unavailable", () => {
 			const index = callbacks
 				.getDietCodeMessages()
 				.findIndex((message) => (commandRow!.ts !== undefined ? message.ts === commandRow!.ts : message === commandRow))
-			if (index >= 0) return callbacks.updateDietCodeMessage(index, { commandCompleted: true })
+			if (index >= 0)
+				return callbacks.updateDietCodeMessage(index, {
+					commandCompleted: ["completed", "failed", "cancelled", "not_started"].includes(state.status),
+					commandExecution: state,
+				})
 			return undefined
 		})
+	}
+	const clearCommandState = () => {
+		if (commandStateCleared) return
+		commandStateCleared = true
+		process.removeListener("completed", onCompleted)
+		process.removeListener("error", onError)
+		process.removeListener("no_shell_integration", onNoShellIntegration)
+		options.signal?.removeEventListener("abort", onCancellation)
+		observe("Status display unavailable", () => callbacks.updateBackgroundCommandState(false))
+	}
+	const onCancellation = () => {
+		if (completed || commandStateCleared) return
+		didCancelViaUi = true
+		updateCommandState({ status: "stopping" })
+		resolveCancellation()
+		observe("Command wait could not detach", () => process.continue())
 	}
 	const clearTimers = () => {
 		for (const timer of [chunkTimer, bufferStuckTimer, completionTimer, waitTimer]) if (timer) clearTimeout(timer)
@@ -129,8 +158,10 @@ export async function orchestrateCommandExecution(
 					observe("Cancellation telemetry unavailable", () =>
 						telemetryService.captureTerminalUserIntervention(TerminalUserInterventionAction.CANCELLED, terminalType),
 					)
-					say("command_output", "Command cancelled")
-					if (process.terminate) observe("Command termination failed", () => process.terminate!())
+					say("command_output", "Stop requested. Waiting for terminal confirmation.")
+					onCancellation()
+					if (options.onCancel) observe("Command stop request failed", options.onCancel)
+					else if (process.terminate) observe("Command termination failed", () => process.terminate!())
 				} else {
 					if (text || images?.length || files?.length) userFeedback = { text, images, files }
 					observe("Continue telemetry unavailable", () =>
@@ -179,8 +210,19 @@ export async function orchestrateCommandExecution(
 		else scheduleFlush()
 	}
 	const onCompleted = (details?: TerminalCompletionDetails) => {
+		if (commandStateCleared) return
 		completed = true
 		completionDetails = details
+		updateCommandState({
+			status: details?.cancelled
+				? "cancelled"
+				: (typeof details?.exitCode === "number" && details.exitCode !== 0) || details?.signal
+					? "failed"
+					: "completed",
+			exitCode: details?.exitCode ?? undefined,
+			signal: details?.signal ?? undefined,
+			terminalClosed: details?.terminalClosed,
+		})
 		resolveTerminalEvent()
 		clearTimers()
 		clearCommandState()
@@ -188,21 +230,30 @@ export async function orchestrateCommandExecution(
 		if (observing && (outputBuffer.length || publishing)) say("command_output", takeOutput())
 	}
 	const onError = (error: Error) => {
+		if (commandStateCleared) return
+		updateCommandState({ status: "failed" })
 		rejectTerminalEvent(error)
 		clearTimers()
 		clearCommandState()
 	}
 	const onNoShellIntegration = () => {
-		const suggest =
-			typeof showShellIntegrationSuggestion === "function"
-				? showShellIntegrationSuggestion()
-				: showShellIntegrationSuggestion
-		say(suggest ? "shell_integration_warning_with_suggestion" : "shell_integration_warning")
+		trackingLost = true
+		updateCommandState({ status: "unknown" })
+		if (!observing) return
+		observe("Shell integration warning unavailable", () => {
+			const suggest =
+				typeof showShellIntegrationSuggestion === "function"
+					? showShellIntegrationSuggestion()
+					: showShellIntegrationSuggestion
+			say(suggest ? "shell_integration_warning_with_suggestion" : "shell_integration_warning")
+		})
 	}
 	process.on("line", onLine)
 	process.once("completed", onCompleted)
 	process.once("error", onError)
 	process.once("no_shell_integration", onNoShellIntegration)
+	options.signal?.addEventListener("abort", onCancellation, { once: true })
+	updateCommandState({ status: "running" })
 	// A process can reject without emitting error; after a detached wait it can emit error after its promise resolved.
 	void process.catch(onError)
 	completionTimer = setTimeout(() => {
@@ -213,38 +264,38 @@ export async function orchestrateCommandExecution(
 	}, COMPLETION_TIMEOUT_MS)
 
 	try {
-		const timeout =
-			Number.isFinite(timeoutSeconds) && timeoutSeconds! > 0 ? Math.min(timeoutSeconds! * 1000, 2_147_483_647) : undefined
-		const outcome =
-			timeout === undefined
-				? await Promise.race([process, terminalEvent])
-				: await Promise.race([
-						process,
-						terminalEvent,
-						new Promise<"timeout">((resolve) => {
-							waitTimer = setTimeout(() => resolve("timeout"), timeout)
-						}),
-					])
+		if (options.signal?.aborted) onCancellation()
+		const outcome = await Promise.race([
+			process,
+			terminalEvent,
+			cancellation,
+			new Promise<"timeout">((resolve) => {
+				waitTimer = setTimeout(() => resolve("timeout"), timeoutSeconds * 1000)
+			}),
+		])
 		if (outcome === "timeout" && !completed) {
 			timedOut = true
 			didContinue = true
 			process.continue()
 		}
+		if (!completed && !commandStateCleared)
+			updateCommandState({ status: didCancelViaUi ? "stopping" : trackingLost ? "unknown" : "background" })
 	} finally {
 		observing = false
 		clearTimers()
 		process.removeListener("line", onLine)
-		process.removeListener("no_shell_integration", onNoShellIntegration)
 		if (outputBuffer.length) say("command_output", takeOutput())
 		await output.finish()
 	}
 
 	const snapshot = output.getSnapshot()
+	if (snapshot.logNotice) say("command_output", snapshot.logNotice)
 	const result = terminalManager.processOutput(snapshot.lines)
 	const logNotice = snapshot.logNotice ? `\n${snapshot.logNotice}` : ""
 	const common = {
 		outputLines: snapshot.lines,
 		logFilePath: snapshot.logFilePath,
+		logNotice: snapshot.logNotice,
 		exitCode: completionDetails?.exitCode,
 		signal: completionDetails?.signal,
 	}
@@ -253,9 +304,9 @@ export async function orchestrateCommandExecution(
 			...common,
 			userRejected: true,
 			result: formatResponse.toolResult(
-				`Command cancelled.${result ? `\nOutput captured before cancellation:\n${result}` : ""}${logNotice}`,
+				`${completed ? "Command finished after a stop request." : "Stop requested; command termination has not been confirmed. Inspect the existing terminal before retrying. Do not launch it again."}${result ? `\nOutput captured before cancellation:\n${result}` : ""}${logNotice}`,
 			),
-			completed: false,
+			completed,
 		}
 	if (userFeedback) {
 		say("user_feedback", userFeedback.text, userFeedback.images, userFeedback.files)
@@ -287,7 +338,9 @@ export async function orchestrateCommandExecution(
 					: `Command failed with exit code ${exitCode}.`
 				: signal
 					? `Command terminated by signal ${signal}.`
-					: "Command execution finished; exit status was not reported."
+					: completionDetails?.terminalClosed
+						? "Terminal closed; command exit status was not reported."
+						: "Command execution finished; exit status was not reported. Verify the result before rerunning."
 		return {
 			...common,
 			userRejected: false,

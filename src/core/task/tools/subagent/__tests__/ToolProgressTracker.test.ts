@@ -4,6 +4,64 @@ import { formatResponse } from "@/core/prompts/responses"
 import { ToolProgressTracker } from "../../../ToolProgressTracker"
 
 describe("agent progress tracking", () => {
+	it("does not renew work by polling execution inventory, even when sibling state changes", () => {
+		const tracker = new ToolProgressTracker()
+		for (let i = 0; i < 8; i++) {
+			tracker.record(
+				"get_execution_state",
+				{ execution_id: `action-${i}` },
+				JSON.stringify({ status: i % 2 ? "running" : "completed", result_preview: `sibling result ${i}` }),
+			)
+			assert.equal(tracker.finishTurn(), i === 7 ? "handoff" : i === 2 ? "redirect" : "continue")
+		}
+	})
+	it("does not renew repeated command results through fresh read handles or log paths", () => {
+		const tracker = new ToolProgressTracker()
+		for (let i = 0; i < 9; i++) {
+			tracker.record(
+				"read_command_output",
+				{ execution_id: `run-${i}`, timeout: i },
+				JSON.stringify({
+					execution_id: `run-${i}`,
+					action_id: `action-${i}`,
+					owner: `helper-${i}`,
+					terminal_id: i,
+					command: "build",
+					cwd: "/workspace",
+					status: "completed",
+					exit_code: 0,
+					output: "unchanged result",
+					log_file_path: `/tmp/log-${i}`,
+					log_notice: `Full captured output saved to: /tmp/log-${i}`,
+				}),
+			)
+			assert.equal(tracker.finishTurn(), i === 8 ? "handoff" : i === 3 ? "redirect" : "continue")
+		}
+	})
+	it("does not renew polling by changing the wait or risk hint", () => {
+		for (const name of ["read_command_output", "execute_command"]) {
+			const tracker = new ToolProgressTracker()
+			tracker.record(name, { command: "build", execution_id: "run", timeout: 0 }, "unchanged")
+			tracker.finishTurn()
+			for (let i = 0; i < 8; i++) {
+				tracker.record(name, { command: "build", execution_id: "run", timeout: i, requires_approval: i % 2 }, "unchanged")
+				assert.equal(tracker.finishTurn(), i === 7 ? "handoff" : i === 2 ? "redirect" : "continue")
+			}
+			tracker.record(name, { command: "build", execution_id: "run" }, "new output")
+			assert.equal(tracker.finishTurn(), "continue")
+		}
+	})
+	it("ignores fresh execution receipt IDs when the same command returns unchanged output", () => {
+		const tracker = new ToolProgressTracker()
+		for (let i = 0; i < 9; i++) {
+			tracker.record(
+				"execute_command",
+				{ command: "pwd" },
+				`same output\n\nExecution ID: 00000000-0000-0000-0000-00000000000${i}. `,
+			)
+			assert.equal(tracker.finishTurn(), i === 8 ? "handoff" : i === 3 ? "redirect" : "continue")
+		}
+	})
 	it("renews continuation for productive work beyond the old turn and tool limits", () => {
 		const tracker = new ToolProgressTracker()
 		for (let i = 0; i < 100; i++) {

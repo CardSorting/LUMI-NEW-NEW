@@ -14,6 +14,7 @@ import { execute_command_variants } from "./execute_command"
 import { focus_chain_variants } from "./focus_chain"
 import { generate_dependency_map_variants } from "./generate_dependency_map"
 import { generate_explanation_variants } from "./generate_explanation"
+import { get_execution_state_variants } from "./get_execution_state"
 import { list_code_definition_names_variants } from "./list_code_definition_names"
 import { list_files_variants } from "./list_files"
 import { load_mcp_documentation_variants } from "./load_mcp_documentation"
@@ -21,6 +22,7 @@ import { new_task_variants } from "./new_task"
 import { plan_mode_respond_variants } from "./plan_mode_respond"
 import { project_map_variants } from "./project_map"
 import { query_stability_variants } from "./query_stability"
+import { read_command_output_variants } from "./read_command_output"
 import { read_file_variants } from "./read_file"
 import { recalibrate_stability_variants } from "./recalibrate_stability"
 import { replace_in_file_variants } from "./replace_in_file"
@@ -43,6 +45,8 @@ import { write_to_file_variants } from "./write_to_file"
 export function registerDietCodeToolSets(): void {
 	// Collect all variants from all tools
 	const allToolVariants = [
+		...get_execution_state_variants,
+		...read_command_output_variants,
 		...access_mcp_resource_variants,
 		...act_mode_respond_variants,
 		...apply_patch_variants,

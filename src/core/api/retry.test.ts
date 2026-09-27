@@ -101,7 +101,20 @@ describe("bounded API retries", () => {
 
 	it("does not hot-loop on expired, zero or malformed headers", () => {
 		for (const value of ["0", "-1", "invalid", "1262304000", "Fri, 01 Jan 2010 00:00:00 GMT"]) {
-			assert.equal(getApiRetryDelay({ headers: { "retry-after": value } }, 1), 2000)
+			const delay = getApiRetryDelay({ headers: { "retry-after": value } }, 1)!
+			assert.ok(delay >= 1000 && delay <= 2000)
+		}
+	})
+
+	it("spreads concurrent retries while honoring case-insensitive server minimums", () => {
+		const random = sinon.stub(Math, "random").returns(0)
+		assert.equal(getApiRetryDelay({}, 2), 2000)
+		random.returns(0.9999)
+		assert.equal(getApiRetryDelay({}, 2), 4000)
+		assert.equal(getApiRetryDelay({ headers: { "Retry-After": "5" } }, 0), 5000)
+		assert.equal(getApiRetryDelay({ headers: { "Retry-After": "60" } }, 0), undefined)
+		for (const attempt of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+			assert.equal(getApiRetryDelay({}, attempt, Number.NaN, Number.NaN), 1000)
 		}
 	})
 

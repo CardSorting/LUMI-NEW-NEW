@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert"
+import { randomUUID } from "node:crypto"
 import { afterEach, beforeEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { PreToolUseHookCancellationError } from "@/core/hooks/PreToolUseHookCancellationError"
 import * as telemetry from "@/services/telemetry"
+import { executor } from "../../../ActionExecutor"
 import { TaskState } from "../../../TaskState"
 import { ToolProgressTracker } from "../../../ToolProgressTracker"
 import type { TaskConfig } from "../../types/TaskConfig"
@@ -24,7 +26,7 @@ function fixture(resource = false, server = "docs") {
 	const ask = sinon.stub().rejects(new Error("Configured trust must not prompt"))
 	const getPendingNotifications = sinon.stub().returns([])
 	const config = {
-		ulid: "mcp-execution-test",
+		ulid: randomUUID(),
 		cwd: "/workspace",
 		mode: "act",
 		taskState: new TaskState(),
@@ -59,6 +61,41 @@ describe("MCP execution outcomes", () => {
 	afterEach(() => sinon.restore())
 	for (const resource of [false, true]) {
 		const kind = resource ? "resource" : "tool"
+		it(`shares one in-flight ${kind} across helpers, including after its caller stops waiting`, async () => {
+			const clock = sinon.useFakeTimers()
+			const { config, operation, handler, block } = fixture(resource)
+			let finish!: (value: unknown) => void
+			operation.returns(
+				new Promise((resolve) => {
+					finish = resolve
+				}),
+			)
+			block.params.arguments = '{"a":1,"b":2}'
+			const first = handler.execute(config, block)
+			await clock.tickAsync(0)
+			const id = executor.executions.list(config.ulid).active[0].execution_id
+			const sibling: TaskConfig = { ...config, taskState: new TaskState(), executionOwner: "helper:two" }
+			const reordered = { ...block, params: { ...block.params, arguments: '{"b":2,"a":1}' } }
+			const duplicate = await handler.execute(sibling, reordered)
+			assert.ok(isToolFailure(duplicate))
+			assert.match(String(duplicate), /No duplicate was started/)
+			assert.doesNotMatch(String(duplicate), /MCP request failed|remote action may already have completed/)
+			assert.ok(String(duplicate).includes(id))
+			config.taskState.abort = true
+			assert.ok(isToolFailure(await first))
+			assert.equal(executor.executions.get(config.ulid, id)?.status, "awaiting_completion")
+			assert.ok(String(await handler.execute(sibling, reordered)).includes(id))
+			sinon.assert.calledOnce(operation)
+			finish(
+				resource
+					? { contents: [{ uri: "docs://guide", text: "Saved once" }] }
+					: { content: [{ type: "text", text: "Saved once" }] },
+			)
+			await clock.tickAsync(0)
+			assert.equal(executor.executions.get(config.ulid, id)?.status, "completed")
+			assert.match(executor.executions.get(config.ulid, id)!.result_preview!, /Saved once/)
+			assert.equal(clock.countTimers(), 0)
+		})
 		it(`retains a successful ${kind} result when result display and telemetry fail`, async () => {
 			const { config, operation, say, ask, handler, block } = fixture(resource)
 			say.withArgs("mcp_server_response").rejects(new Error("display failed"))
@@ -185,6 +222,7 @@ describe("MCP execution outcomes", () => {
 	it("allows another server to execute while all slots for one server are occupied", async () => {
 		const slow = fixture(false, "slow")
 		const fast = fixture(false, "fast")
+		fast.config.ulid = slow.config.ulid
 		let fifthStarted!: () => void
 		const saturated = new Promise<void>((resolve) => {
 			fifthStarted = resolve
@@ -197,7 +235,12 @@ describe("MCP execution outcomes", () => {
 					if (++count === 5) fifthStarted()
 				}),
 		)
-		const pending = Array.from({ length: 6 }, () => slow.handler.execute(slow.config, slow.block))
+		const pending = Array.from({ length: 6 }, (_, index) =>
+			slow.handler.execute(slow.config, {
+				...slow.block,
+				params: { ...slow.block.params, arguments: JSON.stringify({ item: index }) },
+			}),
+		)
 		try {
 			await saturated
 			assert.match(String(await fast.handler.execute(fast.config, fast.block)), /Saved result/)

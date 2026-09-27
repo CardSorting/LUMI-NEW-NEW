@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert"
 import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
+import { ActionAlreadyActiveError } from "../ActionExecutionRegistry"
 import { ActionExecutor } from "../ActionExecutor"
 import { TaskState } from "../TaskState"
 
@@ -16,6 +17,290 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 describe("ActionExecutor", () => {
 	afterEach(() => sinon.restore())
+	it("exposes FIFO blockers, unknown occupants, and queue removal without changing scheduler state", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const running = Array.from({ length: 5 }, (_, i) =>
+			executor.execute("task", () => work.promise, {
+				concurrencyGroup: "mcp:docs",
+				...(i < 3 ? { execution: { kind: "mcp_tool" as const, input: i, label: `request ${i}` } } : {}),
+			}),
+		)
+		const controller = new AbortController()
+		const cancelled = assert.rejects(
+			executor.execute("task", async () => "must not start", {
+				concurrencyGroup: "mcp:docs",
+				signal: controller.signal,
+				execution: { kind: "mcp_tool", input: "queued", label: "queued" },
+			}),
+			/abort/i,
+		)
+		await clock.tickAsync(0)
+		const queues = executor.getQueues("task")
+		assert.equal(queues[0].occupied_slots, 5)
+		assert.equal(queues[0].concurrency, 5)
+		assert.equal(queues[0].active_execution_ids.length, 3)
+		assert.equal(queues[0].untracked_active, 2)
+		assert.equal(queues[0].queue[0].position, 1)
+		const queuedId = queues[0].queue[0].execution_id!
+		assert.equal(executor.executions.get("task", queuedId)?.queue_timeout_ms, 30_000)
+		assert.equal(executor.executions.get("task", queuedId)?.attempt, 0)
+		assert.deepEqual(executor.getQueues("other-task"), [])
+		assert.deepEqual(executor.getQueues("task"), queues)
+		queues[0].queue.length = 0
+		assert.equal(executor.getQueues("task")[0].queue.length, 1)
+		controller.abort()
+		await cancelled
+		assert.equal(executor.getQueues("task")[0].occupied_slots, 5)
+		assert.equal(executor.getQueues("task")[0].queue.length, 0)
+		work.resolve()
+		await Promise.all(running)
+		assert.deepEqual(executor.getQueues("task"), [])
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("shows retry attempts accurately when a later attempt expires in the queue", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		const operation = sinon.stub().rejects(new Error("SQLITE_BUSY"))
+		const pending = assert.rejects(
+			executor.execute("task", operation, {
+				idempotent: true,
+				maxRetries: 3,
+				backoffMs: 10,
+				queueTimeoutMs: 5,
+				execution: { kind: "mcp_resource", input: "docs", label: "Read docs" },
+			}),
+			/waiting for an execution slot/,
+		)
+		await clock.tickAsync(0)
+		const id = executor.executions.list("task").active[0].execution_id
+		assert.equal(executor.executions.get("task", id)?.attempt, 1)
+		assert.equal(executor.executions.get("task", id)?.max_attempts, 3)
+		const work = deferred()
+		const blockers = Array.from({ length: 5 }, () => executor.execute("task", () => work.promise))
+		await clock.tickAsync(10)
+		assert.equal(executor.executions.get("task", id)?.status, "queued")
+		assert.equal(executor.getQueues("task")[0].queue[0].execution_id, id)
+		await clock.tickAsync(5)
+		await pending
+		assert.equal(
+			executor.executions.get("task", id)?.status,
+			"failed",
+			"the first attempt ran; the whole action was not 'not_started'",
+		)
+		assert.equal(executor.executions.get("task", id)?.attempt, 1)
+		sinon.assert.calledOnce(operation)
+		work.resolve()
+		await Promise.all(blockers)
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("shows bounded distinguishing inputs while keeping credential redaction out of identity matching", async () => {
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const pending = ["secret-one", "secret-two"].map((token) =>
+			executor.execute("task", () => work.promise, {
+				execution: {
+					kind: "mcp_tool",
+					label: "docs/save",
+					input: {
+						server: "docs",
+						arguments: { path: "report.txt", token, overwrite: false, limit: 7, pages: [1, 2] },
+					},
+				},
+			}),
+		)
+		const active = executor.executions.list("task").active
+		assert.equal(active.length, 2)
+		assert.notEqual(active[0].execution_id, active[1].execution_id)
+		for (const action of active) {
+			const input = JSON.parse(action.input_preview!)
+			assert.equal(input.arguments.path, "report.txt")
+			assert.equal(input.arguments.overwrite, false)
+			assert.equal(input.arguments.limit, 7)
+			assert.deepEqual(input.arguments.pages, [1, 2])
+			assert.equal(input.arguments.token, "[redacted]")
+			assert.ok(!action.input_preview!.includes("secret-"))
+			assert.ok(action.input_preview!.length <= 800)
+		}
+		work.resolve()
+		await Promise.all(pending)
+	})
+	it("claims semantic identity before queueing and ignores owner and JSON key order", async () => {
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const blockers = Array.from({ length: 5 }, () => executor.execute("task", () => work.promise))
+		const operation = sinon.stub().resolves("saved")
+		const queued = executor.execute("task", operation, {
+			execution: { kind: "mcp_tool", input: { a: 1, b: 2 }, label: "save", owner: "helper one" },
+		})
+		const [{ execution_id, status }] = executor.executions.list("task").active
+		assert.equal(status, "queued")
+		await assert.rejects(
+			executor.execute("task", operation, {
+				execution: { kind: "mcp_tool", input: { b: 2, a: 1 }, label: "same save", owner: "helper two" },
+			}),
+			(error: unknown) => {
+				assert.ok(error instanceof ActionAlreadyActiveError)
+				assert.equal(error.execution.execution_id, execution_id)
+				return true
+			},
+		)
+		sinon.assert.notCalled(operation)
+		work.resolve()
+		await Promise.all([...blockers, queued])
+		sinon.assert.calledOnce(operation)
+		assert.equal(executor.executions.get("task", execution_id)?.status, "completed")
+		assert.equal(executor.executions.get("another task", execution_id), undefined)
+		assert.equal(
+			await executor.execute("task", operation, {
+				execution: { kind: "mcp_tool", input: { a: 1, b: 2 }, label: "save again" },
+			}),
+			"saved",
+		)
+		sinon.assert.calledTwice(operation)
+	})
+	it("keeps a timed-out identity reserved and publishes its actual late result", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		let finish!: (value: string) => void
+		const operation = sinon.stub().returns(
+			new Promise<string>((resolve) => {
+				finish = resolve
+			}),
+		)
+		const execution = { kind: "mcp_tool" as const, input: ["save", "a"], label: "Save a" }
+		const timedOut = assert.rejects(executor.execute("task", operation, { execution, timeoutMs: 10 }), /may still be running/)
+		const id = executor.executions.list("task").active[0].execution_id
+		await clock.tickAsync(10)
+		await timedOut
+		assert.equal(executor.executions.get("task", id)?.status, "awaiting_completion")
+		assert.deepEqual(executor.getQueues("task")[0].active_execution_ids, [id])
+		assert.equal(executor.executions.get("task", id)?.max_attempts, 1)
+		await assert.rejects(executor.execute("task", operation, { execution }), ActionAlreadyActiveError)
+		sinon.assert.calledOnce(operation)
+		finish("Saved once")
+		await clock.tickAsync(0)
+		assert.equal(executor.executions.get("task", id)?.status, "completed")
+		assert.equal(executor.executions.get("task", id)?.result_preview, "Saved once")
+		assert.equal(executor.executions.list("task").active.length, 0)
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("keeps a single identity throughout idempotent backoff and clears it on cancellation", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		const controller = new AbortController()
+		const operation = sinon.stub().rejects(new Error("SQLITE_BUSY"))
+		const execution = { kind: "file_write" as const, input: "a", label: "Save a" }
+		const pending = assert.rejects(
+			executor.execute("task", operation, { execution, idempotent: true, signal: controller.signal, backoffMs: 100 }),
+			/abort/i,
+		)
+		await clock.tickAsync(0)
+		const id = executor.executions.list("task").active[0].execution_id
+		assert.equal(executor.executions.get("task", id)?.status, "retrying")
+		await assert.rejects(executor.execute("task", operation, { execution }), ActionAlreadyActiveError)
+		controller.abort()
+		await pending
+		assert.equal(executor.executions.get("task", id)?.status, "failed")
+		assert.equal(executor.executions.list("task").active.length, 0)
+		sinon.assert.calledOnce(operation)
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("releases an expired queue reservation without dispatching it and bounds completed receipts", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const blockers = Array.from({ length: 5 }, () => executor.execute("task", () => work.promise))
+		const operation = sinon.stub().resolves("x".repeat(5000))
+		const execution = { kind: "file_write" as const, input: "a", label: "Save a" }
+		const expired = assert.rejects(executor.execute("task", operation, { execution, queueTimeoutMs: 10 }), /did not start/)
+		const id = executor.executions.list("task").active[0].execution_id
+		await clock.tickAsync(10)
+		await expired
+		assert.equal(executor.executions.get("task", id)?.status, "not_started")
+		sinon.assert.notCalled(operation)
+		work.resolve()
+		await Promise.all(blockers)
+		for (let i = 0; i < 129; i++) await executor.execute("task", operation, { execution })
+		assert.equal(executor.executions.get("task", id), undefined)
+		assert.equal(executor.executions.list("task").recent.length, 8)
+		assert.ok(executor.executions.list("task").recent.every((entry) => entry.result_preview!.length <= 1600))
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("limits helper concurrency across separate batches without blocking shell actions", async () => {
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const operation = sinon.stub().returns(work.promise)
+		const helpers = Array.from({ length: 5 }, (_, index) =>
+			executor.execute("task", operation, {
+				concurrencyGroup: "helpers:0",
+				execution: { kind: "helper", input: index, label: `Helper ${index}` },
+			}),
+		)
+		await flush()
+		assert.equal(operation.callCount, 3)
+		assert.equal(executor.executions.list("task").active.filter((entry) => entry.status === "queued").length, 2)
+		assert.equal(await executor.execute("task", async () => "independent", { concurrencyGroup: "shell" }), "independent")
+		assert.equal(await executor.execute("task", async () => "child", { concurrencyGroup: "helpers:1" }), "child")
+		work.resolve()
+		await Promise.all(helpers)
+		assert.equal(operation.callCount, 5)
+	})
+	it("does not discard completed SDK values when a preview encounters cycles or throwing getters", async () => {
+		const executor = new ActionExecutor()
+		const cyclic: Record<string, unknown> = { text: "saved" }
+		cyclic.self = cyclic
+		const getter = Object.defineProperty({}, "isError", {
+			enumerable: true,
+			get() {
+				throw new Error("unreadable")
+			},
+		})
+		for (const value of [cyclic, getter]) {
+			assert.equal(
+				await executor.execute("task", async () => value, {
+					execution: { kind: "mcp_tool", input: "resource", label: "Read resource" },
+				}),
+				value,
+			)
+			const receipt = executor.executions.list("task").recent.at(-1)!
+			assert.equal(receipt.status, "completed")
+			assert.ok(receipt.result_preview!.length <= 1600)
+			receipt.status = "failed"
+			assert.equal(executor.executions.get("task", receipt.execution_id)?.status, "completed")
+		}
+	})
+
+	it("expires queued work without ever dispatching it later or freeing an occupied slot", async () => {
+		const clock = sinon.useFakeTimers()
+		const executor = new ActionExecutor()
+		const work = deferred()
+		const running = Array.from({ length: 5 }, () => executor.execute("task", () => work.promise))
+		const operation = sinon.stub().resolves()
+		const queued = assert.rejects(
+			executor.execute("task", operation, { queueTimeoutMs: 20, idempotent: true }),
+			/Action did not start/,
+		)
+		await clock.tickAsync(20)
+		await queued
+		sinon.assert.notCalled(operation)
+		assert.equal(await executor.execute("task", async () => "independent", { concurrencyGroup: "other" }), "independent")
+		work.resolve()
+		await Promise.all(running)
+		sinon.assert.notCalled(operation)
+		assert.equal(clock.countTimers(), 0)
+	})
+
+	it("does not turn oversized operation deadlines into immediate timeouts", async () => {
+		const clock = sinon.useFakeTimers()
+		const work = deferred()
+		const pending = new ActionExecutor().execute("task", () => work.promise, { timeoutMs: 1e15 })
+		await clock.tickAsync(100)
+		work.resolve()
+		await pending
+		assert.equal(clock.countTimers(), 0)
+	})
 
 	it("does not replay a mutating action on transient errors", async () => {
 		const executor = new ActionExecutor()

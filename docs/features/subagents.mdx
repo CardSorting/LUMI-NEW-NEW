@@ -15,9 +15,9 @@ Subagents let LUMI spawn focused research agents that run in parallel. Each suba
 When LUMI uses the `use_subagents` tool, it launches independent agents simultaneously. Each one:
 
 - Gets its own prompt describing what to investigate
-- Runs with a separate context window and token budget
-- Can read files, search code, list directories, run read-only commands, and use skills
-- Cannot edit files, use the browser, access MCP servers, or spawn nested subagents
+- Runs with a separate context window; configured token and cost limits are shared across the batch
+- Can inspect files, make scoped edits, run commands, and use available skills and MCP tools, subject to the task's permissions
+- Cannot spawn nested subagents or use tools outside its allowlist
 - Returns a result focused on the most relevant file paths for the main agent to read next
 
 Subagent costs (tokens and API spend) are tracked separately per subagent and rolled into the task's total cost. You can see per-subagent stats (tool calls, tokens, cost) in the chat UI as they run.
@@ -57,7 +57,7 @@ If auto-approve is off, LUMI will ask for your approval before launching subagen
 
 ## What Subagents Can Do
 
-Subagents are read-only research agents. Here is what they have access to:
+The default helper allowlist supports research and scoped implementation. Individual agent configurations may restrict it further:
 
 | Tool | Purpose |
 |------|---------|
@@ -65,13 +65,21 @@ Subagents are read-only research agents. Here is what they have access to:
 | `list_files` | List directory contents |
 | `search_files` | Regex search across files |
 | `list_code_definition_names` | List top-level classes, functions, and methods |
-| `execute_command` | Run read-only commands (`ls`, `grep`, `git log`, `git diff`, etc.) |
+| File editing tools | Make scoped changes subject to tool permissions |
+| `execute_command` | Run commands subject to the task's command permissions |
+| `read_command_output` | Inspect or briefly wait for an existing command by execution ID; included when shell access is allowed |
+| `get_execution_state` | Inspect shared commands, queued actions, helper assignments, and recent results without starting work |
 | `use_skill` | Load and activate skills |
+| Web and MCP tools | Use available search, fetch, and configured MCP capabilities |
 
-Subagents cannot write files, apply patches, use the browser, access MCP servers, or perform web searches. They also cannot spawn their own subagents.
+Subagents cannot spawn their own subagents. Additional delegation belongs to the parent.
+
+Parent and helper requests receive fresh execution state at provider dispatch, including retries, so they can reuse work already in progress. It includes input previews, attempt limits, queue capacity and wait order, and current approval settings. Missing observation is labeled unavailable rather than implying that nothing is running. Use `get_execution_state` with either a command ID or an action ID to inspect tracked work without starting it again.
+
+Identical assignments are merged within a batch, and duplicate active assignments return the existing execution ID. Batches share the same three helper slots; queued work remains visible and is removed on cancellation. A timeout stops waiting, but does not prove that the underlying work stopped or release a slot still occupied by unresolved work. Runtime permissions and helper tool allowlists continue to apply.
 
 <Note>
-  Commands run by subagents execute in the background and are restricted to read-only operations. Subagents will not run commands that modify files or system state.
+  Subagent commands run without interactive terminal input and use the task's existing command permissions.
   Subagents also benefit from command pipelines and filters to narrow output quickly before reading files, for example `rg ... | sort | uniq`.
 </Note>
 

@@ -29,6 +29,8 @@ export const workspace = {
 
 // Export other commonly used VSCode API mocks as needed
 export const window = {
+	onDidCloseTerminal: (_listener: (terminal: any) => void) => ({ dispose: () => {} }),
+	onDidEndTerminalShellExecution: undefined as ((listener: (event: any) => void) => { dispose: () => void }) | undefined,
 	showErrorMessage: (_message: string) => Promise.resolve(),
 	showWarningMessage: (_message: string) => Promise.resolve(),
 	showInformationMessage: (_message: string) => Promise.resolve(),

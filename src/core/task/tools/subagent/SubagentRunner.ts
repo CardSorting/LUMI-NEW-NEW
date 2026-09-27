@@ -1,16 +1,21 @@
+import { randomUUID } from "node:crypto"
 import * as path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import type { ApiHandler, buildApiHandler } from "@core/api"
+import { guardedStream } from "@core/api/guardedStream"
 import { getApiRetryDelay, shouldRetryApiError, waitForApiRetry } from "@core/api/retry"
+import type { ApiStreamChunk } from "@core/api/transform/stream"
 import { parseAssistantMessageV2, ToolUse } from "@core/assistant-message"
 import { discoverSkills, getAvailableSkills } from "@core/context/instructions/user-instructions/skills"
 import { formatResponse } from "@core/prompts/responses"
 import { PromptRegistry } from "@core/prompts/system-prompt"
 import type { SystemPromptContext } from "@core/prompts/system-prompt/types"
 import { StreamResponseHandler } from "@core/task/StreamResponseHandler"
+import { buildInterruptedAssistantContent, STREAM_RECOVERY_INSTRUCTION } from "@core/task/streamRecovery"
 import { ModelInfo } from "@shared/api"
 import { resolveCompletionGateOptions } from "@shared/audit/auditGatePolicyLoader"
 import { buildSubagentAuditContext, buildSubagentGateSignals } from "@shared/audit/auditSubagentContext"
+import type { SubagentActivity } from "@shared/ExtensionMessage"
 import {
 	DietCodeAssistantToolUseBlock,
 	DietCodeStorageMessage,
@@ -19,6 +24,7 @@ import {
 } from "@shared/messages"
 import { Logger } from "@shared/services/Logger"
 import { DietCodeDefaultTool, DietCodeTool } from "@shared/tools"
+import pTimeout from "p-timeout"
 import { ContextManager } from "@/core/context/context-management/ContextManager"
 import { checkContextWindowExceededError } from "@/core/context/context-management/context-error-handling"
 import { getContextWindowInfo } from "@/core/context/context-management/context-window-utils"
@@ -28,6 +34,7 @@ import { DietCodeError, DietCodeErrorType } from "@/services/error"
 import { ApiFormat } from "@/shared/proto/dietcode/models"
 import { calculateApiCostAnthropic, calculateApiCostOpenAI } from "@/utils/cost"
 import { isNextGenModelFamily } from "@/utils/model-utils"
+import { withExecutionContext } from "../../ExecutionContext"
 import { TaskState } from "../../TaskState"
 import { ToolProgressTracker } from "../../ToolProgressTracker"
 import {
@@ -49,6 +56,7 @@ import { SwarmConsensusHandler } from "./SwarmConsensusHandler"
 const MAX_EMPTY_ASSISTANT_RETRIES = 3
 const MAX_INITIAL_STREAM_ATTEMPTS = 3
 const INITIAL_STREAM_RETRY_BASE_DELAY_MS = 250
+const MAX_STREAM_RECOVERY_ATTEMPTS = 2
 
 function getParentCompletionFailedStage(taskState: TaskState): string | undefined {
 	return taskState.lastCompletionFailedStage
@@ -86,6 +94,7 @@ interface ConfigWithExtensions extends TaskConfig {
 interface SubagentProgressUpdate {
 	stats?: SubagentRunStats
 	latestToolCall?: string
+	activity?: SubagentActivity
 	status?: "running" | "completed" | "failed"
 	result?: string
 	error?: string
@@ -164,7 +173,7 @@ function serializeToolResult(result: unknown): string {
 			.join("\n")
 	}
 
-	return JSON.stringify(result, null, 2)
+	return JSON.stringify(result, null, 2) ?? "(empty tool result)"
 }
 
 function toToolUseParams(input: unknown): Partial<Record<string, string>> {
@@ -298,10 +307,15 @@ function pushSubagentToolResultBlock(
 }
 
 export class SubagentRunner {
+	private readonly executionOwner = `helper:${randomUUID()}`
+	getExecutionOwner(): string {
+		return this.executionOwner
+	}
 	private readonly apiHandler: ApiHandler
 	private readonly agent: SubagentBuilder
 	private readonly allowedTools: DietCodeDefaultTool[]
 	private activeApiAbort?: () => void
+	private readonly abortController = new AbortController()
 	private abortRequested = false
 	private recursionDepth = 0
 	private streamId?: string
@@ -340,6 +354,7 @@ export class SubagentRunner {
 
 	async abort(): Promise<void> {
 		this.abortRequested = true
+		this.abortController.abort()
 		if (this.activeTaskState) this.activeTaskState.abort = true
 		try {
 			this.agent.cancelPendingRetry()
@@ -356,6 +371,24 @@ export class SubagentRunner {
 
 	private shouldAbort(): boolean {
 		return this.abortRequested || this.baseConfig.taskState.abort
+	}
+
+	private throwIfAborted(): void {
+		if (this.shouldAbort()) throw new Error("Subagent run cancelled.")
+	}
+
+	private checkBudget(): void {
+		const { maxTokens, maxCost, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens, totalCost } = this.stats
+		if (
+			maxTokens !== undefined &&
+			Number.isFinite(maxTokens) &&
+			inputTokens + outputTokens + cacheWriteTokens + cacheReadTokens >= maxTokens
+		) {
+			throw new Error(`Helper token budget reached (${maxTokens} tokens). Completed work is preserved for the parent.`)
+		}
+		if (maxCost !== undefined && Number.isFinite(maxCost) && totalCost >= maxCost) {
+			throw new Error(`Helper cost budget reached ($${maxCost}). Completed work is preserved for the parent.`)
+		}
 	}
 
 	private async getWorkspaceMetadataEnvironmentBlock(): Promise<string | null> {
@@ -410,8 +443,13 @@ export class SubagentRunner {
 		const startTime = Date.now()
 		const filesModified = new Set<string>()
 		const filesViewed = new Set<string>()
+		// Keep bounded, actual execution evidence even when there is no final model answer.
+		const completedResults: string[] = []
+		const partialResult = () =>
+			completedResults.length ? `Partial work — helper did not finish.\n\n${completedResults.join("\n\n")}` : undefined
 		const state = new TaskState()
 		let emptyAssistantResponseRetries = 0
+		let streamRecoveryAttempts = 0
 		const usageState: SubagentUsageState = {
 			currentRequest: createEmptyRequestUsageState(),
 		}
@@ -432,52 +470,68 @@ export class SubagentRunner {
 
 		this.activeSignals = []
 		this.onProgress = onProgress
-		onProgress({ status: "running", stats })
-
-		const gateOptions = await resolveCompletionGateOptions(this.baseConfig, this.baseConfig.cwd, {
-			lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
-		})
-		const parentCompletionFailedStage = getParentCompletionFailedStage(this.baseConfig.taskState)
-		const parentGateConfig = getSubagentGateConfig(this.baseConfig)
-		const parentGateObservability =
-			this.baseConfig.taskState.completionGateObservabilityEnvelope ??
-			buildCompletionGateObservabilityEnvelope(parentGateConfig)
-		const parentGatePressureLevel =
-			getParentGatePressureLevel(this.baseConfig.taskState) ?? getCompletionGatePressureLevel(parentGateConfig)
-		const parentGateRetryStatus = this.baseConfig.taskState.lastCompletionBlockReason
-			? getCompletionGateRetryPolicy(
-					this.baseConfig.taskState
-						.lastCompletionBlockReason as import("../attemptCompletionUtils").CompletionPreflightReason,
-					parentGateConfig,
-				).retryStatus
-			: undefined
-		const parentGateOperationalState = getCompletionGateOperationalState(parentGateConfig)
-		const parentGateBlockHistoryCount = this.baseConfig.taskState.completionGateBlockHistory?.length
-		const parentGateSessionId = this.baseConfig.taskState.completionGateSessionId
-		const parentGateSignals = buildSubagentGateSignals({
-			lastCompletionAudit: this.baseConfig.taskState.lastCompletionAudit,
-			lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
-			completionGateBlockCount: this.baseConfig.taskState.completionGateBlockCount,
-			lastCompletionBlockReason: this.baseConfig.taskState.lastCompletionBlockReason,
-			lastCompletionFailedStage: parentCompletionFailedStage,
-			completionAttemptCount: this.baseConfig.taskState.completionAttemptCount,
-			completionGatePressureLevel: parentGatePressureLevel,
-			completionGateRetryStatus: parentGateRetryStatus,
-			completionGateBlockHistoryCount: parentGateBlockHistoryCount,
-			completionGateSessionId: parentGateSessionId,
-			completionGateOperationalState: parentGateOperationalState,
-			gateOptions,
-		})
-		if (parentGateSignals.length > 0) {
-			this.activeSignals = parentGateSignals
-			onProgress({ activeSignals: parentGateSignals })
-		}
+		this.agent.setRetryObserver((attempt, maxAttempts, delayMs) =>
+			onProgress({
+				activity: { phase: "retrying", attempt: attempt + 1, maxAttempts, retryAt: Date.now() + delayMs },
+			}),
+		)
+		onProgress({ status: "running", stats, activity: { phase: "preparing" } })
 
 		const onParentAbort = () => {
 			void this.abort().catch((error) => Logger.warn("[SubagentRunner] Cancellation unavailable:", error))
 		}
 		this.baseConfig.taskState.abortSignal.addEventListener("abort", onParentAbort, { once: true })
+		if (this.shouldAbort()) onParentAbort()
 		try {
+			this.throwIfAborted()
+			this.checkBudget()
+			const gateOptions = await pTimeout(
+				resolveCompletionGateOptions(this.baseConfig, this.baseConfig.cwd, {
+					lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
+				}),
+				{
+					milliseconds: 15_000,
+					signal: this.abortController.signal,
+					message:
+						"Helper workspace policy loading timed out. Resolve the unavailable policy before retrying this assignment.",
+				},
+			)
+			const parentCompletionFailedStage = getParentCompletionFailedStage(this.baseConfig.taskState)
+			const parentGateConfig = getSubagentGateConfig(this.baseConfig)
+			const parentGateObservability =
+				this.baseConfig.taskState.completionGateObservabilityEnvelope ??
+				buildCompletionGateObservabilityEnvelope(parentGateConfig)
+			const parentGatePressureLevel =
+				getParentGatePressureLevel(this.baseConfig.taskState) ?? getCompletionGatePressureLevel(parentGateConfig)
+			const parentGateRetryStatus = this.baseConfig.taskState.lastCompletionBlockReason
+				? getCompletionGateRetryPolicy(
+						this.baseConfig.taskState
+							.lastCompletionBlockReason as import("../attemptCompletionUtils").CompletionPreflightReason,
+						parentGateConfig,
+					).retryStatus
+				: undefined
+			const parentGateOperationalState = getCompletionGateOperationalState(parentGateConfig)
+			const parentGateBlockHistoryCount = this.baseConfig.taskState.completionGateBlockHistory?.length
+			const parentGateSessionId = this.baseConfig.taskState.completionGateSessionId
+			const parentGateSignals = buildSubagentGateSignals({
+				lastCompletionAudit: this.baseConfig.taskState.lastCompletionAudit,
+				lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
+				completionGateBlockCount: this.baseConfig.taskState.completionGateBlockCount,
+				lastCompletionBlockReason: this.baseConfig.taskState.lastCompletionBlockReason,
+				lastCompletionFailedStage: parentCompletionFailedStage,
+				completionAttemptCount: this.baseConfig.taskState.completionAttemptCount,
+				completionGatePressureLevel: parentGatePressureLevel,
+				completionGateRetryStatus: parentGateRetryStatus,
+				completionGateBlockHistoryCount: parentGateBlockHistoryCount,
+				completionGateSessionId: parentGateSessionId,
+				completionGateOperationalState: parentGateOperationalState,
+				gateOptions,
+			})
+			if (parentGateSignals.length > 0) {
+				this.activeSignals = parentGateSignals
+				onProgress({ activeSignals: parentGateSignals })
+			}
+
 			const mode = this.baseConfig.services.stateManager.getGlobalSettingsKey("mode")
 			const apiConfiguration = this.baseConfig.services.stateManager.getApiConfiguration()
 			const api = this.apiHandler
@@ -498,7 +552,11 @@ export class SubagentRunner {
 				!!this.baseConfig.services.stateManager.getGlobalStateKey("nativeToolCallEnabled")
 
 			const host = HostRegistryInfo.get()
-			const discoveredSkills = await discoverSkills(this.baseConfig.cwd)
+			const discoveredSkills = await pTimeout(discoverSkills(this.baseConfig.cwd), {
+				milliseconds: 15_000,
+				signal: this.abortController.signal,
+				message: "Helper skill discovery timed out.",
+			})
 			const availableSkills = getAvailableSkills(discoveredSkills)
 			const configuredSkillNames = this.agent.getConfiguredSkills()
 			const skills =
@@ -530,7 +588,11 @@ export class SubagentRunner {
 			}
 
 			const promptRegistry = PromptRegistry.getInstance()
-			const generatedSystemPrompt = await promptRegistry.get(context)
+			const generatedSystemPrompt = await pTimeout(promptRegistry.get(context), {
+				milliseconds: 30_000,
+				signal: this.abortController.signal,
+				message: "Helper prompt preparation timed out.",
+			})
 
 			// Supplement the assignment with available parent context without making tracking a prerequisite.
 			try {
@@ -605,7 +667,8 @@ export class SubagentRunner {
 			this.activeTaskState.abort = this.shouldAbort()
 			const progress = new ToolProgressTracker()
 			while (true) {
-				if (this.shouldAbort()) throw new Error("Subagent run cancelled.")
+				this.throwIfAborted()
+				this.checkBudget()
 				const systemPrompt = this.agent.buildSystemPrompt(generatedSystemPrompt)
 				if (
 					usageState.lastRequest &&
@@ -623,10 +686,12 @@ export class SubagentRunner {
 				const { toolUseHandler } = streamHandler.getHandlers()
 				usageState.currentRequest = createEmptyRequestUsageState()
 				const requestUsage = usageState.currentRequest
+				const previousCost = stats.totalCost
 
 				let assistantText = ""
 				let assistantTextSignature: string | undefined
 				let requestId: string | undefined
+				let receivedChunk = false
 
 				const stream = this.createMessageWithInitialChunkRetry(
 					api,
@@ -637,122 +702,104 @@ export class SubagentRunner {
 					providerInfo.model.id,
 				)
 
-				for await (const chunk of stream) {
-					switch (chunk.type) {
-						case "usage":
-							requestId = requestId ?? chunk.id
-							stats.inputTokens += chunk.inputTokens || 0
-							stats.outputTokens += chunk.outputTokens || 0
-							stats.cacheWriteTokens += chunk.cacheWriteTokens || 0
-							stats.cacheReadTokens += chunk.cacheReadTokens || 0
-							requestUsage.inputTokens += chunk.inputTokens || 0
-							requestUsage.outputTokens += chunk.outputTokens || 0
-							requestUsage.cacheWriteTokens += chunk.cacheWriteTokens || 0
-							requestUsage.cacheReadTokens += chunk.cacheReadTokens || 0
-							requestUsage.totalTokens =
-								requestUsage.inputTokens +
-								requestUsage.outputTokens +
-								requestUsage.cacheWriteTokens +
-								requestUsage.cacheReadTokens
-							requestUsage.totalCost = chunk.totalCost ?? requestUsage.totalCost
-							stats.contextTokens = requestUsage.totalTokens
-							stats.contextUsagePercentage =
-								stats.contextWindow > 0 ? (stats.contextTokens / stats.contextWindow) * 100 : 0
-							onProgress({ stats: { ...stats } })
+				try {
+					for await (const chunk of stream) {
+						receivedChunk = true
+						switch (chunk.type) {
+							case "usage":
+								requestId = requestId ?? chunk.id
+								stats.inputTokens += chunk.inputTokens || 0
+								stats.outputTokens += chunk.outputTokens || 0
+								stats.cacheWriteTokens += chunk.cacheWriteTokens || 0
+								stats.cacheReadTokens += chunk.cacheReadTokens || 0
+								requestUsage.inputTokens += chunk.inputTokens || 0
+								requestUsage.outputTokens += chunk.outputTokens || 0
+								requestUsage.cacheWriteTokens += chunk.cacheWriteTokens || 0
+								requestUsage.cacheReadTokens += chunk.cacheReadTokens || 0
+								requestUsage.totalTokens =
+									requestUsage.inputTokens +
+									requestUsage.outputTokens +
+									requestUsage.cacheWriteTokens +
+									requestUsage.cacheReadTokens
+								requestUsage.totalCost = chunk.totalCost ?? requestUsage.totalCost
+								stats.contextTokens = requestUsage.totalTokens
+								stats.contextUsagePercentage =
+									stats.contextWindow > 0 ? (stats.contextTokens / stats.contextWindow) * 100 : 0
+								const requestCost =
+									requestUsage.totalCost ??
+									calculateApiCost(
+										providerInfo.model.info,
+										requestUsage.inputTokens,
+										requestUsage.outputTokens,
+										requestUsage.cacheWriteTokens,
+										requestUsage.cacheReadTokens,
+									)
+								if (Number.isFinite(requestCost))
+									stats.totalCost = Math.max(stats.totalCost, previousCost + requestCost)
+								onProgress({ stats: { ...stats } })
+								this.checkBudget()
 
-							// Phase 3: Adaptive Budgeting
-							if (stats.maxTokens && stats.inputTokens + stats.outputTokens > stats.maxTokens) {
-								const error = `Swarm Token Budget Exceeded (${stats.maxTokens} tokens). Terminating subagent to prevent runaway costs.`
-								Logger.warn(`[SubagentRunner] ${error}`)
-								const durationMs = Date.now() - startTime
-								onProgress({
-									status: "failed",
-									error,
-									stats: { ...stats },
-									filesModified: Array.from(filesModified),
-									filesViewed: Array.from(filesViewed),
-									durationMs,
-								})
-								return {
-									status: "failed",
-									error,
-									stats,
-									filesModified: Array.from(filesModified),
-									filesViewed: Array.from(filesViewed),
-									durationMs,
-								}
-							}
-							if (stats.maxCost && stats.totalCost > stats.maxCost) {
-								const error = `Swarm Cost Budget Exceeded ($${stats.maxCost}). Terminating subagent to prevent runaway costs.`
-								Logger.warn(`[SubagentRunner] ${error}`)
-								const durationMs = Date.now() - startTime
-								onProgress({
-									status: "failed",
-									error,
-									stats: { ...stats },
-									filesModified: Array.from(filesModified),
-									filesViewed: Array.from(filesViewed),
-									durationMs,
-								})
-								return {
-									status: "failed",
-									error,
-									stats,
-									filesModified: Array.from(filesModified),
-									filesViewed: Array.from(filesViewed),
-									durationMs,
-								}
-							}
+								break
+							case "text":
+								requestId = requestId ?? chunk.id
+								assistantText += chunk.text || ""
+								assistantTextSignature = chunk.signature || assistantTextSignature
+								break
+							case "tool_calls":
+								requestId = requestId ?? chunk.id
+								toolUseHandler.processToolUseDelta(
+									{
+										id: chunk.tool_call.function?.id,
+										type: "tool_use",
+										name: chunk.tool_call.function?.name,
+										input: normalizeToolCallArguments(chunk.tool_call.function?.arguments),
+									},
+									chunk.tool_call.call_id,
+								)
+								break
+							case "reasoning":
+								requestId = requestId ?? chunk.id
+								break
+						}
 
-							break
-						case "text":
-							requestId = requestId ?? chunk.id
-							assistantText += chunk.text || ""
-							assistantTextSignature = chunk.signature || assistantTextSignature
-							break
-						case "tool_calls":
-							requestId = requestId ?? chunk.id
-							toolUseHandler.processToolUseDelta(
-								{
-									id: chunk.tool_call.function?.id,
-									type: "tool_use",
-									name: chunk.tool_call.function?.name,
-									input: normalizeToolCallArguments(chunk.tool_call.function?.arguments),
-								},
-								chunk.tool_call.call_id,
-							)
-							break
-						case "reasoning":
-							requestId = requestId ?? chunk.id
-							break
+						this.throwIfAborted()
 					}
-
-					if (this.shouldAbort()) {
-						await this.abort()
-						const error = "Subagent run cancelled."
-						onProgress({ status: "failed", error, stats: { ...stats } })
-						return { status: "failed", error, stats }
-					}
+				} catch (error) {
+					this.throwIfAborted()
+					this.checkBudget()
+					const delayMs = getApiRetryDelay(error, streamRecoveryAttempts, INITIAL_STREAM_RETRY_BASE_DELAY_MS)
+					// Initial retries belong to the provider/initial-chunk loop. After output,
+					// continue a new turn with evidence; never replay unfinished tool calls.
+					if (
+						!receivedChunk ||
+						streamRecoveryAttempts >= MAX_STREAM_RECOVERY_ATTEMPTS ||
+						delayMs === undefined ||
+						!this.shouldRetryInitialStreamError(error, providerInfo.providerId, providerInfo.model.id)
+					)
+						throw error
+					streamRecoveryAttempts++
+					conversation.push(
+						{ role: "assistant", content: buildInterruptedAssistantContent(assistantText, []) },
+						{ role: "user", content: [{ type: "text", text: STREAM_RECOVERY_INSTRUCTION }] },
+					)
+					onProgress({
+						activity: {
+							phase: "retrying",
+							attempt: streamRecoveryAttempts + 1,
+							maxAttempts: MAX_STREAM_RECOVERY_ATTEMPTS + 1,
+							retryAt: Date.now() + delayMs,
+						},
+					})
+					await waitForApiRetry(delayMs, this.abortController.signal)
+					continue
 				}
 
-				const calculatedRequestCost =
-					requestUsage.totalCost ??
-					calculateApiCost(
-						providerInfo.model.info,
-						requestUsage.inputTokens,
-						requestUsage.outputTokens,
-						requestUsage.cacheWriteTokens,
-						requestUsage.cacheReadTokens,
-					)
-				requestUsage.totalTokens =
-					requestUsage.inputTokens +
-					requestUsage.outputTokens +
-					requestUsage.cacheWriteTokens +
-					requestUsage.cacheReadTokens
-				stats.totalCost += calculatedRequestCost || 0
+				this.throwIfAborted()
+				this.checkBudget()
 				usageState.lastRequest = { ...requestUsage }
 
 				toolUseHandler.assertCompleteToolUses()
+				streamRecoveryAttempts = 0
 				const nativeFinalizedToolCalls = toolUseHandler.getAllFinalizedToolUses().map((toolCall, index) => ({
 					toolUseId: resolveToolUseId(toolCall, index),
 					id: toolCall.id,
@@ -810,6 +857,7 @@ export class SubagentRunner {
 							const directResult = assistantText.trim()
 							const gateError = await validateSubagentCompletionGates(subagentConfig, directResult)
 							if (gateError) throw new Error(gateError)
+							this.throwIfAborted()
 							onProgress({
 								status: "completed",
 								result: directResult,
@@ -828,24 +876,16 @@ export class SubagentRunner {
 							}
 						}
 
-						const error = "Subagent did not call attempt_completion."
-						onProgress({
-							status: "failed",
-							error,
-							stats: { ...stats },
-							filesModified: Array.from(filesModified),
-							filesViewed: Array.from(filesViewed),
-							durationMs,
-						})
-						return {
-							status: "failed",
-							error,
-							stats,
-							filesModified: Array.from(filesModified),
-							filesViewed: Array.from(filesViewed),
-							durationMs,
-						}
+						throw new Error("Subagent did not call attempt_completion.")
 					}
+
+					const decision = progress.finishTurn()
+					if (decision === "handoff") {
+						throw new Error(
+							"Helper made no new tool progress for eight turns. Continue from the partial work in the parent; do not restart the same assignment unchanged.",
+						)
+					}
+					if (decision === "redirect") onProgress({ activity: { phase: "recovering" } })
 
 					// Mirror the main loop's no-tools-used nudge so empty/blank model turns
 					// can recover without surfacing an immediate hard failure in subagent UI.
@@ -877,6 +917,8 @@ export class SubagentRunner {
 
 				const toolResultBlocks = [] as DietCodeUserContent[]
 				for (const call of finalizedToolCalls) {
+					this.throwIfAborted()
+					this.checkBudget()
 					const toolName = call.name as DietCodeDefaultTool
 					const toolCallParams = toToolUseParams(call.input)
 
@@ -912,6 +954,7 @@ export class SubagentRunner {
 							pushSubagentToolResultBlock(toolResultBlocks, call, toolName, gateError)
 							continue
 						}
+						this.throwIfAborted()
 
 						stats.toolCalls += 1
 						const durationMs = Date.now() - startTime
@@ -958,7 +1001,7 @@ export class SubagentRunner {
 					}
 
 					const latestToolCall = formatToolCallPreview(toolName, toolCallParams)
-					onProgress({ latestToolCall })
+					onProgress({ latestToolCall, activity: { phase: "tool" } })
 
 					const handler =
 						subagentConfig.coordinator?.getHandler(toolName) || this.baseConfig.coordinator?.getHandler(toolName)
@@ -997,13 +1040,19 @@ export class SubagentRunner {
 											preExecResult.error || "Subagent action denied by policy.",
 										)
 									} else {
+										this.throwIfAborted()
 										toolResult = await handler.execute(subagentConfig, toolCallBlock)
 										executionResult = toolResult
 										operationReturned = true
-										if (!isToolFailure(toolResult)) await guard.guardPostExecution(toolCallBlock, toolResult)
+										if (!isToolFailure(toolResult) && !this.shouldAbort()) {
+											await observeHelperOperation("Tool observation", () =>
+												guard.guardPostExecution(toolCallBlock, executionResult),
+											)
+										}
 
 										// V227: Substrate Read Auditing for Swarms
 										if (
+											!this.shouldAbort() &&
 											!isToolFailure(toolResult) &&
 											(toolName === DietCodeDefaultTool.FILE_READ ||
 												toolName === DietCodeDefaultTool.SEARCH) &&
@@ -1023,16 +1072,21 @@ export class SubagentRunner {
 											const globalCount = (state.taskReadHistory.get(pathKey) || 0) + 1
 											state.taskReadHistory.set(pathKey, globalCount)
 
-											toolResult = await guard.onRead(
-												toolCallParams.path,
-												toolResult,
-												state.currentTurnUniqueReadCount,
-												newCount,
-												globalCount,
-											)
+											const readResult = toolResult
+											toolResult =
+												(await observeHelperOperation("Read observation", () =>
+													guard.onRead(
+														pathKey,
+														readResult,
+														state.currentTurnUniqueReadCount,
+														newCount,
+														globalCount,
+													),
+												)) ?? readResult
 										}
 									}
 								} else {
+									this.throwIfAborted()
 									toolResult = await handler.execute(subagentConfig, toolCallBlock)
 									executionResult = toolResult
 									operationReturned = true
@@ -1047,7 +1101,7 @@ export class SubagentRunner {
 						}
 					}
 
-					if (operationReturned && !isToolFailure(toolResult)) {
+					if (operationReturned && !isToolFailure(executionResult)) {
 						// Track file side-effects
 						if (toolCallParams?.path && typeof toolCallParams.path === "string") {
 							if (
@@ -1066,8 +1120,14 @@ export class SubagentRunner {
 						}
 					}
 
+					if (operationReturned) {
+						const evidence = serializeToolResult(executionResult) || "(empty tool result)"
+						completedResults.push(`${latestToolCall}\n${evidence.slice(0, 1200)}`)
+						if (completedResults.length > 8) completedResults.shift()
+					}
 					stats.toolCalls += 1
 					onProgress({
+						result: partialResult(),
 						stats: { ...stats },
 						filesModified: Array.from(filesModified),
 						filesViewed: Array.from(filesViewed),
@@ -1091,6 +1151,7 @@ export class SubagentRunner {
 					}
 
 					progress.record(toolName, toolCallParams, operationReturned ? executionResult : toolResult)
+					this.throwIfAborted()
 				}
 
 				const progressState = progress.finishTurn()
@@ -1100,6 +1161,7 @@ export class SubagentRunner {
 					)
 				}
 				if (progressState === "redirect") {
+					onProgress({ activity: { phase: "recovering" } })
 					toolResultBlocks.push({
 						type: "text",
 						text: "Recent tool calls returned no new evidence. Use the results already collected, change the failing input or approach, or finish with a clear blocker handoff. Do not repeat the same checks or request more permission.",
@@ -1120,6 +1182,7 @@ export class SubagentRunner {
 				onProgress({
 					status: "failed",
 					error: cancelledError,
+					result: partialResult(),
 					stats: { ...stats },
 					filesModified: Array.from(filesModified),
 					filesViewed: Array.from(filesViewed),
@@ -1128,6 +1191,8 @@ export class SubagentRunner {
 				return {
 					status: "failed",
 					error: cancelledError,
+					result: partialResult(),
+					isPartial: completedResults.length > 0,
 					stats,
 					filesModified: Array.from(filesModified),
 					filesViewed: Array.from(filesViewed),
@@ -1141,6 +1206,7 @@ export class SubagentRunner {
 			onProgress({
 				status: "failed",
 				error: errorText,
+				result: partialResult(),
 				stats: { ...stats },
 				filesModified: Array.from(filesModified),
 				filesViewed: Array.from(filesViewed),
@@ -1149,12 +1215,16 @@ export class SubagentRunner {
 			return {
 				status: "failed",
 				error: errorText,
+				result: partialResult(),
+				isPartial: completedResults.length > 0,
 				stats,
 				filesModified: Array.from(filesModified),
 				filesViewed: Array.from(filesViewed),
 				durationMs,
 			}
 		} finally {
+			this.agent.setRetryObserver(undefined)
+			this.agent.setRequestRetrySignal(undefined)
 			this.baseConfig.taskState.abortSignal.removeEventListener("abort", onParentAbort)
 			this.activeApiAbort = undefined
 			this.activeTaskState = undefined
@@ -1183,18 +1253,30 @@ export class SubagentRunner {
 			messageState: this.baseConfig.messageState, // Use parent's message state handler but they will have their own stream
 			recursionDepth: this.recursionDepth,
 			isSubagentExecution: true,
+			executionOwner: this.executionOwner,
 			vscodeTerminalExecutionMode: "vscodeTerminal",
 			callbacks: {
 				...baseCallbacks,
 				say: async () => undefined,
 				sayAndCreateMissingParamError: async (_toolName, paramName) =>
 					formatResponse.toolError(formatResponse.missingToolParameterError(paramName)),
-				executeCommandTool: async (command: string, timeoutSeconds: number | undefined) => {
+				executeCommandTool: async (command, timeoutSeconds, options) => {
 					return await baseCallbacks.executeCommandTool(command, timeoutSeconds, {
+						...options,
 						suppressUserInteraction: true,
 						interactive: false,
-						signal: subagentTaskState.abortSignal,
+						signal: options?.signal
+							? AbortSignal.any([options.signal, subagentTaskState.abortSignal])
+							: subagentTaskState.abortSignal,
 					})
+				},
+				readCommandOutput: async (executionId, timeoutSeconds, signal) => {
+					if (!baseCallbacks.readCommandOutput) throw new Error("Command observation is unavailable in this session.")
+					return baseCallbacks.readCommandOutput(
+						executionId,
+						timeoutSeconds,
+						signal ? AbortSignal.any([signal, subagentTaskState.abortSignal]) : subagentTaskState.abortSignal,
+					)
 				},
 			},
 		}
@@ -1280,15 +1362,34 @@ export class SubagentRunner {
 		nativeTools: DietCodeTool[] | undefined,
 		providerId: string,
 		modelId: string,
-	) {
+	): AsyncGenerator<ApiStreamChunk> {
 		for (let attempt = 1; attempt <= MAX_INITIAL_STREAM_ATTEMPTS; attempt += 1) {
-			const stream = api.createMessage(systemPrompt, conversation, nativeTools)
+			this.throwIfAborted()
+			this.checkBudget()
+			this.onProgress?.({ activity: { phase: "waiting" } })
+			const stream = guardedStream(
+				(signal) => {
+					this.agent.setRequestRetrySignal(signal)
+					return api.createMessage(
+						systemPrompt,
+						withExecutionContext(
+							conversation,
+							this.baseConfig.callbacks.getExecutionState,
+							this.executionOwner,
+							api.getModel().info.contextWindow,
+						),
+						nativeTools,
+					)
+				},
+				{ signal: this.abortController.signal, abort: api.abort?.bind(api) },
+			)
 			const iterator = stream[Symbol.asyncIterator]()
 			let firstChunk: Awaited<ReturnType<typeof iterator.next>>
 
 			try {
 				firstChunk = await iterator.next()
 			} catch (error) {
+				this.agent.setRequestRetrySignal(undefined)
 				if (checkContextWindowExceededError(error)) {
 					const didCompact = this.compactConversationForContextWindow(conversation)
 					if (!didCompact || this.shouldAbort() || attempt >= MAX_INITIAL_STREAM_ATTEMPTS) {
@@ -1311,17 +1412,27 @@ export class SubagentRunner {
 				}
 
 				Logger.warn(`[SubagentRunner] Initial stream failed. Retrying attempt ${attempt + 1}.`, error)
-				await waitForApiRetry(delayMs!, this.activeTaskState?.abortSignal ?? this.baseConfig.taskState.abortSignal)
+				this.onProgress?.({
+					activity: {
+						phase: "retrying",
+						attempt: attempt + 1,
+						maxAttempts: MAX_INITIAL_STREAM_ATTEMPTS,
+						retryAt: Date.now() + delayMs!,
+					},
+				})
+				await waitForApiRetry(delayMs!, this.abortController.signal)
 				continue
 			}
 
 			// Once anything is emitted, only the caller can reconcile tool results. Never replay this request.
 			if (firstChunk.done) return
+			this.onProgress?.({ activity: { phase: "responding" } })
 			try {
 				yield firstChunk.value
 				yield* iterator
 			} finally {
 				await iterator.return?.(undefined)
+				this.agent.setRequestRetrySignal(undefined)
 			}
 			return
 		}

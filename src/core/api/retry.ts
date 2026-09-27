@@ -51,15 +51,21 @@ function retryOptions(options: RetryOptions) {
 
 /** Returns undefined when the server asks us to wait beyond the automatic retry budget. */
 export function getApiRetryDelay(error: unknown, attempt: number, baseDelay = 1000, maxDelay = 10_000): number | undefined {
-	const fallback = Math.min(maxDelay, baseDelay * 2 ** Math.min(attempt, 10))
+	const policy = retryOptions({ baseDelay, maxDelay })
+	const exponent = Number.isFinite(attempt) ? Math.min(10, Math.max(0, Math.floor(attempt))) : 0
+	const ceiling = Math.min(policy.maxDelay, policy.baseDelay * 2 ** exponent)
+	// Equal jitter spreads concurrent helper retries without allowing a hot loop.
+	const fallback = Math.max(1, Math.ceil(ceiling / 2 + (Math.random() * ceiling) / 2))
 	const data = (error ?? {}) as {
 		headers?: Record<string, string> | Headers
 		response?: { headers?: Record<string, string> | Headers }
 		retryAfter?: number
 	}
 	const headers = data.headers ?? data.response?.headers
-	const header = (key: string) =>
-		typeof headers?.get === "function" ? headers.get(key) : (headers as Record<string, string> | undefined)?.[key]
+	const header = (key: string) => {
+		if (typeof headers?.get === "function") return headers.get(key)
+		return Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === key)?.[1]
+	}
 	const retryAfter = header("retry-after")
 	const reset = header("x-ratelimit-reset") ?? header("ratelimit-reset")
 	const raw = retryAfter ?? reset ?? data.retryAfter
@@ -75,7 +81,7 @@ export function getApiRetryDelay(error: unknown, attempt: number, baseDelay = 10
 	}
 	if (!Number.isFinite(delay) || delay <= 0) return fallback
 	// Do not retry sooner than the server permits, or turn a huge timeout into a 1ms Node timer.
-	return delay > maxDelay ? undefined : Math.ceil(delay)
+	return delay > policy.maxDelay ? undefined : Math.ceil(delay)
 }
 
 export async function waitForApiRetry(delay: number, signal?: AbortSignal): Promise<void> {

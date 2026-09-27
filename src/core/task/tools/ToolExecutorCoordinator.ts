@@ -32,6 +32,7 @@ import { DependencyMapHandler } from "./handlers/DependencyMapHandler"
 import { DietcodeKernelToolHandler } from "./handlers/DietcodeKernelToolHandler"
 import { ExecuteCommandToolHandler } from "./handlers/ExecuteCommandToolHandler"
 import { GenerateExplanationToolHandler } from "./handlers/GenerateExplanationToolHandler"
+import { GetExecutionStateToolHandler } from "./handlers/GetExecutionStateToolHandler"
 import { ListCodeDefinitionNamesToolHandler } from "./handlers/ListCodeDefinitionNamesToolHandler"
 import { ListFilesToolHandler } from "./handlers/ListFilesToolHandler"
 import { LoadMcpDocumentationHandler } from "./handlers/LoadMcpDocumentationHandler"
@@ -40,6 +41,7 @@ import { ModuleScaffoldHandler } from "./handlers/ModuleScaffoldHandler"
 import { NewTaskHandler } from "./handlers/NewTaskHandler"
 import { PlanModeRespondHandler } from "./handlers/PlanModeRespondHandler"
 import { ProjectMapHandler } from "./handlers/ProjectMapHandler"
+import { ReadCommandOutputToolHandler } from "./handlers/ReadCommandOutputToolHandler"
 import { ReadFileToolHandler } from "./handlers/ReadFileToolHandler"
 import { ReportBugHandler } from "./handlers/ReportBugHandler"
 import { RoadmapToolHandler } from "./handlers/RoadmapToolHandler"
@@ -85,6 +87,8 @@ export class ToolExecutorCoordinator {
 		[DietCodeDefaultTool.ASK]: (_v: ToolValidator) => new AskFollowupQuestionToolHandler(),
 		[DietCodeDefaultTool.ATTEMPT]: (_v: ToolValidator) => new AttemptCompletionHandler(),
 		[DietCodeDefaultTool.BASH]: (v: ToolValidator) => new ExecuteCommandToolHandler(v),
+		[DietCodeDefaultTool.READ_COMMAND_OUTPUT]: () => new ReadCommandOutputToolHandler(),
+		[DietCodeDefaultTool.GET_EXECUTION_STATE]: () => new GetExecutionStateToolHandler(),
 		[DietCodeDefaultTool.FILE_EDIT]: (v: ToolValidator) =>
 			new SharedToolHandler(DietCodeDefaultTool.FILE_EDIT, new WriteToFileToolHandler(v)),
 		[DietCodeDefaultTool.FILE_READ]: (v: ToolValidator) => new ReadFileToolHandler(v),

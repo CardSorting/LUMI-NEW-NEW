@@ -9,6 +9,8 @@ export enum DietCodeDefaultTool {
 	ASK = "ask_followup_question",
 	ATTEMPT = "attempt_completion",
 	BASH = "execute_command",
+	READ_COMMAND_OUTPUT = "read_command_output",
+	GET_EXECUTION_STATE = "get_execution_state",
 	FILE_EDIT = "replace_in_file",
 	FILE_READ = "read_file",
 	FILE_NEW = "write_to_file",
@@ -90,6 +92,8 @@ export function getToolUseNames(): string[] {
 // Tools that are safe to run in parallel with the initial checkpoint commit
 // These are tools that do not modify the workspace state
 export const READ_ONLY_TOOLS = [
+	DietCodeDefaultTool.GET_EXECUTION_STATE,
+	DietCodeDefaultTool.READ_COMMAND_OUTPUT,
 	DietCodeDefaultTool.LIST_FILES,
 	DietCodeDefaultTool.FILE_READ,
 	DietCodeDefaultTool.SEARCH,
@@ -103,3 +107,23 @@ export const READ_ONLY_TOOLS = [
 	DietCodeDefaultTool.USE_SUBAGENTS,
 	DietCodeDefaultTool.STABILITY_DIAGNOSE,
 ] as const
+
+/** Tools that can start work also expose its read-only inventory. */
+export function withExecutionObservation<T extends string>(
+	tools: readonly T[],
+): Array<T | DietCodeDefaultTool.READ_COMMAND_OUTPUT | DietCodeDefaultTool.GET_EXECUTION_STATE> {
+	const observed: Array<T | DietCodeDefaultTool.READ_COMMAND_OUTPUT | DietCodeDefaultTool.GET_EXECUTION_STATE> = [...tools]
+	if (tools.includes(DietCodeDefaultTool.BASH as T)) observed.push(DietCodeDefaultTool.READ_COMMAND_OUTPUT)
+	const executionTools: readonly string[] = [
+		DietCodeDefaultTool.BASH,
+		DietCodeDefaultTool.READ_COMMAND_OUTPUT,
+		DietCodeDefaultTool.MCP_USE,
+		DietCodeDefaultTool.MCP_ACCESS,
+		DietCodeDefaultTool.FILE_NEW,
+		DietCodeDefaultTool.FILE_EDIT,
+		DietCodeDefaultTool.APPLY_PATCH,
+		DietCodeDefaultTool.USE_SUBAGENTS,
+	]
+	if (tools.some((tool) => executionTools.includes(tool))) observed.push(DietCodeDefaultTool.GET_EXECUTION_STATE)
+	return [...new Set(observed)]
+}

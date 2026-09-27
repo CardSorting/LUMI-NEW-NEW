@@ -10,6 +10,7 @@ import pTimeout from "p-timeout"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
+import { executor } from "../../ActionExecutor"
 import { AgentConfigLoader } from "../subagent/AgentConfigLoader"
 import { observeHelperOperation } from "../subagent/observeHelperOperation"
 import { SUBAGENT_DEFAULT_ALLOWED_TOOLS, SubagentBuilder } from "../subagent/SubagentBuilder"
@@ -37,7 +38,7 @@ function collectPrompts(block: ToolUse, configuredSubagentName?: string): string
 		return dynamicPrompt ? [dynamicPrompt] : []
 	}
 
-	return PROMPT_KEYS.map((key) => block.params[key]?.trim()).filter((prompt): prompt is string => !!prompt)
+	return [...new Set(PROMPT_KEYS.map((key) => block.params[key]?.trim()).filter((prompt): prompt is string => !!prompt))]
 }
 
 function excerpt(text: string | undefined, maxChars = 1200): string {
@@ -309,9 +310,11 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		const stopped = new Promise<void>((resolve) => {
 			signalStopped = resolve
 		})
+		const batchAbort = new AbortController()
 		const stopBatch = (reason: string) => {
 			if (stopReason) return
 			stopReason = reason
+			batchAbort.abort(new Error(reason))
 			signalStopped()
 			void Promise.allSettled(runners.map((runner) => Promise.resolve().then(() => runner.abort())))
 		}
@@ -329,8 +332,6 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		}
 		const childStreamIds: (string | undefined)[] = new Array(prompts.length)
 
-		// Production Hardening: Concurrency Limit (max 3 subagents in parallel)
-		const MAX_CONCURRENCY = 3
 		const results: (PromiseSettledResult<SubagentRunResult> | undefined)[] = Array.from({ length: prompts.length })
 		const latestStats: (SubagentRunResult["stats"] | undefined)[] = new Array(prompts.length)
 		const recordStats = (index: number, stats: SubagentRunResult["stats"]) => {
@@ -361,11 +362,29 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				else await orchestrator.failStream(id, current.error || "Helper stopped")
 			})
 		}
-		let nextIndex = 0
 		let totalSwarmCost = 0
+		let totalSwarmTokens = 0
 		const MAX_PARENT_COST = config.taskState.maxCost
+		const MAX_PARENT_TOKENS = config.taskState.maxTokens
 		if (MAX_PARENT_COST !== undefined && Number.isFinite(MAX_PARENT_COST) && MAX_PARENT_COST <= 0) {
 			stopBatch("Helper cost budget is exhausted.")
+		}
+		if (MAX_PARENT_TOKENS !== undefined && Number.isFinite(MAX_PARENT_TOKENS) && MAX_PARENT_TOKENS <= 0) {
+			stopBatch("Helper token budget is exhausted.")
+		}
+		const recordUsage = (index: number, stats: SubagentRunResult["stats"]) => {
+			const tokens = (usage: SubagentRunResult["stats"] | undefined) =>
+				(usage?.inputTokens || 0) +
+				(usage?.outputTokens || 0) +
+				(usage?.cacheWriteTokens || 0) +
+				(usage?.cacheReadTokens || 0)
+			const previousTokens = tokens(latestStats[index])
+			const merged = recordStats(index, stats)
+			totalSwarmTokens += tokens(merged) - previousTokens
+			recordCost(entries[index], merged.totalCost)
+			if (MAX_PARENT_TOKENS !== undefined && Number.isFinite(MAX_PARENT_TOKENS) && totalSwarmTokens >= MAX_PARENT_TOKENS) {
+				stopBatch(`Helper token budget reached (${totalSwarmTokens} / ${MAX_PARENT_TOKENS}).`)
+			}
 		}
 		const recordCost = (current: SubagentStatusItem, cost: number | undefined) => {
 			if (cost === undefined || !Number.isFinite(cost)) return
@@ -379,94 +398,105 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 
 		const runSubagent = async (index: number) => {
 			const current = entries[index]
-			try {
-				if (parentStreamId) {
-					await observeHelperOperation("Stream registration", async () => {
-						const child = await orchestrator.spawnChildStream(
-							parentStreamId!,
-							`subagent: ${prompts[index].slice(0, 80)}`,
-						)
-						childStreamIds[index] = child.id
-						runners[index].setStreamId(child.id)
-						closeChildStream(index)
-					})
-				}
-				if (stopReason || config.taskState.abort) {
-					return
-				}
-				const result = await runners[index].run(
-					prompts[index],
-					(update) => {
-						if (finalized) return
-						if (update.stats) recordStats(index, update.stats)
-						recordCost(current, update.stats?.totalCost)
-
-						if (update.status === "running") {
-							current.status = "running"
-						}
-						if (update.status === "completed") {
-							current.status = "completed"
-						}
-						if (update.status === "failed") {
-							current.status = "failed"
-						}
-						if (update.result !== undefined) {
-							current.result = update.result
-						}
-						if (update.error !== undefined) {
-							current.error = update.error
-						}
-						if (update.latestToolCall !== undefined) {
-							current.latestToolCall = update.latestToolCall
-						}
-						if (update.activeSignals !== undefined) {
-							current.criticalSignals = update.activeSignals
-						}
-						if (update.filesModified !== undefined) {
-							current.filesModified = update.filesModified
-						}
-						if (update.filesViewed !== undefined) {
-							current.filesViewed = update.filesViewed
-						}
-						if (update.durationMs !== undefined) {
-							current.durationMs = update.durationMs
-						}
-						if (update.stats) {
-							current.toolCalls = update.stats.toolCalls || 0
-							current.inputTokens = update.stats.inputTokens || 0
-							current.outputTokens = update.stats.outputTokens || 0
-							current.contextTokens = update.stats.contextTokens || 0
-							current.contextWindow = update.stats.contextWindow || 0
-							current.contextUsagePercentage = update.stats.contextUsagePercentage || 0
-						}
-						void queueStatusUpdate("running", true)
-					},
-					childStreamIds[index] || undefined,
-				)
-				if (finalized) return
-				recordStats(index, result.stats)
-				recordCost(current, result.stats.totalCost)
-				results[index] = { status: "fulfilled", value: result }
-			} catch (error) {
-				if (finalized) return
-				Logger.error(`[SubagentToolHandler] Subagent ${index} crashed:`, error)
-				current.status = "failed"
-				current.error =
-					error instanceof Error ? error.message : typeof error === "string" ? error : "Internal Runner Crash"
-				results[index] = { status: "rejected", reason: error }
-				void queueStatusUpdate("running", true)
+			if (parentStreamId) {
+				await observeHelperOperation("Stream registration", async () => {
+					const child = await orchestrator.spawnChildStream(parentStreamId!, `subagent: ${prompts[index].slice(0, 80)}`)
+					childStreamIds[index] = child.id
+					runners[index].setStreamId(child.id)
+					closeChildStream(index)
+				})
 			}
+			if (stopReason || config.taskState.abort) {
+				throw new Error(stopReason || "Helper batch cancelled before execution.")
+			}
+			const result = await runners[index].run(
+				prompts[index],
+				(update) => {
+					if (finalized) return
+					if (update.stats) recordUsage(index, update.stats)
+
+					if (update.status === "running") {
+						current.status = "running"
+					}
+					if (update.status === "completed") {
+						current.status = "completed"
+					}
+					if (update.status === "failed") {
+						current.status = "failed"
+					}
+					if (update.result !== undefined) {
+						current.result = update.result
+					}
+					if (update.error !== undefined) {
+						current.error = update.error
+					}
+					if (update.latestToolCall !== undefined) {
+						current.latestToolCall = update.latestToolCall
+					}
+					if (update.activity !== undefined) {
+						current.activity = update.activity
+					}
+					if (update.activeSignals !== undefined) {
+						current.criticalSignals = update.activeSignals
+					}
+					if (update.filesModified !== undefined) {
+						current.filesModified = update.filesModified
+					}
+					if (update.filesViewed !== undefined) {
+						current.filesViewed = update.filesViewed
+					}
+					if (update.durationMs !== undefined) {
+						current.durationMs = update.durationMs
+					}
+					if (update.stats) {
+						current.toolCalls = update.stats.toolCalls || 0
+						current.inputTokens = update.stats.inputTokens || 0
+						current.outputTokens = update.stats.outputTokens || 0
+						current.contextTokens = update.stats.contextTokens || 0
+						current.contextWindow = update.stats.contextWindow || 0
+						current.contextUsagePercentage = update.stats.contextUsagePercentage || 0
+					}
+					void queueStatusUpdate("running", true)
+				},
+				childStreamIds[index] || undefined,
+			)
+			if (!finalized) {
+				recordUsage(index, result.stats)
+				results[index] = { status: "fulfilled", value: result }
+			}
+			// The execution receipt still receives a late outcome after the batch stops waiting.
+			return result
+		}
+		const failSubagent = (index: number, error: unknown) => {
+			if (finalized || (stopReason && entries[index].status === "completed")) return
+			Logger.error(`[SubagentToolHandler] Subagent ${index} crashed:`, error)
+			const current = entries[index]
+			current.status = "failed"
+			current.error =
+				stopReason ||
+				(error instanceof Error ? error.message : typeof error === "string" ? error : "Internal Runner Crash")
+			results[index] = { status: "rejected", reason: error }
+			void queueStatusUpdate("running", true)
 		}
 
-		const workers = Array.from({ length: Math.min(MAX_CONCURRENCY, prompts.length) }, async () => {
-			while (nextIndex < prompts.length && !stopReason && !config.taskState.abort) {
-				const i = nextIndex++
-				await runSubagent(i)
-			}
-		})
-
-		// Production Hardening: 20-minute hard timeout for the entire swarm execution
 		const SUBAGENT_EXECUTION_TIMEOUT_MS = 20 * 60 * 1000
+		// Reserve every assignment before dispatch. Batches share three slots per task/depth;
+		// child helpers have a separate depth lane so parents waiting for them cannot deadlock it.
+		const workers = prompts.map((prompt, index) =>
+			executor
+				.execute(config.ulid, () => runSubagent(index), {
+					concurrencyGroup: `helpers:${currentDepth}`,
+					queueTimeoutMs: SUBAGENT_EXECUTION_TIMEOUT_MS,
+					signal: AbortSignal.any([config.taskState.abortSignal, batchAbort.signal]),
+					execution: {
+						kind: "helper",
+						input: { cwd: config.cwd, agent: configuredSubagentName ?? "default", prompt },
+						label: prompt,
+						owner: runners[index].getExecutionOwner(),
+					},
+				})
+				.catch((error) => failSubagent(index, error)),
+		)
 
 		try {
 			await pTimeout(Promise.race([Promise.all(workers), stopped]), {
@@ -489,7 +519,11 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		let usageCost = 0
 
 		results.forEach((result, index) => {
+			entries[index].activity = undefined
 			if (!result) {
+				// A sibling may have triggered the budget stop just after this helper
+				// published its completed handoff but before its promise settled.
+				if (entries[index].status === "completed") return
 				entries[index].status = "failed"
 				entries[index].error = stopReason || "Helper cancelled before finishing."
 				return
@@ -502,7 +536,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			}
 
 			entries[index].status = result.value.status
-			entries[index].result = result.value.result
+			entries[index].result = result.value.result ?? entries[index].result
 			entries[index].error = result.value.error
 			entries[index].filesModified = result.value.filesModified ?? entries[index].filesModified
 			entries[index].filesViewed = result.value.filesViewed ?? entries[index].filesViewed
@@ -564,6 +598,11 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		const summary = [
 			"### SWARM EXECUTION SUMMARY",
 			`Total Agents: ${entries.length} (Success: ${successCount}, Fail: ${failures})`,
+			...(failures > 0
+				? [
+						"Use completed results and partial work below. Continue independent authorized work; resolve a reported blocker before retrying the same assignment.",
+					]
+				: []),
 			"",
 			"### AGENT DETAILS",
 			...entries.map((entry) => {

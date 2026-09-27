@@ -9,7 +9,7 @@ import type { JoyRideCache } from "@core/joyride"
 import type { CommandPermissionController } from "@core/permissions"
 import type { UniversalGuard } from "@core/policy/UniversalGuard"
 import type { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
-import type { CommandExecutionOptions } from "@integrations/terminal"
+import type { CommandExecutionOptions, CommandExecutionResult, CommandExecutionSnapshot } from "@integrations/terminal"
 import type { BrowserSession } from "@services/browser/BrowserSession"
 import type { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import type { McpHub } from "@services/mcp/McpHub"
@@ -24,6 +24,7 @@ import type { DietCodeAskResponse } from "@shared/WebviewMessage"
 import { WorkspaceRootManager } from "@/core/workspace"
 import type { ContextManager } from "../../../context/context-management/ContextManager"
 import type { StateManager } from "../../../storage/StateManager"
+import type { ExecutionStateResult } from "../../ExecutionState"
 import type { MessageStateHandler } from "../../message-state"
 import type { TaskState } from "../../TaskState"
 import type { AutoApprove } from "../../tools/autoApprove"
@@ -35,6 +36,7 @@ import { TASK_CALLBACKS_KEYS, TASK_CONFIG_KEYS, TASK_SERVICES_KEYS } from "../ut
  * Strongly-typed configuration object passed to tool handlers
  */
 export interface TaskConfig {
+	executionOwner?: string
 	// Core identifiers
 	taskId: string
 	ulid: string
@@ -143,7 +145,9 @@ export interface TaskCallbacks {
 		command: string,
 		timeoutSeconds: number | undefined,
 		options?: CommandExecutionOptions,
-	) => Promise<[boolean, DietCodeToolResponseContent]>
+	) => Promise<CommandExecutionResult>
+	readCommandOutput?: (executionId: string, timeoutSeconds?: number, signal?: AbortSignal) => Promise<CommandExecutionSnapshot>
+	getExecutionState?: (executionId?: string) => ExecutionStateResult
 	cancelRunningCommandTool?: () => Promise<boolean>
 
 	doesLatestTaskCompletionHaveNewChanges: () => Promise<boolean>

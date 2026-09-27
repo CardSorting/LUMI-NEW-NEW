@@ -35,6 +35,12 @@ describe("TerminalProcess (Integration Tests)", () => {
 	let sandbox: sinon.SinonSandbox
 	let createdTerminals: vscode.Terminal[] = []
 
+	async function runMockCommand(terminal: vscode.Terminal, command: string) {
+		const pending = process.run(terminal, command)
+		await sandbox.clock.tickAsync(1000)
+		await pending
+	}
+
 	beforeEach(() => {
 		sandbox = sinon.createSandbox({ useFakeTimers: true })
 		setVscodeHostProviderMock()
@@ -229,7 +235,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 	// The following tests require shell integration and controlled terminal output
 	describe("Shell integration tests", () => {
 		// We'll mock the terminal run process and TerminalProcess for these tests
-		it("should emit completed and continue events when command finishes", async () => {
+		it("should detach without declaring completion when only output EOF is available", async () => {
 			// Create a terminal to ensure proper interface, but we'll use mocking under the hood
 			const terminal = TerminalRegistry.createTerminal().terminal
 			createdTerminals.push(terminal)
@@ -251,13 +257,13 @@ describe("TerminalProcess (Integration Tests)", () => {
 			const emitSpy = sandbox.spy(process, "emit")
 
 			// Run the command
-			await process.run(terminal, "echo test")
+			await runMockCommand(terminal, "echo test")
 
 			// Verify the executeCommand was called with the right command
 			mockExecuteCommand.calledWith("echo test").should.be.true()
 
 			// Check that the events were emitted
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.false()
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
 		})
 	})
@@ -281,7 +287,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			const emitSpy = sandbox.spy(process, "emit")
 
-			await process.run(terminal, "test-command")
+			await runMockCommand(terminal, "test-command")
 
 			// Check that line events were emitted for each line
 			;(emitSpy as sinon.SinonSpy).calledWith("line", "line1").should.be.true()
@@ -307,7 +313,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 			// Spy on global setTimeout
 			const setTimeoutSpy = sandbox.spy(global, "setTimeout")
 
-			await process.run(terminal, "build command")
+			await runMockCommand(terminal, "build command")
 
 			// Move time forward enough to schedule
 			sandbox.clock.tick(100)
@@ -334,20 +340,19 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			const setTimeoutSpy = sandbox.spy(global, "setTimeout")
 
-			await process.run(terminal, "standard command")
+			await runMockCommand(terminal, "standard command")
 			sandbox.clock.tick(100)
 
 			// Expect a short hot timeout (<= 5000)
 			const foundNormalTimeout = setTimeoutSpy.args.filter((args) => args[1] && args[1] <= 5000)
 			foundNormalTimeout.length.should.be.greaterThan(0)
 
-			// Also check that "completed" eventually emits
-			const emitSpy = sandbox.spy(process, "emit")
+			// Each process represents one command; reusing it must not dispatch again.
 			await process.run(terminal, "another command")
-			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.true()
+			mockExecuteCommand.calledOnce.should.be.true()
 		})
 
-		it("should correctly filter command echoes based on current implementation", async () => {
+		it("should preserve printable command text rather than guessing which lines are echoes", async () => {
 			// Create a terminal
 			const terminal = TerminalRegistry.createTerminal().terminal
 			createdTerminals.push(terminal)
@@ -369,13 +374,12 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			const emitSpy = sandbox.spy(process, "emit")
 
-			await process.run(terminal, "test-command")
+			await runMockCommand(terminal, "test-command")
 
-			// Check that "test-command" was filtered out but "test command" was not
+			// Printable text is retained, even when it also appears in the command.
 			;(emitSpy as sinon.SinonSpy).calledWith("line", "test command").should.be.true()
 			;(emitSpy as sinon.SinonSpy).calledWith("line", "other output").should.be.true()
-			// This should never be called because it should be filtered
-			;(emitSpy as sinon.SinonSpy).calledWith("line", "test-command").should.be.false()
+			;(emitSpy as sinon.SinonSpy).calledWith("line", "test-command").should.be.true()
 		})
 
 		it("should handle npm run commands", async () => {
@@ -395,7 +399,7 @@ describe("TerminalProcess (Integration Tests)", () => {
 
 			const emitSpy = sandbox.spy(process, "emit")
 
-			await process.run(terminal, "npm run build")
+			await runMockCommand(terminal, "npm run build")
 
 			// The "npm run build" line should be filtered, but the rest should be emitted
 			;(emitSpy as sinon.SinonSpy).calledWith("line", "> project@1.0.0 build").should.be.true()
@@ -417,13 +421,14 @@ describe("TerminalProcess (Integration Tests)", () => {
 		processAny.buffer.should.equal("")
 	})
 
-	it("should remove prompt characters from the last line of output", () => {
+	it("should preserve meaningful punctuation at the end of the buffered output", () => {
 		const processAny = process as any
-
-		processAny.removeLastLineArtifacts("line 1\nline 2 %").should.equal("line 1\nline 2")
-		processAny.removeLastLineArtifacts("line 1\nline 2 $").should.equal("line 1\nline 2")
-		processAny.removeLastLineArtifacts("line 1\nline 2 #").should.equal("line 1\nline 2")
-		processAny.removeLastLineArtifacts("line 1\nline 2 >").should.equal("line 1\nline 2")
+		const emitSpy = sandbox.spy(process, "emit")
+		for (const punctuation of ["%", "$", "#", ">"]) {
+			processAny.buffer = `line 2 ${punctuation}`
+			processAny.emitRemainingBufferIfListening()
+			;(emitSpy as sinon.SinonSpy).calledWith("line", `line 2 ${punctuation}`).should.be.true()
+		}
 	})
 
 	it("should process buffer and emit lines when newline characters are found", () => {

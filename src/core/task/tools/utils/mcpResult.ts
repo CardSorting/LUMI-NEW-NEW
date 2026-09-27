@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util"
 import { formatResponse } from "@core/prompts/responses"
+import { ActionAlreadyActiveError } from "@core/task/ActionExecutionRegistry"
 import { truncateContent } from "@/shared/content-limits"
 import type { McpResourceResponse, McpToolCallResponse } from "@/shared/mcp"
 
@@ -66,6 +67,7 @@ export function formatMcpResourceResult(result: McpResourceResponse) {
 }
 
 export function formatMcpRequestFailure(error: unknown, mayHaveSideEffects: boolean): string {
+	if (error instanceof ActionAlreadyActiveError) return formatResponse.toolError(error.message)
 	const detail = error instanceof Error ? error.message : String(error)
 	return formatResponse.toolError(
 		`MCP request failed: ${detail}${mayHaveSideEffects ? "\nNo confirmed result was received. The remote action may already have completed; inspect its state before repeating it." : ""}`,

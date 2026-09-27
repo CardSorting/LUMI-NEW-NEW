@@ -1,7 +1,7 @@
 import { AgentConfigLoader } from "@core/task/tools/subagent/AgentConfigLoader"
 import { CLINE_MCP_TOOL_IDENTIFIER, McpServer } from "@/shared/mcp"
 import { ModelFamily } from "@/shared/prompts"
-import { DietCodeDefaultTool } from "@/shared/tools"
+import { DietCodeDefaultTool, withExecutionObservation } from "@/shared/tools"
 import { type DietCodeToolSpec, toolSpecFunctionDeclarations, toolSpecFunctionDefinition, toolSpecInputSchema } from "../spec"
 import { PromptVariant, SystemPromptContext } from "../types"
 
@@ -72,7 +72,7 @@ export class DietCodeToolSet {
 	// Build a list of tools for a variant using requested ids, falling back to GENERIC when missing
 	public static getToolsForVariantWithFallback(variant: ModelFamily, requestedIds: string[]): DietCodeToolSet[] {
 		const resolved: DietCodeToolSet[] = []
-		for (const id of requestedIds) {
+		for (const id of withExecutionObservation(requestedIds)) {
 			const tool = DietCodeToolSet.getToolByNameWithFallback(id, variant)
 			if (tool) {
 				// Avoid duplicates by id
@@ -86,7 +86,7 @@ export class DietCodeToolSet {
 
 	public static getEnabledTools(variant: PromptVariant, context: SystemPromptContext): DietCodeToolSet[] {
 		const resolved: DietCodeToolSet[] = []
-		const requestedIds = variant.tools ? [...variant.tools] : []
+		const requestedIds = withExecutionObservation(variant.tools ?? [])
 		for (const id of requestedIds) {
 			const tool = DietCodeToolSet.getToolByNameWithFallback(id, variant.family)
 			if (tool) {

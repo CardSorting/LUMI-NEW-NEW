@@ -18,7 +18,7 @@
           },
           "timeout": {
             "type": "number",
-            "description": "Positive seconds to wait in the foreground. This does not kill the command. If it is still running, inspect the existing terminal output or continue independent work; do not launch a duplicate. Automatically approved commands use a managed wait when omitted."
+            "description": "Positive seconds to wait in the foreground, capped at 300. This does not kill the command. All commands use a bounded wait when omitted (30 seconds, or 300 for builds and tests). If still running, use read_command_output with the returned execution_id or continue independent work; do not launch a duplicate. A stop request or missing exit code is not proof of success."
           }
         },
         "required": [
@@ -489,6 +489,50 @@
         "required": [
           "prompt_1"
         ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_command_output",
+      "description": "Read bounded output and authoritative status for an existing execute_command execution in this task. Never starts, restarts, or stops a command. Use its execution_id after a foreground timeout instead of running the command again. Completed receipts remain available for the latest 64 runs in this session. Exit code 0 confirms success; unknown or missing exit codes do not. After unchanged output, do independent work or diagnose the blocker; do not poll indefinitely.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "description": "The execution ID returned by execute_command. This is not a terminal ID."
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Seconds to wait once for completion. Default 5, maximum 30; use 0 for an immediate snapshot. Cancelling this read does not stop the command."
+          }
+        },
+        "required": [
+          "execution_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_execution_state",
+      "description": "Inspect tracked work shared by this task's parent and helpers: commands, action input previews, attempt limits, queue capacity and occupants, current approval settings, and recent results. Returns immediately and never starts or cancels work. Accepts either a command or action execution_id, including IDs from duplicate-action errors. Use read_command_output with the command's execution_id for full command output. Missing or unavailable observation does not prove no work is running. Caller cancellation or timeout does not prove an action stopped; awaiting_completion means its underlying operation is unresolved. Do independent work between checks; inventory polling is not task progress.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "description": "Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Command results include their read_command_output handle. Expired or other-task IDs are rejected."
+          }
+        },
+        "required": [],
         "additionalProperties": false
       }
     }

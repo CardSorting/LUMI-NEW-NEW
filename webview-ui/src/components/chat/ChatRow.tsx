@@ -66,7 +66,6 @@ interface ChatRowProps {
 	inputValue?: string
 	sendMessageFromChatRow?: (text: string, images: string[], files: string[]) => void
 	onPendingQuoteChange: (text: string | null) => void
-	onCancelCommand?: () => void
 	mode?: Mode
 	reasoningContent?: string
 	responseStarted?: boolean
@@ -123,7 +122,6 @@ export const ChatRowContent = memo(
 		inputValue,
 		sendMessageFromChatRow,
 		onPendingQuoteChange,
-		onCancelCommand,
 		mode,
 		isRequestInProgress,
 		reasoningContent,
@@ -200,11 +198,19 @@ export const ChatRowContent = memo(
 
 		const isCommandMessage = type === "command"
 		// Check if command has output to determine if it's actually executing
-		const commandHasOutput = message.text?.includes(COMMAND_OUTPUT_STRING) ?? false
+		const commandHasOutput =
+			message.commandOutput !== undefined
+				? message.commandOutput.length > 0
+				: (message.text?.includes(COMMAND_OUTPUT_STRING) ?? false)
 		// A command is executing if it has output but hasn't completed yet
-		const isCommandExecuting = isCommandMessage && !message.commandCompleted && commandHasOutput
+		const isCommandExecuting =
+			isCommandMessage &&
+			(message.commandExecution
+				? ["running", "background", "stopping"].includes(message.commandExecution.status)
+				: !message.commandCompleted && commandHasOutput)
 		// A command is pending if it hasn't started (no output) and hasn't completed
-		const isCommandPending = isCommandMessage && isLast && !message.commandCompleted && !commandHasOutput
+		const isCommandPending =
+			isCommandMessage && !message.commandExecution && isLast && !message.commandCompleted && !commandHasOutput
 		const isCommandCompleted = isCommandMessage && message.commandCompleted === true
 
 		const isMcpServerResponding = isLast && lastModifiedMessage?.say === "mcp_server_request_started"
@@ -726,13 +732,11 @@ export const ChatRowContent = memo(
 			return (
 				<CommandOutputRow
 					icon={icon}
-					isBackgroundExec={false}
 					isCommandCompleted={isCommandCompleted}
 					isCommandExecuting={isCommandExecuting}
 					isCommandPending={isCommandPending}
 					isOutputFullyExpanded={isOutputFullyExpanded}
 					message={message}
-					onCancelCommand={onCancelCommand}
 					setIsOutputFullyExpanded={setIsOutputFullyExpanded}
 					title={title}
 				/>

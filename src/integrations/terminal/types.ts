@@ -2,6 +2,7 @@
  * Terminal types and interfaces used by the VS Code extension terminal manager.
  */
 
+import type { CommandExecutionState } from "@shared/ExtensionMessage"
 import type { DietCodeToolResponseContent } from "@shared/messages"
 import type { EventEmitter } from "events"
 
@@ -17,6 +18,10 @@ export interface TerminalCompletionDetails {
 	exitCode?: number | null
 	/** Termination signal when available */
 	signal?: NodeJS.Signals | null
+	/** The terminal closed; this alone does not prove the command succeeded. */
+	terminalClosed?: boolean
+	/** Closure followed an explicit stop request. */
+	cancelled?: boolean
 }
 
 export interface TerminalProcessEvents {
@@ -59,6 +64,9 @@ export interface ITerminalProcess extends EventEmitter<TerminalProcessEvents> {
 	 * @returns The unretrieved output
 	 */
 	getUnretrievedOutput(): string
+
+	/** Bounded output history without consuming another reader's cursor. */
+	getOutputSnapshot?(): string
 
 	/**
 	 * Get completion metadata for the most recent command execution.
@@ -272,7 +280,10 @@ export interface CommandExecutorCallbacks {
 	 * Update a dietcode message by index
 	 * Supports updating commandCompleted status and/or text content
 	 */
-	updateDietCodeMessage: (index: number, updates: { commandCompleted?: boolean; text?: string }) => Promise<void>
+	updateDietCodeMessage: (
+		index: number,
+		updates: { commandCompleted?: boolean; commandExecution?: CommandExecutionState; commandOutput?: string; text?: string },
+	) => Promise<void>
 	/** Get dietcode messages array */
 	getDietCodeMessages: () => Array<{ ts?: number; ask?: string; say?: string; text?: string }>
 	/** Add content to user message for next API request */
@@ -283,6 +294,12 @@ export interface CommandExecutorCallbacks {
  * Optional per-command execution behavior overrides.
  */
 export interface CommandExecutionOptions {
+	actionId?: string
+	owner?: string
+	/** null means the initiating row was unavailable; never update an older command instead. */
+	commandMessageTs?: number | null
+	/** Passed to terminal creation directly, never interpolated into shell text. */
+	cwd?: string
 	/** Cancellation belongs to this command, including after it continues in the terminal. */
 	signal?: AbortSignal
 	/** When false, stream output without asking whether to continue. */
@@ -292,6 +309,32 @@ export interface CommandExecutionOptions {
 	 * Command output is still captured and returned as the tool result.
 	 */
 	suppressUserInteraction?: boolean
+}
+
+/** The third tuple item is authoritative host state, separate from untrusted shell output. */
+export type CommandExecutionResult = [boolean, DietCodeToolResponseContent, (CommandExecutionState & { output?: string })?]
+
+export interface CommandExecutionSnapshot {
+	execution_id: string
+	action_id?: string
+	owner?: string
+	terminal_id: number
+	command: string
+	cwd: string
+	status: CommandExecutionState["status"]
+	exit_code?: number
+	signal?: string
+	terminal_closed?: boolean
+	detail?: string
+	output: string
+	log_file_path?: string
+	log_notice?: string
+}
+
+export type CommandExecutionSummary = Omit<CommandExecutionSnapshot, "output"> & {
+	output_preview: string
+	command_truncated?: boolean
+	output_truncated?: boolean
 }
 
 /**
@@ -321,6 +364,13 @@ export type FullCommandExecutorConfig = CommandExecutorConfig
  * Options for command orchestration
  */
 export interface OrchestrationOptions {
+	/** The owner publishes lifecycle state, including command-specific controls. */
+	onStateChange?: (state: CommandExecutionState) => void
+	/** Identity of the command row captured before terminal acquisition. */
+	commandMessageTs?: number | null
+	/** Stop requests release the foreground wait even when host termination does not settle. */
+	signal?: AbortSignal
+	onCancel?: () => void
 	/** When false, stream output without opening command-output approval prompts. */
 	interactive?: boolean
 	/** The command being executed */
@@ -352,6 +402,8 @@ export interface OrchestrationResult {
 	outputLines: string[]
 	/** Path to log file if output was too large and written to file */
 	logFilePath?: string
+	/** Capture notice, including incomplete or unavailable logs. */
+	logNotice?: string
 	/** Process exit code when available */
 	exitCode?: number | null
 	/** Process termination signal when available */

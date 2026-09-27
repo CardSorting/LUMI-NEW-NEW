@@ -32,6 +32,23 @@ describe("SubagentBuilder", () => {
 	afterEach(() => {
 		sinon.restore()
 	})
+	it("gives shell helpers observation access and keeps restricted helpers restricted", () => {
+		sinon
+			.stub(AgentConfigLoader, "getInstance")
+			.returns({ getCachedConfig: () => ({ tools: [DietCodeDefaultTool.BASH] }) } as unknown as AgentConfigLoader)
+		sinon.stub(api, "buildApiHandler").returns({ getModel: sinon.stub(), createMessage: sinon.stub() } as never)
+		const builder = new SubagentBuilder(createTaskConfig("act", "anthropic"))
+		assert.deepEqual(builder.getAllowedTools(), [
+			DietCodeDefaultTool.BASH,
+			DietCodeDefaultTool.READ_COMMAND_OUTPUT,
+			DietCodeDefaultTool.GET_EXECUTION_STATE,
+			DietCodeDefaultTool.ATTEMPT,
+		])
+		builder.setAllowedTools([DietCodeDefaultTool.FILE_READ])
+		assert.deepEqual(builder.getAllowedTools(), [DietCodeDefaultTool.FILE_READ, DietCodeDefaultTool.ATTEMPT])
+		builder.setAllowedTools([DietCodeDefaultTool.BASH])
+		assert.ok(builder.getAllowedTools().includes(DietCodeDefaultTool.READ_COMMAND_OUTPUT))
+	})
 
 	it("uses cached config by subagent name and applies act-mode provider model override", () => {
 		sinon.stub(AgentConfigLoader, "getInstance").returns({

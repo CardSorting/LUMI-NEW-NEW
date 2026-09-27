@@ -131,6 +131,34 @@ export interface ExtensionState {
 
 export type { TaskAuditMetadata } from "@shared/audit/types"
 
+export const COMMAND_EXECUTION_STATUSES = [
+	"running",
+	"background",
+	"unknown",
+	"stopping",
+	"stop_failed",
+	"completed",
+	"failed",
+	"cancelled",
+	"not_started",
+] as const
+
+export interface CommandExecutionState {
+	status: (typeof COMMAND_EXECUTION_STATUSES)[number]
+	/** A run identity, never a reusable terminal ID, authorizes command controls. */
+	executionId?: string
+	taskId?: string
+	terminalId?: number
+	detail?: string
+	exitCode?: number
+	signal?: string
+	terminalClosed?: boolean
+}
+
+export function isActiveCommandExecution(state: CommandExecutionState): boolean {
+	return ["running", "background", "unknown", "stopping", "stop_failed"].includes(state.status)
+}
+
 export interface DietCodeMessage {
 	ts: number
 	type: "ask" | "say"
@@ -142,6 +170,9 @@ export interface DietCodeMessage {
 	files?: string[]
 	partial?: boolean
 	commandCompleted?: boolean
+	commandExecution?: CommandExecutionState
+	/** Display output combined from command_output messages, kept separate from shell text. */
+	commandOutput?: string
 	lastCheckpointHash?: string
 	isCheckpointCheckedOut?: boolean
 	isOperationOutsideWorkspace?: boolean
@@ -302,6 +333,14 @@ export interface DietCodeSayGenerateExplanation {
 
 export type SubagentExecutionStatus = "pending" | "running" | "completed" | "failed"
 
+export interface SubagentActivity {
+	phase: "preparing" | "waiting" | "responding" | "tool" | "retrying" | "recovering"
+	/** Present only during an automatic retry. Includes the initial request. */
+	attempt?: number
+	maxAttempts?: number
+	retryAt?: number
+}
+
 export interface SubagentStatusItem {
 	id: string
 	name: string
@@ -316,6 +355,7 @@ export interface SubagentStatusItem {
 	contextWindow: number
 	contextUsagePercentage: number
 	latestToolCall?: string
+	activity?: SubagentActivity
 	result?: string
 	error?: string
 	criticalSignals?: string[]

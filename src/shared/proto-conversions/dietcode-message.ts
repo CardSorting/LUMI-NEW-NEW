@@ -3,6 +3,7 @@ import {
 	DietCodeAsk as AppDietCodeAsk,
 	DietCodeMessage as AppDietCodeMessage,
 	DietCodeSay as AppDietCodeSay,
+	COMMAND_EXECUTION_STATUSES,
 	TaskAuditMetadata,
 } from "@shared/ExtensionMessage"
 import { DietCodeAsk, DietCodeMessageType, DietCodeSay, DietCodeMessage as ProtoDietCodeMessage } from "@shared/proto/dietcode/ui"
@@ -201,6 +202,9 @@ export function convertDietCodeMessageToProto(message: AppDietCodeMessage): Prot
 		images: message.images ?? [],
 		files: message.files ?? [],
 		partial: message.partial ?? false,
+		commandCompleted: message.commandCompleted,
+		commandExecution: message.commandExecution,
+		commandOutput: message.commandOutput,
 		lastCheckpointHash: message.lastCheckpointHash ?? "",
 		isCheckpointCheckedOut: message.isCheckpointCheckedOut ?? false,
 		isOperationOutsideWorkspace: message.isOperationOutsideWorkspace ?? false,
@@ -256,6 +260,16 @@ export function convertProtoToDietCodeMessage(protoMessage: ProtoDietCodeMessage
 	const message: AppDietCodeMessage = {
 		ts: protoMessage.ts,
 		type: protoMessage.type === DietCodeMessageType.ASK ? "ask" : "say",
+	}
+
+	if (protoMessage.commandCompleted !== undefined) message.commandCompleted = protoMessage.commandCompleted
+	if (protoMessage.commandOutput !== undefined) message.commandOutput = protoMessage.commandOutput
+	if (protoMessage.commandExecution) {
+		const state = protoMessage.commandExecution
+		const status = COMMAND_EXECUTION_STATUSES.find((candidate) => candidate === state.status)
+		message.commandExecution = status
+			? { ...state, status }
+			: { status: "unknown", detail: "Command status is unavailable. Check View → Terminal before retrying." }
 	}
 
 	// Convert ask enum to string

@@ -508,7 +508,10 @@ export class Controller implements IController {
 		}
 	}
 
-	updateBackgroundCommandState(running: boolean, taskId?: string) {
+	updateBackgroundCommandState(running: boolean, taskId?: string, sourceTask?: Task) {
+		// Late terminal events from a closed task cannot replace the current task's status.
+		// A reopened task has the same persisted ID but a different runtime owner.
+		if ((sourceTask && sourceTask !== this.task) || (taskId && this.task?.taskId !== taskId)) return
 		const nextTaskId = running ? taskId : undefined
 		if (this.backgroundCommandRunning === running && this.backgroundCommandTaskId === nextTaskId) {
 			return
@@ -519,8 +522,9 @@ export class Controller implements IController {
 	}
 
 	async cancelBackgroundCommand(): Promise<void> {
-		const didCancel = await this.task?.cancelBackgroundCommand()
-		if (!didCancel) {
+		const task = this.task
+		const didCancel = await task?.cancelBackgroundCommand()
+		if (!didCancel && this.task === task) {
 			this.updateBackgroundCommandState(false)
 		}
 	}

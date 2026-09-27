@@ -174,6 +174,37 @@ describe("SubagentRunner", () => {
 		HostProvider.reset()
 		setRoadmapConfigOverride(null)
 	})
+	it("preserves command workspace options and links caller cancellation to the helper", async () => {
+		const config = createTaskConfig(true)
+		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
+		const helper = (runner as any).createSubagentTaskConfig() as TaskConfig
+		const controller = new AbortController()
+		assert.equal(helper.executionOwner, runner.getExecutionOwner())
+		const cwd = '/workspace/odd "name" $(literal)'
+		await helper.callbacks.executeCommandTool("pwd", 1, { cwd, signal: controller.signal, interactive: true })
+		const options = (config.callbacks.executeCommandTool as sinon.SinonStub).firstCall.args[2]
+		assert.equal(options.cwd, cwd)
+		assert.equal(options.interactive, false)
+		assert.equal(options.suppressUserInteraction, true)
+		assert.equal(options.signal.aborted, false)
+		controller.abort()
+		assert.equal(options.signal.aborted, true)
+	})
+	it("forwards command observation to the same owner with helper cancellation", async () => {
+		const config = createTaskConfig(true)
+		const read = sinon.stub().resolves({ execution_id: "run", status: "background" })
+		config.callbacks.readCommandOutput = read
+		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
+		const helper = (runner as any).createSubagentTaskConfig() as TaskConfig
+		const caller = new AbortController()
+		await helper.callbacks.readCommandOutput!("run", 5, caller.signal)
+		assert.equal(read.firstCall.args[0], "run")
+		assert.equal(read.firstCall.args[1], 5)
+		helper.taskState.abort = true
+		assert.equal(read.firstCall.args[2].aborted, true)
+		assert.equal(caller.signal.aborted, false)
+		sinon.assert.notCalled(config.callbacks.executeCommandTool as sinon.SinonStub)
+	})
 
 	it("emits native tool_use blocks with matching tool_result tool_use_id across turns", async () => {
 		const createMessage = sinon.stub()
@@ -235,6 +266,22 @@ describe("SubagentRunner", () => {
 		config.taskState.currentFocusChainChecklist = "- [ ] Finish unrelated parent work"
 		config.taskState.completionGateBlockCount = 10
 		config.auditCompletionGateEnabled = true
+		let inventoryReads = 0
+		config.callbacks.getExecutionState = () => ({
+			commands: { active: [], recent: [] },
+			actions: {
+				active: [
+					{
+						execution_id: "sibling-action",
+						kind: "helper",
+						label: `fresh state ${++inventoryReads}`,
+						owner: "helper:sibling",
+						status: "running",
+					},
+				],
+				recent: [],
+			},
+		})
 		const builder = new SubagentBuilder(config, "subagent")
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
@@ -242,6 +289,14 @@ describe("SubagentRunner", () => {
 		assert.equal(result.status, "completed", result.error)
 		assert.equal(result.result, VALID_SUBAGENT_COMPLETION_RESULT)
 		assert.equal(createMessage.callCount, 2)
+		assert.equal(inventoryReads, 2)
+		createMessage.getCalls().forEach((call, index) => {
+			const request = JSON.stringify(call.args[1])
+			assert.equal(request.match(/<execution_state>/g)?.length, 1)
+			assert.ok(request.includes(`fresh state ${index + 1}`))
+			assert.ok(request.includes("sibling-action"))
+			assert.ok(request.includes(runner.getExecutionOwner()))
+		})
 		assert.equal(config.taskState.completionGateBlockCount, 10)
 		assert.equal(config.taskState.completionAttemptCount ?? 0, 0)
 		assert.equal(config.taskState.currentFocusChainChecklist, "- [ ] Finish unrelated parent work")
@@ -310,6 +365,134 @@ describe("SubagentRunner", () => {
 	function callChunk(id: number, name: DietCodeDefaultTool, params: Record<string, unknown>) {
 		return { type: "tool_calls", tool_call: { function: { id: `call-${id}`, name, arguments: JSON.stringify(params) } } }
 	}
+	it("cancels between calls in a multi-tool response and returns the completed evidence", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield callChunk(1, DietCodeDefaultTool.FILE_EDIT, { path: "saved.ts" })
+			yield callChunk(2, DietCodeDefaultTool.FILE_EDIT, { path: "must-not-run.ts" })
+		})
+		const { config, runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_EDIT)
+		execute.callsFake(async () => {
+			config.taskState.abort = true
+			return "Saved the change once."
+		})
+		const result = await runner.run("Edit files", () => {})
+		assert.equal(result.status, "failed")
+		assert.equal(result.isPartial, true)
+		assert.match(result.result!, /Saved the change once/)
+		assert.deepEqual(result.filesModified, ["saved.ts"])
+		sinon.assert.calledOnce(execute)
+		sinon.assert.calledOnce(createMessage)
+	})
+
+	it("cancels a silent provider that ignores abort without executing its tools", async () => {
+		const createMessage = sinon.stub().callsFake(() => ({
+			[Symbol.asyncIterator]: () => ({
+				next: () =>
+					new Promise(() => {
+						queueMicrotask(() => {
+							void runner.abort()
+						})
+					}),
+				return: () => new Promise(() => {}),
+			}),
+		}))
+		const { runner, execute } = prepareProgressRun(createMessage)
+		const result = await runner.run("Read files", () => {})
+		assert.match(result.error!, /cancelled/)
+		sinon.assert.notCalled(execute)
+		sinon.assert.calledOnce(createMessage)
+	})
+
+	it("cancels during workspace policy loading before opening a provider request", async () => {
+		const createMessage = sinon.stub()
+		const { config, runner } = prepareProgressRun(createMessage)
+		sinon.stub(gatePolicy, "resolveCompletionGateOptions").callsFake(
+			() =>
+				new Promise(() => {
+					queueMicrotask(() => {
+						config.taskState.abort = true
+					})
+				}),
+		)
+		const result = await runner.run("Read files", () => {})
+		assert.match(result.error!, /cancelled/)
+		sinon.assert.notCalled(createMessage)
+	})
+
+	it("returns policy loading failures as a handoff without bypassing the policy", async () => {
+		const createMessage = sinon.stub()
+		const { runner } = prepareProgressRun(createMessage)
+		sinon.stub(gatePolicy, "resolveCompletionGateOptions").rejects(new Error("policy unavailable"))
+		const result = await runner.run("Read files", () => {})
+		assert.equal(result.status, "failed")
+		assert.match(result.error!, /policy unavailable/)
+		sinon.assert.notCalled(createMessage)
+	})
+
+	for (const budget of ["maxCost", "maxTokens"] as const) {
+		it(`does not send a request when ${budget} is already exhausted`, async () => {
+			const createMessage = sinon.stub()
+			const { config, runner } = prepareProgressRun(createMessage)
+			config.taskState[budget] = 0
+			const result = await runner.run("Read files", () => {})
+			assert.match(result.error!, /budget reached/)
+			sinon.assert.notCalled(createMessage)
+		})
+	}
+
+	it("accounts for current response cost before executing any returned tool", async () => {
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield { type: "usage", inputTokens: 10, outputTokens: 5, totalCost: 0.5 }
+			yield callChunk(1, DietCodeDefaultTool.LIST_FILES, { path: "." })
+		})
+		const { config, runner, execute } = prepareProgressRun(createMessage)
+		config.taskState.maxCost = 0.5
+		const result = await runner.run("Read files", () => {})
+		assert.match(result.error!, /cost budget reached/)
+		assert.equal(result.stats.totalCost, 0.5)
+		sinon.assert.notCalled(execute)
+		sinon.assert.calledOnce(createMessage)
+	})
+
+	it("cannot evade the recovery window by alternating empty turns and unavailable tools", async () => {
+		let turns = 0
+		const createMessage = sinon.stub().callsFake(async function* () {
+			if (++turns % 2) yield callChunk(turns, DietCodeDefaultTool.BASH, { command: "unavailable" })
+		})
+		const { runner, execute } = prepareProgressRun(createMessage)
+		const result = await runner.run("Read files", () => {})
+		assert.match(result.error!, /no new tool progress/)
+		assert.equal(turns, 8)
+		sinon.assert.notCalled(execute)
+	})
+
+	it("continues an interrupted helper from prior tool results without repeating a completed edit", async () => {
+		let turn = 0
+		const createMessage = sinon.stub().callsFake(async function* (_prompt, history) {
+			switch (++turn) {
+				case 1:
+					yield callChunk(1, DietCodeDefaultTool.FILE_EDIT, { path: "saved.ts" })
+					break
+				case 2:
+					yield callChunk(2, DietCodeDefaultTool.FILE_EDIT, { path: "unfinished.ts" })
+					throw Object.assign(new Error("connection lost"), { headers: { "retry-after": "0.001" } })
+				default:
+					assert.match(JSON.stringify(history), /observed content/)
+					assert.match(JSON.stringify(history), /Do not repeat completed actions/)
+					assert.doesNotMatch(JSON.stringify(history), /unfinished.ts/)
+					yield callChunk(3, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			}
+		})
+		const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_EDIT)
+		sinon.stub(completionGates, "validateSubagentCompletionGates").resolves(null)
+		const updates: any[] = []
+		const result = await runner.run("Edit files", (update) => updates.push(update))
+		assert.equal(result.status, "completed")
+		assert.deepEqual(result.filesModified, ["saved.ts"])
+		assert.ok(updates.some((update) => update.activity?.phase === "retrying"))
+		sinon.assert.calledOnce(execute)
+		assert.equal(createMessage.callCount, 3)
+	})
 	it("marks multimodal MCP failures as errors and keeps them from renewing the helper progress window", async () => {
 		let turns = 0
 		const createMessage = sinon.stub().callsFake(async function* (_prompt, conversation) {
@@ -709,15 +892,37 @@ describe("SubagentRunner", () => {
 		initializeHostProvider()
 
 		const config = createTaskConfig(true)
+		let inventoryReads = 0
+		config.callbacks.getExecutionState = () => ({
+			commands: { active: [], recent: [] },
+			actions: {
+				active: [
+					{
+						execution_id: "sibling",
+						kind: "helper",
+						label: `retry snapshot ${++inventoryReads}`,
+						owner: "helper:sibling",
+						status: "running",
+					},
+				],
+				recent: [],
+			},
+		})
 		const builder = new SubagentBuilder(config, "subagent")
 		const runner = new SubagentRunner(config, builder)
 		const result = await runner.run("List files", () => {})
 
 		assert.equal(result.status, "failed")
 		assert.equal(createMessage.callCount, 3)
+		assert.equal(inventoryReads, 3)
+		createMessage.getCalls().forEach((call, index) => {
+			const request = JSON.stringify(call.args[1])
+			assert.equal(request.match(/<execution_state>/g)?.length, 1)
+			assert.ok(request.includes(`retry snapshot ${index + 1}`))
+		})
 	})
 
-	it("does not replay a request after text or tool-call output", async () => {
+	it("bounds interrupted-response continuations without executing unfinished calls", async () => {
 		const createMessage = sinon.stub().callsFake(async function* () {
 			yield { type: "text", text: "Working on the requested fix." }
 			throw new Error("connection reset after output")
@@ -736,7 +941,7 @@ describe("SubagentRunner", () => {
 		const runner = new SubagentRunner(config, new SubagentBuilder(config, "subagent"))
 		const result = await runner.run("Apply the fix", () => {})
 		assert.equal(result.status, "failed")
-		assert.equal(createMessage.callCount, 1)
+		assert.equal(createMessage.callCount, 3)
 		assert.equal(prompt.firstCall.args[0].yoloModeToggled, true)
 		sinon.assert.notCalled(config.callbacks.executeCommandTool as sinon.SinonStub)
 	})
