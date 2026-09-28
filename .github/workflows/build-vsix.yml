@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+env:
+  NPM_CONFIG_FETCH_RETRIES: 5
+  NPM_CONFIG_FETCH_RETRY_FACTOR: 2
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: 1000
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: 30000
+
 concurrency:
   group: build-vsix-${{ github.ref }}
   cancel-in-progress: true
