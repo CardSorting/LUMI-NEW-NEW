@@ -62,6 +62,7 @@ import { listFiles } from "@services/glob/list-files"
 import { McpHub } from "@services/mcp/McpHub"
 import { ApiConfiguration } from "@shared/api"
 import { findLast, findLastIndex } from "@shared/array"
+import type { CompletionReview } from "@shared/CompletionReview"
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
 import {
@@ -1024,6 +1025,7 @@ export class Task {
 		files?: string[],
 		partial?: boolean,
 		auditMetadata?: TaskAuditMetadata,
+		completionReview?: CompletionReview,
 	): Promise<number | undefined> {
 		// Allow hook messages even when aborted to enable proper cleanup
 		if (this.taskState.abort && type !== "hook_status" && type !== "hook_output_stream") {
@@ -1050,6 +1052,7 @@ export class Task {
 						files,
 						partial,
 						auditMetadata,
+						completionReview,
 					})
 
 					const protoMessage = convertDietCodeMessageToProto(lastMessage)
@@ -1069,6 +1072,7 @@ export class Task {
 					partial,
 					modelInfo,
 					auditMetadata,
+					completionReview,
 				})
 				await this.postStateToWebview()
 				return sayTs
@@ -1085,6 +1089,7 @@ export class Task {
 					files,
 					partial: false,
 					auditMetadata,
+					completionReview,
 				})
 
 				// await this.postStateToWebview()
@@ -1104,6 +1109,7 @@ export class Task {
 				files,
 				modelInfo,
 				auditMetadata,
+				completionReview,
 			})
 			await this.postStateToWebview()
 			return sayTs
@@ -1120,6 +1126,7 @@ export class Task {
 			files,
 			modelInfo,
 			auditMetadata,
+			completionReview,
 		})
 		await this.postStateToWebview()
 		return sayTs

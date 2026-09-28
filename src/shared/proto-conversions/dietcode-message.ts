@@ -1,4 +1,5 @@
 import { getIntentClassification } from "@shared/audit/taskAuditUtils"
+import { parseCompletionReview } from "@shared/CompletionReview"
 import {
 	DietCodeAsk as AppDietCodeAsk,
 	DietCodeMessage as AppDietCodeMessage,
@@ -205,6 +206,7 @@ export function convertDietCodeMessageToProto(message: AppDietCodeMessage): Prot
 		commandCompleted: message.commandCompleted,
 		commandExecution: message.commandExecution,
 		commandOutput: message.commandOutput,
+		completionReview: parseCompletionReview(message.completionReview),
 		lastCheckpointHash: message.lastCheckpointHash ?? "",
 		isCheckpointCheckedOut: message.isCheckpointCheckedOut ?? false,
 		isOperationOutsideWorkspace: message.isOperationOutsideWorkspace ?? false,
@@ -264,6 +266,7 @@ export function convertProtoToDietCodeMessage(protoMessage: ProtoDietCodeMessage
 
 	if (protoMessage.commandCompleted !== undefined) message.commandCompleted = protoMessage.commandCompleted
 	if (protoMessage.commandOutput !== undefined) message.commandOutput = protoMessage.commandOutput
+	if (protoMessage.completionReview) message.completionReview = parseCompletionReview(protoMessage.completionReview)
 	if (protoMessage.commandExecution) {
 		const state = protoMessage.commandExecution
 		const status = COMMAND_EXECUTION_STATUSES.find((candidate) => candidate === state.status)

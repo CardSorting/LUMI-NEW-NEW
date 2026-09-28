@@ -44,6 +44,7 @@ service TaskService {
   rpc deleteAllTaskHistory(EmptyRequest) returns (DeleteAllTaskHistoryCount);
   // Explains changes with AI and adds inline comments to the diff view
   rpc explainChanges(ExplainChangesRequest) returns (Empty);
+  rpc streamExplainChanges(ExplainChangesRequest) returns (stream ExplainChangesProgress);
 }
 
 message CommandControlRequest {
@@ -141,4 +142,13 @@ message ExplainChangesRequest {
   Metadata metadata = 1;
   // Timestamp of the completion message to explain changes for
   int64 message_ts = 2;
+}
+
+// Observed walkthrough activity, not an estimate of review completion.
+message ExplainChangesProgress {
+  string phase = 1;
+  int32 files_total = 2;
+  int32 files_explained = 3;
+  int32 comment_count = 4;
+  string current_file = 5;
 }

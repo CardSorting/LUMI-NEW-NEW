@@ -262,6 +262,7 @@ export async function evaluateCompletionAuditGate(
 	},
 ): Promise<CompletionAuditGateResult> {
 	if (!config.auditCompletionGateEnabled || config.isSubagentExecution) {
+		markCompletionGatesPassed(config)
 		return { status: "skipped" }
 	}
 

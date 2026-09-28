@@ -15,6 +15,7 @@ import type { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import type { McpHub } from "@services/mcp/McpHub"
 import type { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
 import type { BrowserSettings } from "@shared/BrowserSettings"
+import type { CompletionReview } from "@shared/CompletionReview"
 import type { DietCodeAsk, DietCodeSay, TaskAuditMetadata } from "@shared/ExtensionMessage"
 import type { FocusChainSettings } from "@shared/FocusChainSettings"
 import type { DietCodeContent, DietCodeToolResponseContent } from "@shared/messages/content"
@@ -118,6 +119,7 @@ export interface TaskCallbacks {
 		files?: string[],
 		partial?: boolean,
 		auditMetadata?: TaskAuditMetadata,
+		completionReview?: CompletionReview,
 	) => Promise<number | undefined>
 
 	ask: (

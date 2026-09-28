@@ -1,4 +1,5 @@
 import { isAdvisoryAuditInfoMessage } from "@shared/audit/auditMessages"
+import { formatLegacyCompletionGateNotice } from "@shared/CompletionReview"
 import { COMMAND_OUTPUT_STRING } from "@shared/combineCommandSequences"
 import {
 	COMPLETION_RESULT_CHANGES_FLAG,
@@ -130,7 +131,6 @@ export const ChatRowContent = memo(
 		const { backgroundEditEnabled, mcpServers, mcpMarketplaceCatalog, onRelinquishControl, dietcodeMessages } =
 			useExtensionState()
 		const [seeNewChangesDisabled, setSeeNewChangesDisabled] = useState(false)
-		const [explainChangesDisabled, setExplainChangesDisabled] = useState(false)
 		const contentRef = useRef<HTMLDivElement>(null)
 
 		const initialActions = useMemo(() => {
@@ -223,7 +223,6 @@ export const ChatRowContent = memo(
 		useEffect(() => {
 			return onRelinquishControl(() => {
 				setSeeNewChangesDisabled(false)
-				setExplainChangesDisabled(false)
 			})
 		}, [onRelinquishControl])
 
@@ -849,7 +848,10 @@ export const ChatRowContent = memo(
 								<div className="flex items-start gap-2 py-2 px-3 my-2 bg-quote/60 rounded-sm border border-description/15 text-[11px] text-description/90">
 									<Icon className="mt-0.5 size-2 shrink-0" name="InfoIcon" />
 									<div className="break-words flex-1 ph-no-capture">
-										<MarkdownRow markdown={message.text} showCursor={false} />
+										<MarkdownRow
+											markdown={formatLegacyCompletionGateNotice(message.text) ?? message.text}
+											showCursor={false}
+										/>
 									</div>
 								</div>
 							)
@@ -1017,19 +1019,19 @@ export const ChatRowContent = memo(
 						const text = hasChanges ? message.text?.slice(0, -COMPLETION_RESULT_CHANGES_FLAG.length) : message.text
 
 						return (
-							<WithCopyButton onMouseUp={handleMouseUp} ref={contentRef} textToCopy={text}>
+							<div onMouseUp={handleMouseUp} ref={contentRef}>
 								<CompletionOutputRow
 									auditMetadata={message.auditMetadata}
-									explainChangesDisabled={explainChangesDisabled}
+									completionReview={message.completionReview}
 									headClassNames={HEADER_CLASSNAMES}
 									messageTs={message.ts}
+									partial={message.partial}
 									seeNewChangesDisabled={seeNewChangesDisabled}
-									setExplainChangesDisabled={setExplainChangesDisabled}
 									setSeeNewChangesDisabled={setSeeNewChangesDisabled}
 									showActionRow={message.partial !== true && hasChanges}
 									text={text || ""}
 								/>
-							</WithCopyButton>
+							</div>
 						)
 					case "shell_integration_warning":
 						return (
@@ -1144,19 +1146,19 @@ export const ChatRowContent = memo(
 							const hasChanges = message.text.endsWith(COMPLETION_RESULT_CHANGES_FLAG) ?? false
 							const text = hasChanges ? message.text.slice(0, -COMPLETION_RESULT_CHANGES_FLAG.length) : message.text
 							return (
-								<WithCopyButton onMouseUp={handleMouseUp} ref={contentRef} textToCopy={text}>
+								<div onMouseUp={handleMouseUp} ref={contentRef}>
 									<CompletionOutputRow
 										auditMetadata={message.auditMetadata}
-										explainChangesDisabled={explainChangesDisabled}
+										completionReview={message.completionReview}
 										headClassNames={HEADER_CLASSNAMES}
 										messageTs={message.ts}
+										partial={message.partial}
 										seeNewChangesDisabled={seeNewChangesDisabled}
-										setExplainChangesDisabled={setExplainChangesDisabled}
 										setSeeNewChangesDisabled={setSeeNewChangesDisabled}
 										showActionRow={message.partial !== true && hasChanges}
 										text={text || ""}
 									/>
-								</WithCopyButton>
+								</div>
 							)
 						}
 						// Virtuoso cannot handle zero-height items; render a spacer instead of null

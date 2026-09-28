@@ -1,16 +1,18 @@
-import { TaskAuditMetadata } from "@shared/ExtensionMessage"
+import { COMPLETION_REVIEW_ERRORS, type CompletionReview, parseCompletionReview } from "@shared/CompletionReview"
+import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { Int64Request } from "@shared/proto/dietcode/common"
-import { CheckIcon } from "lucide-react"
-import { memo } from "react"
-import { VscIcon } from "@/components/ui/vsc-icon"
+import { CheckIcon, ClockIcon, FileDiffIcon, MessageSquareTextIcon, SquareIcon } from "lucide-react"
+import { memo, useRef, useState, useSyncExternalStore } from "react"
+import { Button } from "@/components/ui/button"
 import { PLATFORM_CONFIG, PlatformType } from "@/config/platform.config"
-import { pickCompletionPresentation } from "@/copy/lumiVoice"
 import { cn } from "@/lib/utils"
+import { completionWalkthroughs } from "@/services/completion-walkthrough"
 import { TaskServiceClient } from "@/services/grpc-client"
 import { CopyButton } from "../common/CopyButton"
-import SuccessButton from "../common/SuccessButton"
+import MarkdownBlock from "../common/MarkdownBlock"
 import { AuditReportPanel } from "./AuditReportPanel"
-import { MarkdownRow } from "./MarkdownRow"
+import { CompletionChecks } from "./CompletionChecks"
+import { WalkthroughStatus } from "./WalkthroughStatus"
 
 interface CompletionOutputRowProps {
 	text: string
@@ -18,10 +20,10 @@ interface CompletionOutputRowProps {
 	showActionRow?: boolean
 	seeNewChangesDisabled: boolean
 	setSeeNewChangesDisabled: (value: boolean) => void
-	explainChangesDisabled: boolean
-	setExplainChangesDisabled: (value: boolean) => void
 	messageTs: number
 	auditMetadata?: TaskAuditMetadata
+	completionReview?: CompletionReview
+	partial?: boolean
 }
 
 export const CompletionOutputRow = memo(
@@ -31,53 +33,65 @@ export const CompletionOutputRow = memo(
 		showActionRow,
 		seeNewChangesDisabled,
 		setSeeNewChangesDisabled,
-		explainChangesDisabled,
-		setExplainChangesDisabled,
 		messageTs,
 		auditMetadata,
+		completionReview,
+		partial = false,
 	}: CompletionOutputRowProps) => {
-		const presentation = pickCompletionPresentation(messageTs)
-
+		const review = parseCompletionReview(completionReview)
 		return (
-			<div>
-				<div className="rounded-lg border border-success/10 overflow-visible bg-success/[0.04] p-4 pt-4 animate-lumi-settle">
-					<div className={cn(headClassNames, "justify-between px-1 mb-1")}>
-						<div className="flex flex-col gap-0.5 min-w-0 flex-1">
-							{presentation.showHeader ? (
-								<>
-									<div className="flex gap-2 items-center">
-										<CheckIcon className="size-3 text-success/70 animate-lumi-reveal [animation-duration:0.75s]" />
-										{presentation.header && (
-											<span className="text-success/80 font-medium">{presentation.header}</span>
-										)}
-									</div>
-									{presentation.closer && (
-										<span className="text-success/60 text-xs pl-5">{presentation.closer}</span>
-									)}
-								</>
-							) : (
-								<span className="text-success/80 text-xs font-medium">Done</span>
-							)}
-						</div>
-						<CopyButton className="text-success/80 shrink-0" textToCopy={text} />
+			<section
+				aria-busy={partial}
+				aria-label="Task result"
+				className="min-w-0 rounded-lg border border-description/25 bg-code/40">
+				<div className={cn(headClassNames, "flex items-center justify-between gap-2 px-3 py-3 m-0")}>
+					<div className="flex min-w-0 items-center gap-2" role="status">
+						{partial ? (
+							<ClockIcon aria-hidden className="size-4 shrink-0 text-description" />
+						) : (
+							<CheckIcon
+								aria-hidden
+								className="size-4 shrink-0 text-[var(--vscode-testing-iconPassed,var(--vscode-foreground))]"
+							/>
+						)}
+						<h3 className="m-0 text-base font-medium text-foreground">
+							{partial ? "Preparing result" : "Task complete"}
+						</h3>
 					</div>
-					<div className={cn("w-full relative rounded-b-sm", "border-t-1 border-description/15")}>
-						<div className="completion-output-content p-2 pt-3 w-full [&_hr]:opacity-20 [&_p:last-child]:mb-0 rounded-sm">
-							<MarkdownRow markdown={text} />
-						</div>
-					</div>
-					{auditMetadata && <AuditReportPanel auditMetadata={auditMetadata} variant="success" />}
+					{!partial && (
+						<CopyButton
+							ariaLabel="Copy result"
+							className="min-h-[44px] min-w-[44px] scale-100 text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border"
+							textToCopy={text}
+						/>
+					)}
 				</div>
-				{showActionRow && (
+				{partial && (
+					<div className="px-3 pb-2 text-xs text-description">
+						Completion checks will run after the summary is ready.
+					</div>
+				)}
+				<div className="completion-output-content min-w-0 px-3 pb-3 wrap-anywhere [&_hr]:opacity-20 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 [&_p]:line-clamp-none [&_p]:leading-relaxed">
+					<MarkdownBlock markdown={text} showCursor={partial} />
+				</div>
+				{!partial &&
+					(review ? (
+						<CompletionChecks key={`checks-${messageTs}`} review={review} />
+					) : (
+						<div className="border-t border-description/20 px-3 py-3 text-xs text-description">
+							Check details weren’t recorded for this result.
+						</div>
+					))}
+				{!partial && auditMetadata && <AuditReportPanel auditMetadata={auditMetadata} variant="neutral" />}
+				{!partial && showActionRow && (
 					<CompletionOutputActionRow
-						explainChangesDisabled={explainChangesDisabled}
+						key={`actions-${messageTs}`}
 						messageTs={messageTs}
 						seeNewChangesDisabled={seeNewChangesDisabled}
-						setExplainChangesDisabled={setExplainChangesDisabled}
 						setSeeNewChangesDisabled={setSeeNewChangesDisabled}
 					/>
 				)}
-			</div>
+			</section>
 		)
 	},
 )
@@ -88,46 +102,91 @@ const CompletionOutputActionRow = memo(
 	({
 		seeNewChangesDisabled,
 		setSeeNewChangesDisabled,
-		explainChangesDisabled,
-		setExplainChangesDisabled,
 		messageTs,
-	}: {
-		seeNewChangesDisabled: boolean
-		setSeeNewChangesDisabled: (value: boolean) => void
-		explainChangesDisabled: boolean
-		setExplainChangesDisabled: (value: boolean) => void
-		messageTs: number
-	}) => {
+	}: Pick<CompletionOutputRowProps, "seeNewChangesDisabled" | "setSeeNewChangesDisabled" | "messageTs">) => {
+		const [pending, setPending] = useState(false)
+		const inFlight = useRef(false)
+		const [error, setError] = useState<string>()
+		const walkthrough = useSyncExternalStore(completionWalkthroughs.subscribe, () => completionWalkthroughs.get(messageTs))
+		const activeTs = useSyncExternalStore(completionWalkthroughs.subscribe, completionWalkthroughs.getActiveTimestamp)
+		const running = activeTs === messageTs
+		const anotherRunning = activeTs !== undefined && !running
+		const runDiff = async () => {
+			if (inFlight.current) return
+			inFlight.current = true
+			setPending(true)
+			setError(undefined)
+			setSeeNewChangesDisabled(true)
+			try {
+				await TaskServiceClient.taskCompletionViewChanges(Int64Request.create({ value: messageTs }))
+			} catch (err) {
+				console.error("Failed to open completion review:", err)
+				const recovery = Object.values(COMPLETION_REVIEW_ERRORS).find(
+					(message) => err instanceof Error && err.message === message,
+				)
+				setError(recovery ?? "Couldn’t open the changes. Try Review changes again.")
+			} finally {
+				inFlight.current = false
+				setPending(false)
+				setSeeNewChangesDisabled(false)
+			}
+		}
+		const visibleError = error ?? walkthrough.error
 		return (
-			<div className="pt-2.5 flex flex-col gap-2">
-				<SuccessButton
-					className={cn("w-full", seeNewChangesDisabled ? "cursor-wait" : "cursor-pointer")}
-					disabled={seeNewChangesDisabled}
-					onClick={() => {
-						setSeeNewChangesDisabled(true)
-						TaskServiceClient.taskCompletionViewChanges(Int64Request.create({ value: messageTs })).catch((err) =>
-							console.error("Failed to show task completion view changes:", err),
-						)
-					}}>
-					<VscIcon className="mr-1.5" name="new-file" />
-					See what changed
-				</SuccessButton>
-				{PLATFORM_CONFIG.type === PlatformType.VSCODE && (
-					<SuccessButton
-						className={cn("w-full", explainChangesDisabled ? "cursor-wait" : "cursor-pointer")}
-						disabled={explainChangesDisabled}
-						onClick={() => {
-							setExplainChangesDisabled(true)
-							TaskServiceClient.explainChanges({ metadata: {}, messageTs }).catch((err) => {
-								console.error("Failed to explain changes:", err)
-								setExplainChangesDisabled(false)
-							})
-						}}>
-						<VscIcon className="mr-1.5" name="comment-discussion" />
-						{explainChangesDisabled ? "Explaining…" : "Explain changes"}
-					</SuccessButton>
+			<div className="border-t border-description/20 px-3 py-3">
+				<div className="mb-2 text-xs text-description">
+					{PLATFORM_CONFIG.type === PlatformType.VSCODE
+						? "Review the diff or open a walkthrough with inline explanations."
+						: "Review the diff for this result."}
+				</div>
+				<div className="flex flex-wrap gap-2">
+					<Button
+						aria-busy={pending}
+						className="min-h-[44px] min-w-0 basis-48 grow whitespace-normal text-button-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border"
+						disabled={pending || seeNewChangesDisabled}
+						onClick={() => void runDiff()}
+						type="button">
+						<FileDiffIcon aria-hidden />
+						<span className="min-w-0 wrap-anywhere">{pending ? "Opening changes…" : "Review changes"}</span>
+					</Button>
+					{PLATFORM_CONFIG.type === PlatformType.VSCODE && (
+						<Button
+							aria-label={running ? "Stop walkthrough" : undefined}
+							className="min-h-[44px] min-w-0 basis-48 grow whitespace-normal shadow-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border"
+							disabled={!running && (pending || anotherRunning)}
+							onClick={() => {
+								setError(undefined)
+								if (running) completionWalkthroughs.stop(messageTs)
+								else completionWalkthroughs.start(messageTs)
+							}}
+							type="button"
+							variant="secondary">
+							{running ? <SquareIcon aria-hidden /> : <MessageSquareTextIcon aria-hidden />}
+							<span className="min-w-0 wrap-anywhere">
+								{running
+									? "Stop generating"
+									: walkthrough.phase === "complete"
+										? "Explain again"
+										: "Explain changes"}
+							</span>
+						</Button>
+					)}
+				</div>
+				<WalkthroughStatus state={walkthrough} />
+				{anotherRunning && (
+					<div className="mt-2 text-sm text-foreground">A walkthrough is running for another result.</div>
+				)}
+				{visibleError && (
+					<div className="mt-2 text-sm text-error wrap-anywhere" role="alert">
+						{visibleError}
+						{walkthrough.phase === "error" && walkthrough.commentCount > 0 && (
+							<div>Explanations already added remain in the diff.</div>
+						)}
+					</div>
 				)}
 			</div>
 		)
 	},
 )
+
+CompletionOutputActionRow.displayName = "CompletionOutputActionRow"

@@ -6,6 +6,7 @@ import { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
 import CheckpointTracker from "@integrations/checkpoints/CheckpointTracker"
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import { findLast, findLastIndex } from "@shared/array"
+import { COMPLETION_REVIEW_ERRORS } from "@shared/CompletionReview"
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
 import { DietCodeApiReqInfo, DietCodeMessage, DietCodeSay } from "@shared/ExtensionMessage"
@@ -18,7 +19,7 @@ import { ShowMessageType } from "@/shared/proto/host/window"
 import { Logger } from "@/shared/services/Logger"
 import { MessageStateHandler } from "../../core/task/message-state"
 import { TaskState } from "../../core/task/TaskState"
-import { ICheckpointManager } from "./types"
+import type { CheckpointDiffFile, ICheckpointManager } from "./types"
 
 // Type definitions for better code organization
 type SayFunction = (
@@ -423,152 +424,39 @@ export class TaskCheckpointManager implements ICheckpointManager {
 	 * @param seeNewChangesSinceLastTaskCompletion - Whether to show changes since last completion
 	 */
 	async presentMultifileDiff(messageTs: number, seeNewChangesSinceLastTaskCompletion: boolean): Promise<void> {
-		const relinquishButton = () => {
-			sendRelinquishControlEvent()
-		}
-
-		try {
-			if (!this.config.enableCheckpoints) {
-				const errorMessage = "Checkpoints are disabled in settings. Cannot show diff."
-				Logger.error(`[TaskCheckpointManager] ${errorMessage} for task ${this.task.taskId}`)
-				HostProvider.window.showMessage({
-					type: ShowMessageType.INFORMATION,
-					message: errorMessage,
-				})
-				relinquishButton()
-				return
-			}
-
-			Logger.log(`[TaskCheckpointManager] presentMultifileDiff for task ${this.task.taskId}, messageTs: ${messageTs}`)
-			const dietcodeMessages = this.services.messageStateHandler.getDietCodeMessages()
-			const messageIndex = dietcodeMessages.findIndex((m) => m.ts === messageTs)
-			const message = dietcodeMessages[messageIndex]
-			if (!message) {
-				Logger.error(`[TaskCheckpointManager] Message not found for timestamp ${messageTs} in task ${this.task.taskId}`)
-				relinquishButton()
-				return
-			}
-			const hash = message.lastCheckpointHash
-			if (!hash) {
-				Logger.error(
-					`[TaskCheckpointManager] No checkpoint hash found for message ${messageTs} in task ${this.task.taskId}`,
-				)
-				relinquishButton()
-				return
-			}
-
-			// Initialize checkpoint tracker if needed
-			if (!this.state.checkpointTracker && this.config.enableCheckpoints && !this.state.checkpointManagerErrorMessage) {
-				try {
-					const workspacePath = await this.getWorkspacePath()
-					this.state.checkpointTracker = await CheckpointTracker.create(
-						this.task.taskId,
-						this.config.enableCheckpoints,
-						workspacePath,
-					)
-					this.services.messageStateHandler.setCheckpointTracker(this.state.checkpointTracker)
-				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : "Unknown error"
-					Logger.error(
-						`[TaskCheckpointManager] Failed to initialize checkpoint tracker for task ${this.task.taskId}:`,
-						errorMessage,
-					)
-					this.state.checkpointManagerErrorMessage = errorMessage
-					HostProvider.window.showMessage({
-						type: ShowMessageType.ERROR,
-						message: errorMessage,
-					})
-					relinquishButton()
-					return
-				}
-			}
-
-			if (!this.state.checkpointTracker) {
-				Logger.error(`[TaskCheckpointManager] Checkpoint tracker not available for task ${this.task.taskId}`)
-				HostProvider.window.showMessage({
-					type: ShowMessageType.ERROR,
-					message: "Checkpoint tracker not available",
-				})
-				relinquishButton()
-				return
-			}
-
-			let changedFiles:
-				| {
-						relativePath: string
-						absolutePath: string
-						before: string
-						after: string
-				  }[]
-				| undefined
-
-			if (seeNewChangesSinceLastTaskCompletion) {
-				// Get last task completed
-				const lastTaskCompletedMessageCheckpointHash = findLast(
-					this.services.messageStateHandler.getDietCodeMessages().slice(0, messageIndex),
-					(m) => m.say === "completion_result",
-				)?.lastCheckpointHash
-
-				// This value *should* always exist
-				const firstCheckpointMessageCheckpointHash = this.services.messageStateHandler
-					.getDietCodeMessages()
-					.find((m) => m.say === "checkpoint_created")?.lastCheckpointHash
-
-				const previousCheckpointHash = lastTaskCompletedMessageCheckpointHash || firstCheckpointMessageCheckpointHash
-
-				if (!previousCheckpointHash) {
-					const errorMessage = "Unexpected error: No checkpoint hash found"
-					Logger.error(`[TaskCheckpointManager] ${errorMessage} for task ${this.task.taskId}`)
-					HostProvider.window.showMessage({
-						type: ShowMessageType.ERROR,
-						message: errorMessage,
-					})
-					relinquishButton()
-					return
-				}
-
-				// Get changed files between current state and commit
-				changedFiles = await this.state.checkpointTracker.getDiffSet(previousCheckpointHash, hash)
-				if (!changedFiles?.length) {
-					HostProvider.window.showMessage({
-						type: ShowMessageType.INFORMATION,
-						message: "No changes found",
-					})
-					relinquishButton()
-					return
-				}
-			} else {
-				// Get changed files between current state and commit
-				changedFiles = await this.state.checkpointTracker.getDiffSet(hash)
-				if (!changedFiles?.length) {
-					HostProvider.window.showMessage({
-						type: ShowMessageType.INFORMATION,
-						message: "No changes found",
-					})
-					relinquishButton()
-					return
-				}
-			}
-
-			// Open multi-diff editor
-			const title = seeNewChangesSinceLastTaskCompletion ? "New changes" : "Changes since snapshot"
-			const diffs = changedFiles.map((file) => ({
+		const changedFiles = await this.getCheckpointDiff(messageTs, seeNewChangesSinceLastTaskCompletion)
+		if (!changedFiles.length) throw new Error(COMPLETION_REVIEW_ERRORS.noChanges)
+		await HostProvider.diff.openMultiFileDiff({
+			title: seeNewChangesSinceLastTaskCompletion ? "New changes" : "Changes since snapshot",
+			diffs: changedFiles.map((file) => ({
 				filePath: file.absolutePath,
 				leftContent: file.before,
 				rightContent: file.after,
-			}))
-			await HostProvider.diff.openMultiFileDiff({ title, diffs })
+			})),
+		})
+	}
 
-			relinquishButton()
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : "Unknown error"
-			Logger.error(`[TaskCheckpointManager] Failed to present multifile diff for task ${this.task.taskId}:`, errorMessage)
-			HostProvider.window.showMessage({
-				type: ShowMessageType.ERROR,
-				message: `Failed to retrieve diff set: ${errorMessage}`,
-			})
-			relinquishButton()
-		}
+	/** Shared snapshot access for the diff viewer and the annotated walkthrough. */
+	async getCheckpointDiff(messageTs: number, seeNewChangesSinceLastTaskCompletion: boolean): Promise<CheckpointDiffFile[]> {
+		if (!this.config.enableCheckpoints) throw new Error(COMPLETION_REVIEW_ERRORS.checkpointsDisabled)
+		const messages = this.services.messageStateHandler.getDietCodeMessages()
+		const messageIndex = messages.findIndex((message) => message.ts === messageTs)
+		const hash = messages[messageIndex]?.lastCheckpointHash
+		if (!hash) throw new Error(COMPLETION_REVIEW_ERRORS.snapshotUnavailable)
+
+		const tracker = await this.checkpointTrackerCheckAndInit()
+		if (!tracker) throw new Error(COMPLETION_REVIEW_ERRORS.snapshotUnavailable)
+		this.services.messageStateHandler.setCheckpointTracker(tracker)
+		if (!seeNewChangesSinceLastTaskCompletion) return tracker.getDiffSet(hash)
+
+		const earlierMessages = messages.slice(0, messageIndex)
+		const previousHash =
+			findLast(earlierMessages, (message) => message.say === "completion_result" && !!message.lastCheckpointHash)
+				?.lastCheckpointHash ??
+			earlierMessages.find((message) => message.say === "checkpoint_created" && !!message.lastCheckpointHash)
+				?.lastCheckpointHash
+		if (!previousHash) throw new Error(COMPLETION_REVIEW_ERRORS.baselineUnavailable)
+		return tracker.getDiffSet(previousHash, hash)
 	}
 
 	/**

@@ -3,6 +3,7 @@ import { sendAddToInputEvent } from "@/core/controller/ui/subscribeToAddToInput"
 import { CommentReviewController, type OnReplyCallback, type ReviewComment } from "@/integrations/editor/CommentReviewController"
 import { Logger } from "@/shared/services/Logger"
 import { DIFF_VIEW_URI_SCHEME } from "../VscodeDiffViewProvider"
+import { reviewDiffUri } from "./reviewDiffUri"
 
 /**
  * DietCode's GitHub avatar URL
@@ -70,18 +71,6 @@ export class VscodeCommentReviewController extends CommentReviewController imple
 	}
 
 	/**
-	 * Ensure the comments.openView setting is set to "never" to prevent
-	 * the Comments panel from auto-opening when comments are added.
-	 */
-	async ensureCommentsViewDisabled(): Promise<void> {
-		const config = vscode.workspace.getConfiguration("comments")
-		const currentValue = config.get<string>("openView")
-		if (currentValue !== "never") {
-			await config.update("openView", "never", vscode.ConfigurationTarget.Global)
-		}
-	}
-
-	/**
 	 * Add a review comment to a file
 	 */
 	addReviewComment(comment: ReviewComment): void {
@@ -89,9 +78,7 @@ export class VscodeCommentReviewController extends CommentReviewController imple
 		// This allows comments to attach to the diff view's virtual documents
 		let uri: vscode.Uri
 		if (comment.relativePath && comment.fileContent !== undefined) {
-			uri = vscode.Uri.parse(`${DIFF_VIEW_URI_SCHEME}:${comment.relativePath}`).with({
-				query: Buffer.from(comment.fileContent).toString("base64"),
-			})
+			uri = reviewDiffUri(comment.filePath, comment.fileContent)
 		} else {
 			uri = vscode.Uri.file(comment.filePath)
 		}
@@ -139,9 +126,7 @@ export class VscodeCommentReviewController extends CommentReviewController imple
 		// Use virtual diff URI if relativePath and fileContent are provided
 		let uri: vscode.Uri
 		if (relativePath && fileContent !== undefined) {
-			uri = vscode.Uri.parse(`${DIFF_VIEW_URI_SCHEME}:${relativePath}`).with({
-				query: Buffer.from(fileContent).toString("base64"),
-			})
+			uri = reviewDiffUri(filePath, fileContent)
 		} else {
 			uri = vscode.Uri.file(filePath)
 		}

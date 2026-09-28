@@ -5,8 +5,9 @@ import { formatResponse } from "@core/prompts/responses"
 import { maybeTransitionToReplanMode } from "@core/task/utils/replanModeTransition"
 import { processFilesIntoText } from "@integrations/misc/extract-text"
 import { showSystemNotification } from "@integrations/notifications"
+import { normalizeShellCommand } from "@integrations/terminal/normalizeCommand"
 import { telemetryService } from "@services/telemetry"
-import { findLastIndex } from "@shared/array"
+import { findLast, findLastIndex } from "@shared/array"
 import { buildGateBlockEventSummary, enrichAuditMetadataWithGateDecision } from "@shared/audit/auditGateCatalog"
 import {
 	applyWorkspaceAuditPolicy,
@@ -15,7 +16,10 @@ import {
 } from "@shared/audit/auditGatePolicyLoader"
 import { buildPreCompletionChecklist } from "@shared/audit/auditGateReport"
 import { getLatestPlanAuditFromMessages } from "@shared/audit/auditMessages"
-import { buildPreCompletionChecklistBlock, buildPreCompletionChecklistSummary } from "@shared/audit/auditPreCompletionChecklist"
+import {
+	buildPreCompletionChecklistMarkdown,
+	buildPreCompletionChecklistSummary,
+} from "@shared/audit/auditPreCompletionChecklist"
 import { enrichAuditMetadataWithArtifactPaths, persistAuditWorkspaceArtifacts } from "@shared/audit/auditWorkspaceArtifacts"
 import { buildAuditHookMetadata, buildDoubleCheckAuditSection, runAdvisoryAudit } from "@shared/audit/completionAudit"
 import { detectReplanIntent } from "@shared/detectReplanIntent"
@@ -25,7 +29,6 @@ import { DietCodeDefaultTool } from "@shared/tools"
 import { buildUserFeedbackContent } from "../../utils/buildUserFeedbackContent"
 import {
 	buildCompletionGatePassedEnvelope,
-	buildCompletionGateReadinessBlock,
 	buildCompletionPreflightReadinessBrief,
 	buildDoubleCheckReverifyMessage,
 	buildProactiveCompletionGuidance,
@@ -47,6 +50,7 @@ import {
 	evaluateCompletionGateReadinessAsync,
 	runCompletionPreflightChecks,
 } from "../completionGatePipeline"
+import { buildCompletionReview } from "../completionReview"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IPartialBlockHandler, IToolHandler, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
@@ -129,13 +133,15 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			return await config.callbacks.sayAndCreateMissingParamError(this.name, "result")
 		}
 
-		if (shouldEmitProactiveCompletionGuidance(config)) {
-			try {
-				await config.callbacks.say("info", buildProactiveCompletionGuidance(config))
-				markProactiveCompletionGuidanceEmitted(config)
-			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Failed to emit proactive completion guidance:", error)
-			}
+		// The streamed summary is a draft. Remove it before validation so rejected or
+		// interrupted attempts cannot leave a permanently pending result in history.
+		const messages = config.messageState.getDietCodeMessages()
+		const withoutDrafts = messages.filter(
+			(message) => !(message.partial === true && message.type === "say" && message.say === "completion_result"),
+		)
+		if (withoutDrafts.length !== messages.length) {
+			config.messageState.setDietCodeMessages(withoutDrafts)
+			await config.messageState.saveDietCodeMessagesAndUpdateHistory()
 		}
 
 		if (shouldEmitPreflightReadinessHint(config)) {
@@ -146,9 +152,12 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 					validateCompletionResultQuality,
 					"AttemptCompletionHandler",
 				)
+				let needsAttention = readinessIssues.length > 0
 				const readinessParts = [
 					buildCompletionPreflightReadinessBrief(config),
-					buildCompletionGateReadinessBlock(readinessIssues),
+					readinessIssues.length > 0
+						? readinessIssues.map((issue) => `- ${issue.message}`).join("\n")
+						: "Initial completion checks passed.",
 				]
 				if (config.auditCompletionGateEnabled && config.taskState.lastAdvisoryAudit) {
 					const checklistSummary = buildPreCompletionChecklistSummary(
@@ -157,11 +166,12 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 							planBaselineMetadata: getLatestPlanAuditFromMessages(config.messageState.getDietCodeMessages()),
 						}),
 					)
-					if (checklistSummary) {
-						readinessParts.push(buildPreCompletionChecklistBlock(checklistSummary))
+					if (checklistSummary?.blocked) {
+						needsAttention = true
+						readinessParts.push(buildPreCompletionChecklistMarkdown(checklistSummary))
 					}
 				}
-				await config.callbacks.say("info", readinessParts.join("\n\n"))
+				if (needsAttention) await config.callbacks.say("info", readinessParts.join("\n\n"))
 				markPreflightReadinessHintEmitted(config)
 			} catch (error) {
 				Logger.warn("[AttemptCompletionHandler] Failed to emit preflight readiness hint:", error)
@@ -178,6 +188,14 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			},
 		)
 		if (preflightError) {
+			if (shouldEmitProactiveCompletionGuidance(config)) {
+				try {
+					await config.callbacks.say("info", buildProactiveCompletionGuidance(config))
+					markProactiveCompletionGuidanceEmitted(config)
+				} catch (error) {
+					Logger.warn("[AttemptCompletionHandler] Failed to emit proactive completion guidance:", error)
+				}
+			}
 			return wrapFormattedCompletionError(preflightError)
 		}
 
@@ -186,7 +204,6 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			shouldRejectDoubleCheckCompletion(config.doubleCheckCompletionEnabled, config.taskState.doubleCheckCompletionPending)
 		) {
 			config.taskState.doubleCheckCompletionPending = true
-			await config.callbacks.removeLastPartialMessageIfExistsWithType("say", "completion_result")
 
 			const taskPreview = getInitialTaskPreview(config)
 			const taskSection = taskPreview ? `\n\n<initial_task>\n${taskPreview}\n</initial_task>` : ""
@@ -324,21 +341,11 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			config.taskState.lastCompletionAudit = auditMetadata
 		}
 
-		const priorGateBlocks = config.taskState.completionGateBlockCount ?? 0
 		const auditScore =
 			auditGateResult.status === "passed" ? auditGateResult.gateDecision.score : auditMetadata?.hardening_score
-		if (priorGateBlocks > 0 || auditScore !== undefined) {
-			try {
-				await config.callbacks.say(
-					"info",
-					buildCompletionGatePassedEnvelope(config, typeof auditScore === "number" ? auditScore : undefined),
-				)
-			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Failed to emit completion gate passed brief:", error)
-			}
-		}
 
 		let commandResult: ToolResponse | undefined
+		const commandMessageStart = config.messageState.getDietCodeMessages().length
 		if (command?.trim()) {
 			const commandHandler = config.coordinator.getHandler(DietCodeDefaultTool.BASH)
 			if (!commandHandler)
@@ -356,6 +363,23 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			commandResult = await commandHandler.execute(config, commandBlock)
 			if (isToolFailure(commandResult) || config.taskState.didRejectTool || config.taskState.abort) return commandResult
 		}
+
+		// Attach the review to the result, so success has one persistent home in the UI.
+		config.taskState.completionGateObservabilityEnvelope = buildCompletionGatePassedEnvelope(config, auditScore)
+		const commandMessage = command?.trim()
+			? findLast(
+					config.messageState.getDietCodeMessages().slice(commandMessageStart),
+					(message) =>
+						(message.say === "command" || message.ask === "command") &&
+						normalizeShellCommand(message.text ?? "") === normalizeShellCommand(command),
+				)
+			: undefined
+		const completionReview = buildCompletionReview(config, {
+			audit: auditGateResult,
+			taskProgress: block.params.task_progress,
+			command,
+			commandExecution: commandMessage?.commandExecution,
+		})
 
 		if (config.autoApprovalSettings.enableNotifications) {
 			showSystemNotification({
@@ -387,22 +411,6 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			}
 		}
 
-		// Remove any partial completion_result message that may exist
-		// Search backwards since other messages may have been inserted after the partial
-		const dietcodeMessages = config.messageState.getDietCodeMessages()
-		const partialCompletionIndex = findLastIndex(
-			dietcodeMessages,
-			(m) => m.partial === true && m.type === "say" && m.say === "completion_result",
-		)
-		if (partialCompletionIndex !== -1) {
-			const updatedMessages = [
-				...dietcodeMessages.slice(0, partialCompletionIndex),
-				...dietcodeMessages.slice(partialCompletionIndex + 1),
-			]
-			config.messageState.setDietCodeMessages(updatedMessages)
-			await config.messageState.saveDietCodeMessagesAndUpdateHistory()
-		}
-
 		const completionMessageTs = await config.callbacks.say(
 			"completion_result",
 			result,
@@ -410,6 +418,7 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			undefined,
 			false,
 			auditMetadata,
+			completionReview,
 		)
 		try {
 			await config.callbacks.saveCheckpoint(true, completionMessageTs)

@@ -537,6 +537,20 @@ describe("attemptCompletionUtils", () => {
 			envelope.should.containEql('passed="true"')
 			envelope.should.containEql('score="91"')
 		})
+
+		it("does not report a previous block as an active failure after success", () => {
+			const config = configWithState(taskState)
+			recordCompletionGateBlockEvent(config, "focus_chain_incomplete")
+			taskState.completionAttemptCount = 2
+			const envelope = buildCompletionGatePassedEnvelope(config)
+			envelope.should.containEql('passed="true"')
+			envelope.should.containEql('attempt="2"')
+			envelope.should.containEql('prior_blocks="1"')
+			envelope.should.not.containEql('reason="focus_chain_incomplete"')
+			envelope.should.not.containEql('http_status="422"')
+			envelope.should.not.containEql('state="wait"')
+			taskState.completionGateBlockCount!.should.equal(1)
+		})
 	})
 
 	describe("syncCompletionGateObservabilityCache", () => {
@@ -574,11 +588,12 @@ describe("attemptCompletionUtils", () => {
 			shouldEmitPreflightReadinessHint(config).should.be.false()
 		})
 
-		it("includes pipeline stages in readiness brief", () => {
+		it("keeps readiness guidance readable without internal XML or retired formatting rules", () => {
 			const brief = buildCompletionPreflightReadinessBrief(configWithState(taskState))
-			brief.should.containEql("Gate pipeline")
-			brief.should.containEql("<completion_gate_envelope")
-			brief.should.containEql("<completion_gate_health")
+			brief.should.containEql("Pre-completion readiness")
+			brief.should.not.containEql("<completion_gate_")
+			brief.should.not.containEql("1–2 paragraph")
+			brief.should.not.containEql("checklist only")
 		})
 	})
 
@@ -639,7 +654,7 @@ describe("attemptCompletionUtils", () => {
 			shouldEmitProactiveCompletionGuidance(configWithState(taskState)).should.be.true()
 			const guidance = buildProactiveCompletionGuidance(configWithState(taskState))
 			guidance.should.containEql("Completion gate advisory")
-			guidance.should.containEql("<completion_gate_envelope")
+			guidance.should.not.containEql("<completion_gate_")
 		})
 
 		it("records block reason, failed stage, and pressure on the task state", () => {

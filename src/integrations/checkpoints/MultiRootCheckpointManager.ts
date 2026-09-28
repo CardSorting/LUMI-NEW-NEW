@@ -25,6 +25,7 @@ import type { TaskState } from "@core/task/TaskState"
 import { WorkspaceRootManager } from "@core/workspace"
 import { telemetryService } from "@services/telemetry"
 import { findLast, findLastIndex } from "@shared/array"
+import { COMPLETION_REVIEW_ERRORS } from "@shared/CompletionReview"
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
 import type { DietCodeApiReqInfo, DietCodeMessage, DietCodeSay } from "@shared/ExtensionMessage"
@@ -34,7 +35,7 @@ import { HostProvider } from "@/hosts/host-provider"
 import { ShowMessageType } from "@/shared/proto/host/window"
 import { Logger } from "@/shared/services/Logger"
 import CheckpointTracker from "./CheckpointTracker"
-import { ICheckpointManager } from "./types"
+import type { CheckpointDiffFile as ChangedFile, ICheckpointManager } from "./types"
 
 type SayFunction = (
 	type: DietCodeSay,
@@ -43,13 +44,6 @@ type SayFunction = (
 	files?: string[],
 	partial?: boolean,
 ) => Promise<number | undefined>
-
-type ChangedFile = {
-	relativePath: string
-	absolutePath: string
-	before: string
-	after: string
-}
 
 type CommitSummary = {
 	rootHashes: Map<string, string>
@@ -650,53 +644,29 @@ export class MultiRootCheckpointManager implements ICheckpointManager {
 	 * Presents a multi-file diff view for all workspace roots with a known checkpoint baseline.
 	 */
 	async presentMultifileDiff(messageTs: number, seeNewChangesSinceLastTaskCompletion: boolean): Promise<void> {
-		try {
-			if (!this.enableCheckpoints || !this.initialized) {
-				HostProvider.window.showMessage({
-					type: ShowMessageType.ERROR,
-					message: "Checkpoint manager is not initialized.",
-				})
-				return
-			}
+		const changedFiles = await this.getCheckpointDiff(messageTs, seeNewChangesSinceLastTaskCompletion)
+		if (!changedFiles.length) throw new Error(COMPLETION_REVIEW_ERRORS.noChanges)
+		await HostProvider.diff.openMultiFileDiff({
+			title: seeNewChangesSinceLastTaskCompletion ? "New changes" : "Changes since snapshot",
+			diffs: changedFiles.map((file) => ({
+				filePath: file.absolutePath,
+				leftContent: file.before,
+				rightContent: file.after,
+			})),
+		})
+	}
 
-			const dietcodeMessages = this.messageStateHandler.getDietCodeMessages()
-			const messageIndex = dietcodeMessages.findIndex((message) => message.ts === messageTs)
-			const message = dietcodeMessages[messageIndex]
-			if (!message?.lastCheckpointHash) {
-				Logger.error("[MultiRootCheckpointManager] Message checkpoint hash not found")
-				HostProvider.window.showMessage({ type: ShowMessageType.ERROR, message: "No checkpoint hash found" })
-				return
-			}
-
-			const changedFiles = seeNewChangesSinceLastTaskCompletion
-				? await this.getChangesSinceLastTaskCompletion(messageIndex, message)
-				: await this.getChangesSinceSnapshot(message)
-
-			if (!changedFiles.length) {
-				HostProvider.window.showMessage({
-					type: ShowMessageType.INFORMATION,
-					message: "No changes found",
-				})
-				return
-			}
-
-			const title = seeNewChangesSinceLastTaskCompletion ? "New changes" : "Changes since snapshot"
-			await HostProvider.diff.openMultiFileDiff({
-				title,
-				diffs: changedFiles.map((file) => ({
-					filePath: file.absolutePath,
-					leftContent: file.before,
-					rightContent: file.after,
-				})),
-			})
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : "Unknown error"
-			Logger.error("[MultiRootCheckpointManager] Failed to present multifile diff:", errorMessage)
-			HostProvider.window.showMessage({
-				type: ShowMessageType.ERROR,
-				message: `Failed to present diff: ${errorMessage}`,
-			})
-		}
+	async getCheckpointDiff(messageTs: number, seeNewChangesSinceLastTaskCompletion: boolean): Promise<ChangedFile[]> {
+		if (!this.enableCheckpoints) throw new Error(COMPLETION_REVIEW_ERRORS.checkpointsDisabled)
+		await this.initialize()
+		if (!this.initialized || this.trackers.size === 0) throw new Error(COMPLETION_REVIEW_ERRORS.snapshotUnavailable)
+		const messages = this.messageStateHandler.getDietCodeMessages()
+		const messageIndex = messages.findIndex((message) => message.ts === messageTs)
+		const message = messages[messageIndex]
+		if (!message?.lastCheckpointHash) throw new Error(COMPLETION_REVIEW_ERRORS.snapshotUnavailable)
+		return seeNewChangesSinceLastTaskCompletion
+			? this.getChangesSinceLastTaskCompletion(messageIndex, message)
+			: this.getChangesSinceSnapshot(message)
 	}
 
 	private async getChangesSinceSnapshot(message: DietCodeMessage): Promise<ChangedFile[]> {
@@ -720,13 +690,7 @@ export class MultiRootCheckpointManager implements ICheckpointManager {
 				? this.getRootHashesForMessage(firstCheckpointMessage)
 				: this.firstCommitHashes
 
-		if (previousHashes.size === 0) {
-			HostProvider.window.showMessage({
-				type: ShowMessageType.ERROR,
-				message: "Unexpected error: No checkpoint hash found",
-			})
-			return []
-		}
+		if (previousHashes.size === 0) throw new Error(COMPLETION_REVIEW_ERRORS.baselineUnavailable)
 
 		return this.getDiffsBetweenRootHashes(previousHashes, currentHashes)
 	}

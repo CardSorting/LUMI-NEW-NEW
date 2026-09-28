@@ -1,6 +1,8 @@
 import type { IController as Controller } from "@core/controller/types"
+import { COMPLETION_REVIEW_ERRORS } from "@shared/CompletionReview"
 import { Empty, Int64Request } from "@shared/proto/dietcode/common"
 import { Logger } from "@/shared/services/Logger"
+import { sendRelinquishControlEvent } from "../ui/subscribeToRelinquishControl"
 
 /**
  * Shows task completion changes in a diff view
@@ -10,13 +12,15 @@ import { Logger } from "@/shared/services/Logger"
  */
 export async function taskCompletionViewChanges(controller: Controller, request: Int64Request): Promise<Empty> {
 	try {
-		if (request.value && controller.task) {
-			// presentMultifileDiff is optional on ICheckpointManager, so capture then optionally invoke
-			await controller.task.checkpointManager?.presentMultifileDiff?.(request.value, true)
-		}
+		if (!request.value || !controller.task) throw new Error(COMPLETION_REVIEW_ERRORS.taskUnavailable)
+		const checkpointManager = controller.task.checkpointManager
+		if (!checkpointManager?.presentMultifileDiff) throw new Error(COMPLETION_REVIEW_ERRORS.snapshotUnavailable)
+		await checkpointManager.presentMultifileDiff(request.value, true)
 		return Empty.create()
 	} catch (error) {
 		Logger.error("Error in taskCompletionViewChanges handler:", error)
 		throw error
+	} finally {
+		await sendRelinquishControlEvent()
 	}
 }

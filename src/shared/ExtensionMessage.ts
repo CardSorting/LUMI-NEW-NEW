@@ -7,6 +7,7 @@ import { AutoApprovalSettings } from "./AutoApprovalSettings"
 import { ApiConfiguration } from "./api"
 import type { TaskAuditMetadata } from "./audit/types"
 import { BrowserSettings } from "./BrowserSettings"
+import type { CompletionReview } from "./CompletionReview"
 import { DietCodeFeatureSetting } from "./DietCodeFeatureSetting"
 import { BannerCardData } from "./dietcode/banner"
 import { DietCodeRulesToggles } from "./dietcode-rules"
@@ -183,6 +184,7 @@ export interface DietCodeMessage {
 	conversationHistoryDeletedRange?: [number, number] // for when conversation history is truncated for API requests
 	modelInfo?: DietCodeMessageModelInfo
 	auditMetadata?: TaskAuditMetadata
+	completionReview?: CompletionReview
 }
 
 export type DietCodeAsk =

@@ -236,6 +236,21 @@ message DietCodeMessage {
   optional bool command_completed = 25;
   CommandExecutionStateProto command_execution = 26;
   optional string command_output = 27;
+  CompletionReviewProto completion_review = 28;
+}
+
+// Immutable record of checks that actually ran for a completed result.
+message CompletionReviewProto {
+  int32 schema_version = 1;
+  int32 attempt = 2;
+  int32 prior_blocks = 3;
+  repeated CompletionCheckProto checks = 4;
+}
+
+message CompletionCheckProto {
+  string id = 1;
+  string status = 2;
+  string detail = 3;
 }
 
 message CommandExecutionStateProto {

@@ -5,6 +5,7 @@ import { formatContentBlockToMarkdown } from "@/integrations/misc/export-markdow
 import { ApiConfiguration } from "@/shared/api"
 import { DietCodeStorageMessage } from "@/shared/messages/content"
 import { Logger } from "@/shared/services/Logger"
+import { ExplanationStreamParser } from "./ExplanationStreamParser"
 
 export interface ChangedFile {
 	relativePath: string
@@ -76,9 +77,6 @@ export async function setupCommentController(
 	const commentController = HostProvider.get().createCommentReviewController()
 	commentController.clearAllComments()
 
-	// Ensure the Comments panel won't auto-open when we add comments
-	await commentController.ensureCommentsViewDisabled()
-
 	// Set up reply handler for conversations
 	commentController.setOnReplyCallback(async (filePath, startLine, endLine, replyText, existingComments, onChunk) => {
 		await handleCommentReply(
@@ -113,7 +111,9 @@ export async function streamAIExplanationComments(
 	onCommentChunk: (chunk: string) => void,
 	onCommentEnd: () => void,
 	shouldAbort?: () => boolean,
+	abortSignal?: AbortSignal,
 ): Promise<number> {
+	if (abortSignal?.aborted || shouldAbort?.()) return 0
 	// Disable thinking/reasoning for faster response
 	const configWithoutThinking: ApiConfiguration = {
 		...apiConfiguration,
@@ -168,121 +168,44 @@ ${diffContent}
 
 Output your explanation comments now using the @@@ format:`
 
-	let commentCount = 0
-	let buffer = ""
-	let currentFile: string | null = null
-	let currentStartLine: number | null = null
-	let currentEndLine: number | null = null
-	let inComment = false
-
+	const parser = new ExplanationStreamParser(changedFiles, { start: onCommentStart, chunk: onCommentChunk, end: onCommentEnd })
+	const cancelled = Symbol("cancelled")
+	let notifyAbort = () => {}
+	const cancellation = new Promise<typeof cancelled>((resolve) => {
+		notifyAbort = () => resolve(cancelled)
+	})
+	const onAbort = () => {
+		notifyAbort()
+		try {
+			apiHandler.abort?.()
+		} catch (error) {
+			Logger.warn("Failed to abort walkthrough provider:", error)
+		}
+	}
+	abortSignal?.addEventListener("abort", onAbort, { once: true })
+	const stream = apiHandler.createMessage(systemPrompt, [{ role: "user", content: userMessage }])
+	let finished = false
 	try {
-		for await (const chunk of apiHandler.createMessage(systemPrompt, [{ role: "user", content: userMessage }])) {
-			// Check if we should abort before processing each chunk
-			if (shouldAbort?.()) {
-				// If we're in the middle of a comment, end it cleanly
-				if (inComment) {
-					onCommentEnd()
-				}
-				return commentCount
+		if (abortSignal?.aborted) onAbort()
+		while (!abortSignal?.aborted && !shouldAbort?.()) {
+			const next = await Promise.race([stream.next(), cancellation])
+			if (next === cancelled || abortSignal?.aborted || shouldAbort?.()) break
+			if (next.done) {
+				finished = true
+				break
 			}
-
-			if (chunk.type === "text") {
-				buffer += chunk.text
-
-				// Process buffer line by line, keeping incomplete lines
-				while (true) {
-					// Check abort before processing each line
-					if (shouldAbort?.()) {
-						if (inComment) {
-							onCommentEnd()
-						}
-						return commentCount
-					}
-
-					const newlineIndex = buffer.indexOf("\n")
-					if (newlineIndex === -1) {
-						break
-					}
-
-					const line = buffer.substring(0, newlineIndex)
-					buffer = buffer.substring(newlineIndex + 1)
-
-					const trimmedLine = line.trim()
-
-					// Check for FILE header
-					if (trimmedLine.startsWith("@@@ FILE:")) {
-						const filePath = trimmedLine.substring("@@@ FILE:".length).trim()
-						const matchingFile = changedFiles.find((f) => f.absolutePath === filePath || f.relativePath === filePath)
-						currentFile = matchingFile?.absolutePath || filePath
-						continue
-					}
-
-					// Check for LINE header (single line number)
-					if (trimmedLine.startsWith("@@@ LINE:")) {
-						const lineStr = trimmedLine.substring("@@@ LINE:".length).trim()
-						const lineNum = Number.parseInt(lineStr, 10)
-						if (!Number.isNaN(lineNum) && currentFile) {
-							currentStartLine = lineNum
-							currentEndLine = lineNum
-							// Now we have location - create the comment UI immediately!
-							onCommentStart(currentFile, currentStartLine, currentEndLine)
-							inComment = true
-							commentCount++
-						}
-						continue
-					}
-
-					// Check for end marker
-					if (trimmedLine === "@@@") {
-						if (inComment) {
-							onCommentEnd()
-							inComment = false
-							currentFile = null
-							currentStartLine = null
-							currentEndLine = null
-						}
-						continue
-					}
-
-					// If we're in a comment, stream the text
-					if (inComment) {
-						onCommentChunk(`${line}\n`)
-					}
-				}
-
-				// Stream partial content in buffer for more responsive UI
-				// But don't stream if it might be a marker (starts with @)
-				if (inComment && buffer.length > 0 && !buffer.startsWith("@")) {
-					onCommentChunk(buffer)
-					buffer = "" // Clear buffer after streaming
-				}
-			}
+			if (next.value.type === "text") parser.push(next.value.text)
 		}
-
-		// Handle any remaining content in buffer
-		if (buffer.trim()) {
-			const trimmedBuffer = buffer.trim()
-			if (trimmedBuffer === "@@@") {
-				if (inComment) {
-					onCommentEnd()
-					inComment = false
-				}
-			} else if (inComment && !trimmedBuffer.startsWith("@@@")) {
-				onCommentChunk(buffer)
-				onCommentEnd()
-				inComment = false
-			}
-		} else if (inComment) {
-			onCommentEnd()
-		}
-
-		return commentCount
+		return parser.finish()
 	} catch (error) {
+		parser.finish()
+		if (abortSignal?.aborted || shouldAbort?.()) return parser.commentCount
 		Logger.error("Error streaming AI explanation comments:", error)
-		if (inComment) {
-			onCommentEnd()
-		}
-		return commentCount
+		throw error
+	} finally {
+		abortSignal?.removeEventListener("abort", onAbort)
+		// Some providers cannot abort a pending read. Detach it without allowing late UI writes.
+		if (!finished) void stream.return(undefined).catch((error) => Logger.warn("Walkthrough stream cleanup failed:", error))
 	}
 }
 

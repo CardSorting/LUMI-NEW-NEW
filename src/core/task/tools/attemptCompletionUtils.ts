@@ -853,46 +853,36 @@ export function markPreflightReadinessHintEmitted(config: TaskConfig): void {
 	syncCompletionGateObservabilityCache(config)
 }
 
-/** First-attempt readiness — proactive checklist before the first completion try. */
+/** User-facing readiness notice. Structured diagnostics stay in the observability cache. */
 export function buildCompletionPreflightReadinessBrief(config: TaskConfig): string {
-	const parts = [
-		"📋 **Pre-completion readiness** — verify these before calling attempt_completion:",
-		buildCompletionGatePipelineBrief(),
-	]
+	const parts = ["📋 **Pre-completion readiness**"]
 
 	if (config.focusChainSettings?.enabled && config.taskState.currentFocusChainChecklist?.trim()) {
-		parts.push("- Focus chain: mark every item [x] via update_todo_list and pass task_progress")
+		const { totalItems, completedItems } = parseFocusChainListCounts(config.taskState.currentFocusChainChecklist)
+		parts.push(`- Checklist: ${completedItems} of ${totalItems} items complete.`)
 	}
 
 	if (config.auditCompletionGateEnabled) {
-		parts.push("- Audit gate: address critical violations; run tests before completing")
+		parts.push("- Audit: review blocking findings and verify the changes before completing.")
 	}
 
-	parts.push("- Result: 1–2 paragraph summary in result; checklist only in task_progress")
-	parts.push(
-		buildCompletionGateAgentEnvelope([
-			buildCompletionGateDigestBlock(config),
-			buildCompletionGateStateBlock(config),
-			buildCompletionGateHealthBlock(config),
-			buildCompletionGateFocusBlock(config),
-			buildCompletionGateStageProgressBlock(),
-		]),
-	)
+	parts.push("- Summary: describe the completed work and verification results.")
 	return parts.join("\n\n")
 }
 
+/** User-facing retry guidance; machine-readable recovery details belong in tool results. */
 export function buildProactiveCompletionGuidance(config: TaskConfig): string {
 	const blockCount = config.taskState.completionGateBlockCount ?? 0
 	const remaining = MAX_COMPLETION_GATE_BLOCK_COUNT - blockCount
 	const lastReason = config.taskState.lastCompletionBlockReason as CompletionPreflightReason | undefined
-	const failedStage = lastReason ? mapCompletionReasonToPreflightStage(lastReason) : undefined
 	const breatherHint = buildCompletionBreatherHint(config)
 	const escalationBrief = buildCompletionGateEscalationBrief(config)
 	const parts = [
 		`⚠️ **Completion gate advisory (${blockCount}/${MAX_COMPLETION_GATE_BLOCK_COUNT})** — ${remaining} attempt(s) before hard stop.`,
-		buildCompletionGateObservabilityEnvelope(config),
-		buildCompletionGatePipelineBrief(failedStage),
 	]
+	if (lastReason) {
+		parts.push(buildCompletionPreflightRecoveryHint(lastReason))
+	}
 	if (breatherHint) {
 		parts.push(breatherHint)
 	}
@@ -1074,12 +1064,9 @@ export function buildCompletionGatePassedBrief(config: TaskConfig, score?: numbe
 	)
 }
 
-/** Success envelope — all stages passed with health snapshot (mirrors green CI run). */
+/** Internal success diagnostics. Prior failure snapshots describe the blocked attempt, not this result. */
 export function buildCompletionGatePassedEnvelope(config: TaskConfig, score?: number): string {
 	return buildCompletionGateAgentEnvelope([
-		buildCompletionGateDigestBlock(config),
-		buildCompletionGateStateBlock(config),
-		buildCompletionGateHealthBlock(config),
 		buildCompletionGateStageProgressPassedBlock(),
 		buildCompletionGatePassedBrief(config, score),
 	])

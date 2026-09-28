@@ -1,3 +1,4 @@
+import type { CompletionReview } from "@shared/CompletionReview"
 import type { DietCodeAsk, DietCodeSay, TaskAuditMetadata } from "@shared/ExtensionMessage"
 import type { DietCodeDefaultTool } from "@shared/tools"
 import type { DietCodeAskResponse } from "@shared/WebviewMessage"
@@ -19,6 +20,7 @@ export interface StronglyTypedUIHelpers {
 		files?: string[],
 		partial?: boolean,
 		auditMetadata?: TaskAuditMetadata,
+		completionReview?: CompletionReview,
 	) => Promise<number | undefined>
 
 	ask: (
