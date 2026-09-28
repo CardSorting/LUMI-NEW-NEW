@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import type { ToolUse } from "@core/assistant-message"
+import { sendPartialMessageEvent } from "@core/controller/ui/subscribeToPartialMessage"
 import { formatResponse } from "@core/prompts/responses"
 import {
 	DietCodeAskUseSubagents,
@@ -7,6 +8,8 @@ import {
 	DietCodeSubagentUsageInfo,
 	SubagentStatusItem,
 } from "@shared/ExtensionMessage"
+import { convertDietCodeMessageToProto } from "@shared/proto-conversions/dietcode-message"
+import { SUBAGENT_ACTIVITY_LIMIT, SUBAGENT_HEARTBEAT_INTERVAL_MS } from "@shared/subagents"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
@@ -263,7 +266,7 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 
 		const entries: SubagentStatusItem[] = prompts.map((prompt, index) => ({
 			id: randomUUID(),
-			name: configuredSubagentName || `Subagent ${index + 1}`,
+			name: configuredSubagentName || `Helper ${index + 1}`,
 			index: index + 1,
 			prompt,
 			criticalSignals: [],
@@ -276,9 +279,42 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			contextWindow: 0,
 			contextUsagePercentage: 0,
 			latestToolCall: undefined,
+			queuedAt: Date.now(),
+			heartbeatAt: Date.now(),
+			lastActivityAt: Date.now(),
 		}))
+		let eventSequence = 0
+		const recordEvent = (entry: SubagentStatusItem, kind: "phase" | "tool" | "warning", label: string) => {
+			const events = (entry.activityEvents ??= [])
+			if (events.at(-1)?.label === label) return
+			events.push({ id: `${entry.id}:${++eventSequence}`, at: Date.now(), kind, label: label.slice(0, 1200) })
+			if (events.length > SUBAGENT_ACTIVITY_LIMIT) {
+				events.shift()
+				entry.omittedActivityEvents = (entry.omittedActivityEvents ?? 0) + 1
+			}
+		}
 
 		let statusMessageTs: number | undefined
+		let revision = 0
+		let lastRecoveryWriteAt = Number.NEGATIVE_INFINITY
+		let partialDelivery: Promise<void> | undefined
+		let latestPartial: Parameters<typeof convertDietCodeMessageToProto>[0] | undefined
+		const deliverPartial = (message: NonNullable<typeof latestPartial>) => {
+			latestPartial = message
+			partialDelivery ??= Promise.resolve().then(async () => {
+				try {
+					while (latestPartial) {
+						const next = latestPartial
+						latestPartial = undefined
+						await sendPartialMessageEvent(convertDietCodeMessageToProto(next), 2000)
+					}
+				} catch (error) {
+					Logger.warn("[SubagentToolHandler] Live delivery unavailable", error)
+				} finally {
+					partialDelivery = undefined
+				}
+			})
+		}
 		let webviewDelivery: Promise<void> | undefined
 		let webviewDeliveryPending = false
 		const queueWebviewDelivery = () => {
@@ -312,6 +348,8 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 
 			const payload: DietCodeSaySubagentStatus = {
 				batchId,
+				taskId: config.taskId,
+				revision: ++revision,
 				status,
 				total: entries.length,
 				completed,
@@ -328,8 +366,23 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			}
 
 			const text = JSON.stringify(payload)
+			const receiptId = block.call_id || block.tool_use_id
+			const recovery = config.taskState.recovery
+			const saved = receiptId ? recovery?.get("batch", receiptId) : undefined
+			if (saved && receiptId && (!partial || Date.now() - lastRecoveryWriteAt >= 1000)) {
+				lastRecoveryWriteAt = Date.now()
+				recovery?.observe(receiptId, { ...saved, status: text, messageTs: statusMessageTs })
+			}
 			const messages = config.messageState
-			if (messages?.getDietCodeMessages && messages.addToDietCodeMessages && messages.updateDietCodeMessage) {
+			if (messages?.publishSubagentStatus) {
+				const create = statusMessageTs === undefined
+				statusMessageTs ??= Math.max(Date.now(), (messages.getDietCodeMessages().at(-1)?.ts ?? 0) + 1)
+				const message = { ts: statusMessageTs, type: "say" as const, say: "subagent" as const, text, partial }
+				if (!messages.publishSubagentStatus(message, create)) return
+				deliverPartial(message)
+				// Full snapshots hydrate late subscribers; live updates never wait on auth/settings or disk.
+				if (create || !partial) queueWebviewDelivery()
+			} else if (messages?.getDietCodeMessages && messages.addToDietCodeMessages && messages.updateDietCodeMessage) {
 				// Own one row. A delayed write cannot replace a newer command, approval, or helper batch.
 				if (statusMessageTs === undefined) {
 					statusMessageTs = Math.max(Date.now(), (messages.getDietCodeMessages().at(-1)?.ts ?? 0) + 1)
@@ -360,15 +413,6 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 		let lastStatusWriteAt = Number.NEGATIVE_INFINITY
 		let resumeStatusDelay: (() => void) | undefined
 		const queueStatusUpdate = (status: DietCodeSaySubagentStatus["status"], partial: boolean): Promise<void> => {
-			const batchId = block.call_id || block.tool_use_id
-			const recovery = config.taskState.recovery
-			const saved = batchId ? recovery?.get("batch", batchId) : undefined
-			if (saved && batchId)
-				recovery?.observe(batchId, {
-					...saved,
-					status: JSON.stringify({ batchId, status, items: entries }),
-					messageTs: statusMessageTs,
-				})
 			// Bound progress I/O even when the UI is fast. Terminal updates bypass the delay.
 			pendingStatus = { status, partial }
 			if (!partial) resumeStatusDelay?.()
@@ -403,32 +447,43 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			return statusUpdateQueue
 		}
 
-		const builder = new SubagentBuilder(config, configuredSubagentName)
-
-		// Phase 3: Swarm Tool Delegation & Authorization Guard
-		const requestedTools = builder.getAllowedTools() || []
-		const unauthorizedTools = requestedTools.filter(
-			(t: DietCodeDefaultTool) => !SUBAGENT_DEFAULT_ALLOWED_TOOLS.includes(t) && t !== DietCodeDefaultTool.ATTEMPT,
-		)
-
-		if (unauthorizedTools.length > 0) {
-			Logger.warn(
-				`[SubagentToolHandler] Subagent '${configuredSubagentName}' requested restricted tools: ${unauthorizedTools.join(", ")}. Permission denied.`,
-			)
-			// Force filter the toolset to only include authorized tools
-			builder.setAllowedTools(requestedTools.filter((t) => !unauthorizedTools.includes(t)))
-		}
-
-		const runners = prompts.map((_prompt, index) => {
-			// Each helper owns its provider stream and retry signal. Sharing the builder
-			// also shared cancellation across otherwise independent helpers.
-			const helperBuilder = index === 0 ? builder : new SubagentBuilder(config, configuredSubagentName)
-			helperBuilder.setAllowedTools(builder.getAllowedTools())
-			const runner = new SubagentRunner(config, helperBuilder)
-			runner.setRecursionDepth(currentDepth + 1)
-			return runner
-		})
 		void queueStatusUpdate("running", true)
+		let runners: SubagentRunner[]
+		try {
+			const builder = new SubagentBuilder(config, configuredSubagentName)
+
+			// Phase 3: Swarm Tool Delegation & Authorization Guard
+			const requestedTools = builder.getAllowedTools() || []
+			const unauthorizedTools = requestedTools.filter(
+				(t: DietCodeDefaultTool) => !SUBAGENT_DEFAULT_ALLOWED_TOOLS.includes(t) && t !== DietCodeDefaultTool.ATTEMPT,
+			)
+
+			if (unauthorizedTools.length > 0) {
+				Logger.warn(
+					`[SubagentToolHandler] Subagent '${configuredSubagentName}' requested restricted tools: ${unauthorizedTools.join(", ")}. Permission denied.`,
+				)
+				// Force filter the toolset to only include authorized tools
+				builder.setAllowedTools(requestedTools.filter((t) => !unauthorizedTools.includes(t)))
+			}
+
+			runners = prompts.map((_prompt, index) => {
+				// Each helper owns its provider stream and retry signal. Sharing the builder
+				// also shared cancellation across otherwise independent helpers.
+				const helperBuilder = index === 0 ? builder : new SubagentBuilder(config, configuredSubagentName)
+				helperBuilder.setAllowedTools(builder.getAllowedTools())
+				const runner = new SubagentRunner(config, helperBuilder)
+				runner.setRecursionDepth(currentDepth + 1)
+				return runner
+			})
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : "Helper runtime could not start"
+			for (const entry of entries) {
+				entry.status = "failed"
+				entry.error = reason
+			}
+			await queueStatusUpdate("failed", false)
+			return formatResponse.toolError(reason)
+		}
 		let stopReason: string | undefined
 		let finalized = false
 		let signalStopped!: () => void
@@ -527,7 +582,12 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			try {
 				const current = entries[index]
 				current.status = "running"
-				current.activity = { phase: "preparing" }
+				current.startedAt = Date.now()
+				current.lastActivityAt = current.startedAt
+				current.heartbeatAt = current.startedAt
+				current.queuePosition = undefined
+				current.activity = { phase: "preparing", detail: "Starting helper runtime", startedAt: current.startedAt }
+				recordEvent(current, "phase", "Helper started")
 				void queueStatusUpdate("running", true)
 				if (parentStreamId) {
 					await observeHelperOperation("Stream registration", async () => {
@@ -561,7 +621,40 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 							current.latestToolCall = update.latestToolCall
 						}
 						if (update.activity !== undefined) {
+							if (
+								update.activity.phase !== current.activity?.phase ||
+								update.activity.detail !== current.activity?.detail
+							) {
+								const labels = {
+									preparing: "Preparing helper",
+									waiting: "Waiting for model response",
+									responding: "Receiving model response",
+									tool: "Running tool",
+									retrying: "Retry scheduled",
+									recovering: "Recovering interrupted response",
+								}
+								recordEvent(current, "phase", update.activity.detail || labels[update.activity.phase])
+							}
 							current.activity = update.activity
+						}
+						if (update.lastActivityAt !== undefined) current.lastActivityAt = update.lastActivityAt
+						if (update.responseChunks !== undefined) current.responseChunks = update.responseChunks
+						if (update.responseBytes !== undefined) current.responseBytes = update.responseBytes
+						if (update.requestCount !== undefined) current.requestCount = update.requestCount
+						if (update.latestMessage !== undefined) current.latestMessage = update.latestMessage
+						if (update.recentTools !== undefined) {
+							for (const tool of update.recentTools) {
+								if (
+									tool.status !== "running" &&
+									current.recentTools?.find((previous) => previous.id === tool.id)?.status !== tool.status
+								)
+									recordEvent(
+										current,
+										tool.status === "failed" ? "warning" : "tool",
+										`${tool.status === "failed" ? "Failed" : "Result received"}: ${tool.label}`,
+									)
+							}
+							current.recentTools = update.recentTools
 						}
 						if (update.activeSignals !== undefined) {
 							current.criticalSignals = update.activeSignals
@@ -607,6 +700,11 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 					current.contextWindow = stats.contextWindow || 0
 					current.contextUsagePercentage = stats.contextUsagePercentage || 0
 					current.activity = undefined
+					recordEvent(
+						current,
+						result.status === "completed" ? "phase" : "warning",
+						result.status === "completed" ? "Handoff ready for the main agent" : result.error || "Helper stopped",
+					)
 					// Release this finished helper's reservations without waiting for slower siblings.
 					closeChildStream(index)
 					void queueStatusUpdate("running", true)
@@ -661,6 +759,40 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 				})
 				.catch((error) => failSubagent(index, error)),
 		)
+		const refreshRuntime = () => {
+			if (finalized) return
+			const now = Date.now()
+			const queue = executor.getQueues(config.ulid).find((lane) => lane.group === `helpers:${currentDepth}`)
+			try {
+				const inventory = config.callbacks.getExecutionState?.()
+				for (const [index, entry] of entries.entries()) {
+					if (entry.status !== "pending" && entry.status !== "running") continue
+					entry.heartbeatAt = now
+					entry.queuePosition = queue?.queue.find((item) => item.execution_id === entry.executionId)?.position
+					if (inventory && "commands" in inventory) {
+						const commands = [...inventory.commands.recent, ...inventory.commands.active]
+							.filter((command) => command.owner === runners[index].getExecutionOwner())
+							.slice(-8)
+							.map((command) => ({
+								id: command.execution_id,
+								command: command.command.slice(0, 1000),
+								status: command.status,
+								output: command.output_preview.slice(-4000),
+								exitCode: command.exit_code,
+							}))
+						if (JSON.stringify(commands) !== JSON.stringify(entry.commands ?? [])) {
+							entry.commands = commands
+							entry.lastActivityAt = now
+						}
+					}
+				}
+			} catch (error) {
+				Logger.warn("[SubagentToolHandler] Command observation unavailable", error)
+			}
+			void queueStatusUpdate("running", true)
+		}
+		refreshRuntime()
+		const heartbeat = setInterval(refreshRuntime, SUBAGENT_HEARTBEAT_INTERVAL_MS)
 
 		try {
 			await Promise.race([Promise.all(workers), stopped])
@@ -669,6 +801,8 @@ export class UseSubagentsToolHandler implements IFullyManagedTool {
 			// Abort all runners on timeout to prevent zombie processes
 			stopBatch(err instanceof Error ? err.message : "Helper batch stopped.")
 		} finally {
+			refreshRuntime()
+			clearInterval(heartbeat)
 			clearTimeout(batchDeadline)
 			finalized = true
 			config.taskState.abortSignal.removeEventListener("abort", onParentAbort)

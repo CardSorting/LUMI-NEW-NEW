@@ -160,7 +160,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: marketplace-vsix-${{ matrix.target }}
-          path: dist/lumi*.vsix
+          path: |
+            dist/lumi-vscode-*.vsix
+            dist/lumi-[0-9]*.vsix
           if-no-files-found: error
           retention-days: 14
 

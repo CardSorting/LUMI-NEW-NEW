@@ -243,7 +243,18 @@ export class ActionExecutionRegistry {
 	recordHelperEvidence(scope: string, executionId: string | undefined, result: unknown): void {
 		const entry = executionId ? this.active.get(executionId) : undefined
 		if (!entry || entry.scope !== scope || entry.finished || entry.snapshot.kind !== "helper") return
-		entry.snapshot.helper_handoff = helperHandoff(result, entry.snapshot.helper_handoff)
+		// Provider chunks/heartbeats are telemetry, not new durable execution evidence.
+		if (
+			!result ||
+			typeof result !== "object" ||
+			!["result", "error", "filesModified", "filesViewed", "pendingCommandIds"].some(
+				(key) => (result as Record<string, unknown>)[key] !== undefined,
+			)
+		)
+			return
+		const next = helperHandoff(result, entry.snapshot.helper_handoff)
+		if (JSON.stringify(next) === JSON.stringify(entry.snapshot.helper_handoff)) return
+		entry.snapshot.helper_handoff = next
 		this.persist(entry, false)
 	}
 

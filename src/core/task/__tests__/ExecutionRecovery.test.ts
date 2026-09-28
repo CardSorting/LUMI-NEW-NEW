@@ -37,6 +37,30 @@ describe("execution recovery across extension-host restarts", () => {
 	const store = () => new ExecutionRecoveryStore(directory, identity)
 	const helperIdentity = (owner: string) => ({ kind: "helper" as const, input: { prompt: owner }, label: owner, owner })
 
+	it("persists new helper evidence immediately without fsyncing every provider chunk or duplicate snapshot", () => {
+		const registry = new ActionExecutionRegistry()
+		const recovery = store()
+		registry.attachRecovery(identity.ulid, recovery)
+		const entry = registry.claim(identity.ulid, helperIdentity("helper:live"))
+		const observe = sinon.spy(recovery, "observe")
+		for (let chunk = 0; chunk < 100; chunk++)
+			registry.recordHelperEvidence(identity.ulid, entry.snapshot.execution_id, {
+				responseChunks: chunk,
+				filesModified: undefined,
+				lastActivityAt: Date.now(),
+			})
+		sinon.assert.notCalled(observe)
+		for (let chunk = 0; chunk < 100; chunk++)
+			registry.recordHelperEvidence(identity.ulid, entry.snapshot.execution_id, {
+				filesModified: ["saved.ts"],
+				result: "File saved",
+			})
+		sinon.assert.calledOnce(observe)
+		const persisted = recovery.get("action", entry.snapshot.execution_id)
+		assert.equal(persisted?.kind, "action")
+		if (persisted?.kind === "action") assert.deepEqual(persisted.snapshot.helper_handoff?.files_modified, ["saved.ts"])
+	})
+
 	for (const phase of ["active", "completed"])
 		it(`recovers ${phase} evidence after the actual producing host process is killed`, async function () {
 			this.timeout(15000)

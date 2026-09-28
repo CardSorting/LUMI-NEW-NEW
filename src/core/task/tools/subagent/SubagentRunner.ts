@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import * as path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import type { ApiHandler, buildApiHandler } from "@core/api"
-import { guardedStream } from "@core/api/guardedStream"
+import { FIRST_CHUNK_TIMEOUT_MS, guardedStream, STREAM_IDLE_TIMEOUT_MS } from "@core/api/guardedStream"
 import { getApiRetryDelay, shouldRetryApiError, waitForApiRetry } from "@core/api/retry"
 import type { ApiStreamChunk } from "@core/api/transform/stream"
 import { parseAssistantMessageV2, ToolUse } from "@core/assistant-message"
@@ -16,7 +16,7 @@ import { resolveWorkspacePath } from "@core/workspace"
 import { ModelInfo } from "@shared/api"
 import { resolveCompletionGateOptions } from "@shared/audit/auditGatePolicyLoader"
 import { buildSubagentAuditContext, buildSubagentGateSignals } from "@shared/audit/auditSubagentContext"
-import type { SubagentActivity } from "@shared/ExtensionMessage"
+import type { SubagentActivity, SubagentToolActivity } from "@shared/ExtensionMessage"
 import {
 	DietCodeAssistantToolUseBlock,
 	DietCodeStorageMessage,
@@ -24,6 +24,7 @@ import {
 	DietCodeUserContent,
 } from "@shared/messages"
 import { Logger } from "@shared/services/Logger"
+import { SUBAGENT_RECENT_TOOL_LIMIT } from "@shared/subagents"
 import { DietCodeDefaultTool, DietCodeTool } from "@shared/tools"
 import pTimeout from "p-timeout"
 import { ContextManager } from "@/core/context/context-management/ContextManager"
@@ -56,12 +57,16 @@ import { PartialPatchError } from "../utils/FileProviderOperations"
 import { isToolFailure } from "../utils/toolOutcome"
 import { observeHelperOperation } from "./observeHelperOperation"
 import { SubagentBuilder } from "./SubagentBuilder"
+import { describeSubagentTool, subagentMessagePreview } from "./SubagentProgress"
 import { SwarmConsensusHandler } from "./SwarmConsensusHandler"
 
 const MAX_EMPTY_ASSISTANT_RETRIES = 1
 const MAX_INITIAL_STREAM_ATTEMPTS = 3
 const INITIAL_STREAM_RETRY_BASE_DELAY_MS = 250
 const MAX_STREAM_RECOVERY_ATTEMPTS = 2
+
+/** A missing required check is a failed handoff, never permission to execute or retry a write. */
+class HelperPreflightTimeoutError extends Error {}
 
 function getParentCompletionFailedStage(taskState: TaskState): string | undefined {
 	return taskState.lastCompletionFailedStage
@@ -98,9 +103,15 @@ interface ConfigWithExtensions extends TaskConfig {
 }
 
 interface SubagentProgressUpdate {
+	lastActivityAt?: number
+	responseChunks?: number
+	responseBytes?: number
+	requestCount?: number
 	stats?: SubagentRunStats
 	latestToolCall?: string
 	activity?: SubagentActivity
+	latestMessage?: string
+	recentTools?: SubagentToolActivity[]
 	status?: "running" | SubagentRunStatus
 	result?: string
 	error?: string
@@ -347,6 +358,7 @@ export class SubagentRunner {
 	}
 	private activeSignals: string[] = []
 	private onProgress?: (update: SubagentProgressUpdate) => void
+	private requestCount = 0
 	private activeTaskState?: TaskState
 
 	constructor(baseConfig: TaskConfig, agent: SubagentBuilder) {
@@ -390,14 +402,21 @@ export class SubagentRunner {
 		this.baseConfig.taskState.recovery?.assertCanExecute(this.executionOwner)
 	}
 
-	private waitForActiveOperation<T>(operation: () => Promise<T>): Promise<T> {
+	private waitForActiveOperation<T>(label: string, operation: () => Promise<T>, timeoutMs = 60_000): Promise<T> {
 		this.throwIfAborted()
+		this.onProgress?.({ activity: { phase: "preparing", detail: label, deadlineAt: Date.now() + timeoutMs } })
 		return pTimeout(
 			Promise.resolve().then(() => {
 				this.throwIfAborted()
 				return operation()
 			}),
-			{ milliseconds: Number.POSITIVE_INFINITY, signal: this.abortController.signal },
+			{
+				milliseconds: timeoutMs,
+				signal: this.abortController.signal,
+				message: new HelperPreflightTimeoutError(
+					`${label} timed out after ${timeoutMs / 1000}s. No unchecked action was started. Completed work is preserved for the main agent.`,
+				),
+			},
 		)
 	}
 
@@ -448,13 +467,24 @@ export class SubagentRunner {
 		streamId?: string,
 	): Promise<SubagentRunResult> {
 		this.streamId = streamId
+		this.requestCount = 0
+		let lastActivity: SubagentActivity | undefined
 		const onProgress = (update: SubagentProgressUpdate): void => {
+			const now = Date.now()
+			if (update.activity) {
+				const sameStage = lastActivity?.phase === update.activity.phase && lastActivity?.detail === update.activity.detail
+				update = { ...update, activity: { ...update.activity, startedAt: sameStage ? lastActivity?.startedAt : now } }
+				lastActivity = update.activity
+			}
 			try {
 				// Observers receive snapshots and cannot mutate usage or invalidate a completed action.
 				void Promise.resolve(
 					reportProgress({
 						...update,
+						lastActivityAt: now,
 						stats: update.stats ? { ...update.stats } : undefined,
+						activity: update.activity ? { ...update.activity } : undefined,
+						recentTools: update.recentTools?.map((tool) => ({ ...tool })),
 						filesModified: update.filesModified?.slice(),
 						filesViewed: update.filesViewed?.slice(),
 						activeSignals: update.activeSignals?.slice(),
@@ -468,6 +498,9 @@ export class SubagentRunner {
 		const startTime = Date.now()
 		const filesModified = new Set<string>()
 		const filesViewed = new Set<string>()
+		const recentTools: SubagentToolActivity[] = []
+		let responseChunks = 0
+		let responseBytes = 0
 		// Keep bounded, actual execution evidence even when there is no final model answer.
 		const completedResults: string[] = []
 		const toolReceipts = new Map<string, { fingerprint: string; result: string; failed: boolean }>()
@@ -501,7 +534,15 @@ export class SubagentRunner {
 				activity: { phase: "retrying", attempt: attempt + 1, maxAttempts, retryAt: Date.now() + delayMs },
 			}),
 		)
-		onProgress({ status: "running", stats, activity: { phase: "preparing" } })
+		onProgress({
+			status: "running",
+			stats,
+			activity: {
+				phase: "preparing",
+				detail: "Loading workspace policy and available skills",
+				deadlineAt: Date.now() + 15_000,
+			},
+		})
 
 		const onParentAbort = () => {
 			void this.abort().catch((error) => Logger.warn("[SubagentRunner] Cancellation unavailable:", error))
@@ -511,17 +552,24 @@ export class SubagentRunner {
 		try {
 			this.throwIfAborted()
 			this.checkBudget()
-			const gateOptions = await pTimeout(
-				resolveCompletionGateOptions(this.baseConfig, this.baseConfig.cwd, {
-					lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
-				}),
-				{
+			const [gateOptions, discoveredSkills] = await Promise.all([
+				pTimeout(
+					resolveCompletionGateOptions(this.baseConfig, this.baseConfig.cwd, {
+						lastAdvisoryAudit: this.baseConfig.taskState.lastAdvisoryAudit,
+					}),
+					{
+						milliseconds: 15_000,
+						signal: this.abortController.signal,
+						message:
+							"Helper workspace policy loading timed out. Resolve the unavailable policy before retrying this assignment.",
+					},
+				),
+				pTimeout(discoverSkills(this.baseConfig.cwd), {
 					milliseconds: 15_000,
 					signal: this.abortController.signal,
-					message:
-						"Helper workspace policy loading timed out. Resolve the unavailable policy before retrying this assignment.",
-				},
-			)
+					message: "Helper skill discovery timed out.",
+				}),
+			])
 			const parentCompletionFailedStage = getParentCompletionFailedStage(this.baseConfig.taskState)
 			const parentGateConfig = getSubagentGateConfig(this.baseConfig)
 			const parentGateObservability =
@@ -578,11 +626,6 @@ export class SubagentRunner {
 				!!this.baseConfig.services.stateManager.getGlobalStateKey("nativeToolCallEnabled")
 
 			const host = HostRegistryInfo.get()
-			const discoveredSkills = await pTimeout(discoverSkills(this.baseConfig.cwd), {
-				milliseconds: 15_000,
-				signal: this.abortController.signal,
-				message: "Helper skill discovery timed out.",
-			})
 			const availableSkills = getAvailableSkills(discoveredSkills)
 			const configuredSkillNames = this.agent.getConfiguredSkills()
 			const skills =
@@ -614,6 +657,9 @@ export class SubagentRunner {
 			}
 
 			const promptRegistry = PromptRegistry.getInstance()
+			onProgress({
+				activity: { phase: "preparing", detail: "Preparing instructions and tools", deadlineAt: Date.now() + 30_000 },
+			})
 			const generatedSystemPrompt = await pTimeout(promptRegistry.get(context), {
 				milliseconds: 30_000,
 				signal: this.abortController.signal,
@@ -621,6 +667,7 @@ export class SubagentRunner {
 			})
 
 			// Supplement the assignment with available parent context without making tracking a prerequisite.
+			onProgress({ activity: { phase: "preparing", detail: "Collecting parent and workspace context" } })
 			try {
 				const parentStreamId = (this.baseConfig as ConfigWithExtensions).getSessionStreamId?.()
 				if (parentStreamId) {
@@ -710,6 +757,18 @@ export class SubagentRunner {
 				const previousCost = stats.totalCost
 
 				let assistantText = ""
+				let latestMessage = ""
+				let lastMessageUpdateAt = Number.NEGATIVE_INFINITY
+				let lastToolPreviewAt = Number.NEGATIVE_INFINITY
+				const publishMessage = (force = false) => {
+					if (!force && Date.now() - lastMessageUpdateAt < 200) return
+					lastMessageUpdateAt = Date.now()
+					const message = subagentMessagePreview(assistantText)
+					if (message && message !== latestMessage) {
+						latestMessage = message
+						onProgress({ latestMessage: message })
+					}
+				}
 				let assistantTextSignature: string | undefined
 				let requestId: string | undefined
 				let receivedChunk = false
@@ -726,6 +785,27 @@ export class SubagentRunner {
 				try {
 					for await (const chunk of stream) {
 						receivedChunk = true
+						responseChunks++
+						// Count provider activity without exposing private reasoning or raw tool arguments.
+						responseBytes += Buffer.byteLength(
+							chunk.type === "text"
+								? chunk.text || ""
+								: chunk.type === "reasoning"
+									? chunk.reasoning || ""
+									: chunk.type === "tool_calls"
+										? normalizeToolCallArguments(chunk.tool_call.function?.arguments)
+										: "",
+							"utf8",
+						)
+						onProgress({
+							responseChunks,
+							responseBytes,
+							activity: {
+								phase: "responding",
+								detail: lastActivity?.phase === "responding" ? lastActivity.detail : undefined,
+								deadlineAt: Date.now() + STREAM_IDLE_TIMEOUT_MS,
+							},
+						})
 						switch (chunk.type) {
 							case "usage":
 								requestId = requestId ?? chunk.id
@@ -765,9 +845,18 @@ export class SubagentRunner {
 								requestId = requestId ?? chunk.id
 								assistantText += chunk.text || ""
 								assistantTextSignature = chunk.signature || assistantTextSignature
+								publishMessage()
 								break
 							case "tool_calls":
 								requestId = requestId ?? chunk.id
+								if (chunk.tool_call.function?.name && lastToolPreviewAt === Number.NEGATIVE_INFINITY) {
+									onProgress({
+										activity: {
+											phase: "responding",
+											detail: `Preparing tool call: ${chunk.tool_call.function.name}`,
+										},
+									})
+								}
 								toolUseHandler.processToolUseDelta(
 									{
 										id: chunk.tool_call.function?.id,
@@ -777,6 +866,22 @@ export class SubagentRunner {
 									},
 									chunk.tool_call.call_id,
 								)
+								{
+									const id = chunk.tool_call.function?.id
+									const pending =
+										id && Date.now() - lastToolPreviewAt >= 200
+											? toolUseHandler.getFinalizedToolUse(id)
+											: undefined
+									if (pending) lastToolPreviewAt = Date.now()
+									if (pending)
+										onProgress({
+											activity: {
+												phase: "responding",
+												detail: `Preparing: ${describeSubagentTool(pending.name, Object.fromEntries(Object.entries(pending.input ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string")))}`,
+												deadlineAt: Date.now() + STREAM_IDLE_TIMEOUT_MS,
+											},
+										})
+								}
 								break
 							case "reasoning":
 								requestId = requestId ?? chunk.id
@@ -786,6 +891,7 @@ export class SubagentRunner {
 						this.throwIfAborted()
 					}
 				} catch (error) {
+					publishMessage(true)
 					this.throwIfAborted()
 					this.checkBudget()
 					const delayMs = getApiRetryDelay(error, streamRecoveryAttempts, INITIAL_STREAM_RETRY_BASE_DELAY_MS)
@@ -815,6 +921,7 @@ export class SubagentRunner {
 					continue
 				}
 
+				publishMessage(true)
 				this.throwIfAborted()
 				this.checkBudget()
 				usageState.lastRequest = { ...requestUsage }
@@ -959,16 +1066,22 @@ export class SubagentRunner {
 
 						let gateError: string | null = null
 						try {
-							gateError = await this.waitForActiveOperation(() =>
-								validateSubagentCompletionGates(
-									subagentConfig,
-									completionResult,
-									typeof toolCallParams?.task_progress === "string" ? toolCallParams.task_progress : undefined,
-									typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
-								),
+							gateError = await this.waitForActiveOperation(
+								"Checking completion requirements before handoff",
+								() =>
+									validateSubagentCompletionGates(
+										subagentConfig,
+										completionResult,
+										typeof toolCallParams?.task_progress === "string"
+											? toolCallParams.task_progress
+											: undefined,
+										typeof toolCallParams?.command === "string" ? toolCallParams.command : undefined,
+									),
+								180_000,
 							)
 						} catch (err) {
 							this.throwIfAborted()
+							if (err instanceof HelperPreflightTimeoutError) throw err
 							Logger.warn("[SubagentRunner] Subagent completion gate check error:", err)
 							const error = "Helper completion checks could not run. Return this failure to the parent for review."
 							throw new Error(error)
@@ -1031,7 +1144,19 @@ export class SubagentRunner {
 					}
 
 					const latestToolCall = formatToolCallPreview(toolName, toolCallParams)
-					onProgress({ latestToolCall, activity: { phase: "tool" } })
+					const toolActivity: SubagentToolActivity = {
+						id: randomUUID(),
+						label: describeSubagentTool(toolName, toolCallParams),
+						status: "running",
+						startedAt: Date.now(),
+					}
+					recentTools.push(toolActivity)
+					if (recentTools.length > SUBAGENT_RECENT_TOOL_LIMIT) recentTools.shift()
+					onProgress({
+						latestToolCall,
+						activity: { phase: "preparing", detail: `Checking permission: ${toolActivity.label}` },
+						recentTools,
+					})
 
 					const handler = subagentConfig.coordinator?.getHandler(toolName)
 					let toolResult: unknown
@@ -1052,8 +1177,9 @@ export class SubagentRunner {
 							) {
 								const streamId = this.streamId
 								const targetPath = toolCallParams.path
-								const collision = await this.waitForActiveOperation(() =>
-									orchestrator.checkCollision(streamId, [targetPath]),
+								const collision = await this.waitForActiveOperation(
+									`Checking shared file ownership: ${targetPath}`,
+									() => orchestrator.checkCollision(streamId, [targetPath]),
 								)
 								if (collision) {
 									toolResult = formatResponse.toolError(
@@ -1067,8 +1193,9 @@ export class SubagentRunner {
 								// Ensure subagent actions are recorded in the shared StabilityMonitor
 								const guard = this.baseConfig.universalGuard
 								if (guard) {
-									const preExecResult = await this.waitForActiveOperation(() =>
-										guard.guardPreExecution(toolCallBlock),
+									const preExecResult = await this.waitForActiveOperation(
+										`Checking execution policy: ${toolActivity.label}`,
+										() => guard.guardPreExecution(toolCallBlock),
 									)
 									if (!preExecResult.success) {
 										toolResult = formatResponse.toolError(
@@ -1076,6 +1203,7 @@ export class SubagentRunner {
 										)
 									} else {
 										this.throwIfAborted()
+										onProgress({ activity: { phase: "tool", detail: toolActivity.label } })
 										toolResult = await handler.execute(subagentConfig, toolCallBlock)
 										executionResult = toolResult
 										operationReturned = true
@@ -1122,12 +1250,14 @@ export class SubagentRunner {
 									}
 								} else {
 									this.throwIfAborted()
+									onProgress({ activity: { phase: "tool", detail: toolActivity.label } })
 									toolResult = await handler.execute(subagentConfig, toolCallBlock)
 									executionResult = toolResult
 									operationReturned = true
 								}
 							}
 						} catch (error) {
+							if (error instanceof HelperPreflightTimeoutError) throw error
 							if (error instanceof PartialPatchError)
 								for (const committedPath of error.committedPaths) filesModified.add(committedPath)
 							if (operationReturned) {
@@ -1169,7 +1299,11 @@ export class SubagentRunner {
 						if (completedResults.length > 8) completedResults.shift()
 					}
 					stats.toolCalls += 1
+					toolActivity.status = isToolFailure(operationReturned ? executionResult : toolResult) ? "failed" : "returned"
+					toolActivity.finishedAt = Date.now()
+					toolActivity.output = serializeToolResult(operationReturned ? executionResult : toolResult).slice(-4000)
 					onProgress({
+						recentTools,
 						result: partialResult(),
 						stats: { ...stats },
 						filesModified: Array.from(filesModified),
@@ -1485,7 +1619,10 @@ export class SubagentRunner {
 		for (let attempt = 1; attempt <= MAX_INITIAL_STREAM_ATTEMPTS; attempt += 1) {
 			this.throwIfAborted()
 			this.checkBudget()
-			this.onProgress?.({ activity: { phase: "waiting" } })
+			this.onProgress?.({
+				requestCount: ++this.requestCount,
+				activity: { phase: "waiting", deadlineAt: Date.now() + FIRST_CHUNK_TIMEOUT_MS },
+			})
 			const stream = guardedStream(
 				(signal) => {
 					this.agent.setRequestRetrySignal(signal)

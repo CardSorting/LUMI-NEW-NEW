@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import * as coreApi from "@core/api"
 import { parseAssistantMessageV2 } from "@core/assistant-message"
+import { registerPartialMessageCallback } from "@core/controller/ui/subscribeToPartialMessage"
+import { MessageStateHandler } from "@core/task/message-state"
 import { DietCodeSubagentUsageInfo } from "@shared/ExtensionMessage"
 import { DietCodeDefaultTool } from "@shared/tools"
 import { afterEach, describe, it } from "mocha"
@@ -260,6 +262,129 @@ describe("SubagentToolHandler", () => {
 		assert.equal(JSON.parse(rows[0].text).status, "completed")
 		assert.equal(rows[0].partial, false)
 		assert.equal(rows[1].text, "Parent continued")
+	})
+	it("delivers live commentary and activity to its persisted row while a helper is still running", async () => {
+		const { config, callbacks } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers({ now: 1000 })
+		const rows: any[] = []
+		const delivered: any[] = []
+		config.messageState = {
+			getDietCodeMessages: () => rows,
+			addToDietCodeMessages: async (row: any) => {
+				rows.push(row)
+			},
+			updateDietCodeMessage: async (index: number, update: any) => {
+				Object.assign(rows[index], update)
+			},
+		} as never
+		callbacks.postStateToWebview.callsFake(async () => {
+			delivered.push(JSON.parse(rows[0].text))
+		})
+		let finish!: (result: ReturnType<typeof completed>) => void
+		sinon.stub(SubagentRunner.prototype, "run").callsFake(async (_prompt, progress) => {
+			progress({
+				activity: { phase: "tool", detail: "Editing src/domain/game.ts" },
+				latestMessage: "Adding chording tests.",
+				recentTools: [{ id: "edit", label: "Editing src/domain/game.ts", status: "running" }],
+				filesModified: ["src/domain/game.test.ts"],
+			})
+			return new Promise((resolve) => {
+				finish = resolve
+			})
+		})
+		const pending = new UseSubagentsToolHandler().execute(config, {
+			...batch,
+			call_id: "live-batch",
+			params: { prompt_1: "Build game" },
+		})
+		await clock.tickAsync(100)
+		const live = delivered.at(-1)
+		assert.equal(live.batchId, "live-batch")
+		assert.equal(live.items[0].status, "running")
+		assert.equal(live.items[0].startedAt, 1000)
+		assert.equal(live.items[0].latestMessage, "Adding chording tests.")
+		assert.equal(live.items[0].activity.detail, "Editing src/domain/game.ts")
+		assert.equal(live.items[0].recentTools[0].status, "running")
+		assert.deepEqual(live.items[0].filesModified, ["src/domain/game.test.ts"])
+		finish(completed())
+		await clock.tickAsync(0)
+		await pending
+		assert.equal(rows.length, 1)
+		assert.equal(JSON.parse(rows[0].text).items[0].status, "completed")
+		assert.equal(JSON.parse(rows[0].text).items[0].latestMessage, "Adding chording tests.")
+	})
+	it("delivers live and terminal rows despite blocked disk and full-state delivery, with honest heartbeat evidence", async () => {
+		const { config, callbacks, taskState } = createConfig({ autoApproveSafe: true })
+		const clock = sinon.useFakeTimers({ now: 1000 })
+		config.messageState = new MessageStateHandler({
+			taskId: config.taskId,
+			ulid: config.ulid,
+			taskState,
+			updateTaskHistory: async () => [],
+		})
+		const save = sinon.stub(config.messageState, "saveDietCodeMessagesAndUpdateHistory").returns(new Promise(() => {}))
+		callbacks.postStateToWebview.returns(new Promise(() => {}))
+		const delivered: any[] = []
+		const unsubscribe = registerPartialMessageCallback((message) => {
+			delivered.push(JSON.parse(message.text!))
+		})
+		let finish!: (result: ReturnType<typeof completed>) => void
+		let progress!: Parameters<SubagentRunner["run"]>[1]
+		sinon.stub(SubagentRunner.prototype, "getExecutionOwner").returns("my-helper")
+		sinon.stub(SubagentRunner.prototype, "run").callsFake((_prompt, callback) => {
+			progress = callback
+			callback({ activity: { phase: "waiting" }, lastActivityAt: Date.now() })
+			return new Promise((resolve) => {
+				finish = resolve
+			})
+		})
+		let output = "Starting tests"
+		config.callbacks.getExecutionState = (() => ({
+			commands: {
+				recent: [],
+				active: [
+					{ execution_id: "own", owner: "my-helper", command: "npm test", status: "running", output_preview: output },
+					{
+						execution_id: "sibling",
+						owner: "other",
+						command: "private sibling",
+						status: "running",
+						output_preview: "Not mine",
+					},
+				],
+			},
+			actions: { active: [], recent: [] },
+		})) as never
+		try {
+			const pending = new UseSubagentsToolHandler().execute(config, { ...batch, params: { prompt_1: "Run tests" } })
+			await clock.tickAsync(100)
+			assert.equal(delivered.at(-1).items[0].status, "running")
+			const initialActivity = delivered.at(-1).items[0].lastActivityAt
+			await clock.tickAsync(6000)
+			assert.ok(delivered.at(-1).items[0].heartbeatAt > initialActivity)
+			assert.equal(delivered.at(-1).items[0].lastActivityAt, initialActivity)
+			assert.deepEqual(
+				delivered.at(-1).items[0].commands.map((item: any) => item.id),
+				["own"],
+			)
+			output = "24 tests passed"
+			await clock.tickAsync(3000)
+			assert.equal(delivered.at(-1).items[0].commands[0].output, output)
+			assert.ok(delivered.at(-1).items[0].lastActivityAt > initialActivity)
+			finish(completed())
+			await clock.tickAsync(0)
+			await pending
+			assert.equal(delivered.at(-1).items[0].status, "completed")
+			const terminalRevision = delivered.at(-1).revision
+			progress({ status: "running", latestMessage: "Late callback" })
+			await clock.tickAsync(3000)
+			assert.equal(delivered.at(-1).revision, terminalRevision)
+			assert.equal(config.messageState.getDietCodeMessages().length, 1)
+			sinon.assert.calledOnce(save)
+			assert.equal(clock.countTimers(), 0)
+		} finally {
+			unsubscribe()
+		}
 	})
 	it("settles a late tracking registration once without holding back completed helpers", async () => {
 		const { config } = createConfig({ autoApproveSafe: true })

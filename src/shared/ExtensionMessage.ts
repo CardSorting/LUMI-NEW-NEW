@@ -338,10 +338,40 @@ export type SubagentExecutionStatus = "pending" | "running" | "completed" | "fai
 
 export interface SubagentActivity {
 	phase: "preparing" | "waiting" | "responding" | "tool" | "retrying" | "recovering"
+	/** User-facing description of the current operation, without tool payloads. */
+	detail?: string
+	startedAt?: number
+	/** Deadline for this specific wait, not an estimate of total completion. */
+	deadlineAt?: number
 	/** Present only during an automatic retry. Includes the initial request. */
 	attempt?: number
 	maxAttempts?: number
 	retryAt?: number
+}
+
+export interface SubagentToolActivity {
+	id: string
+	label: string
+	/** A returned tool may still have a background command running. */
+	status: "running" | "returned" | "failed"
+	startedAt?: number
+	finishedAt?: number
+	output?: string
+}
+
+export interface SubagentActivityEvent {
+	id: string
+	at: number
+	kind: "phase" | "message" | "tool" | "warning"
+	label: string
+}
+
+export interface SubagentCommandActivity {
+	id: string
+	command: string
+	status: CommandExecutionState["status"]
+	output: string
+	exitCode?: number
 }
 
 export interface SubagentStatusItem {
@@ -361,6 +391,21 @@ export interface SubagentStatusItem {
 	contextUsagePercentage: number
 	latestToolCall?: string
 	activity?: SubagentActivity
+	latestMessage?: string
+	recentTools?: SubagentToolActivity[]
+	startedAt?: number
+	queuedAt?: number
+	queuePosition?: number
+	/** Last actual helper activity; heartbeats never advance this. */
+	lastActivityAt?: number
+	/** Extension runtime check-in, separate from provider/tool progress. */
+	heartbeatAt?: number
+	responseChunks?: number
+	responseBytes?: number
+	requestCount?: number
+	activityEvents?: SubagentActivityEvent[]
+	omittedActivityEvents?: number
+	commands?: SubagentCommandActivity[]
 	result?: string
 	error?: string
 	criticalSignals?: string[]
@@ -372,6 +417,9 @@ export interface SubagentStatusItem {
 export interface DietCodeSaySubagentStatus {
 	/** Correlates a batch with its request without relying on prompt text. */
 	batchId?: string
+	/** Scope and ordering for live delivery independent of full-state refreshes. */
+	taskId?: string
+	revision?: number
 	status: "running" | "completed" | "failed" | "cancelled" | "interrupted"
 	total: number
 	completed: number

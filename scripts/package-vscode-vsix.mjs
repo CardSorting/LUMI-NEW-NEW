@@ -34,6 +34,9 @@ function readPackageOptions() {
 async function main() {
 	const { target, preRelease, skipPrepublish } = readPackageOptions()
 	const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"))
+	if (pkg.name !== "lumi-vscode") {
+		throw new Error(`VS Code packaging requires package.json name "lumi-vscode"; found "${pkg.name}"`)
+	}
 	const targetSuffix = target ? `-${target}` : ""
 	const outPath = path.join(repoRoot, "dist", `lumi-vscode-${pkg.version}${targetSuffix}.vsix`)
 

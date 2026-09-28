@@ -1,6 +1,7 @@
 import type { IController as Controller } from "@core/controller/types"
 import { EmptyRequest } from "@shared/proto/dietcode/common"
 import { DietCodeMessage } from "@shared/proto/dietcode/ui"
+import pTimeout from "p-timeout"
 import { Logger } from "@/shared/services/Logger"
 import { getRequestRegistry, StreamingResponseHandler } from "../grpc-handler"
 
@@ -59,13 +60,19 @@ export function registerPartialMessageCallback(callback: PartialMessageCallback)
  * Send a partial message event to all active subscribers
  * @param partialMessage The DietCodeMessage to send
  */
-export async function sendPartialMessageEvent(partialMessage: DietCodeMessage): Promise<void> {
+export async function sendPartialMessageEvent(
+	partialMessage: DietCodeMessage,
+	timeoutMs = Number.POSITIVE_INFINITY,
+): Promise<void> {
 	// Send to gRPC stream subscribers
 	const streamPromises = Array.from(activePartialMessageSubscriptions).map(async (responseStream) => {
 		try {
-			await responseStream(
-				partialMessage,
-				false, // Not the last message
+			await pTimeout(
+				responseStream(
+					partialMessage,
+					false, // Not the last message
+				),
+				{ milliseconds: timeoutMs, message: "Partial message subscriber stopped responding" },
 			)
 		} catch (error) {
 			Logger.error("Error sending partial message event:", error)

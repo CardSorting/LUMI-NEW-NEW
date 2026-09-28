@@ -89,6 +89,17 @@ The public [VS Code shell execution API](https://code.visualstudio.com/api/refer
 
 ## Verification
 
+### Live helper transparency follow-up
+
+The helper progress path now separates live delivery, optional observation, and durable execution evidence:
+
+- A task-scoped, revisioned helper row is published immediately when dispatch begins. In-memory updates are synchronous and identity-checked; asynchronous conversation saves/history scans cannot block the dedicated partial-message stream. Full-state refreshes remain available for hydration. Existing newer helper rows reject stale snapshots, foreign tasks, conflicting identities, and post-terminal running updates. Removed rows are not reconstructed by snapshot merging.
+- Live updates are coalesced at 100 ms. Conversation persistence and batch recovery snapshots are limited to one per second, except terminal updates. Actual new helper execution evidence is persisted immediately; duplicate handoffs, provider chunks and heartbeats do not fsync unchanged action receipts. A slow partial subscriber has a two-second delivery limit; other subscribers still receive updates. Auxiliary message observers cannot invalidate a live row.
+- One UI clock drives elapsed, stage, check-in, activity, queue, and retry timing. Three-second runtime observations are separate from actual provider/tool/output activity. The UI warns after 30 seconds without new activity and after 12 seconds without check-ins, without declaring failure or manufacturing progress. Command previews are non-consuming, bounded, and owner-filtered. Recent actions are visible without opening the assignment; older events and tool results use keyboard-accessible disclosures.
+- Policy and skill discovery run concurrently under their existing deadlines. Required collision/policy checks have explicit 60-second deadlines and completion checks have 180 seconds. A timeout produces a failed handoff with retained evidence, never unchecked execution or an automatic write retry. Provider first-response/idle deadlines, shared queue limits, cancellation ownership, and the overall batch deadline remain in force.
+
+The focused regressions include blocked persistence/full-state delivery, stalled checks, observer failure, out-of-order updates, real command-output changes versus unchanged check-ins, sibling isolation, bounded storage, terminal flushing, and late callbacks. Browser checks cover narrow/wide panels, dark/light themes, enlarged text, reduced motion, keyboard disclosures, approval/queue states, quiet providers, and disconnected observations. This is a local implementation and component/runtime verification; it does not install or reload the user's VS Code extension or constitute a live provider smoke test.
+
 Run `npm run test:execution` with Node 24 LTS. This exercises the backend execution suites and command/helper presentation tests without contacting a model provider. The test configuration resolves TypeScript source imports written with `.js` suffixes. The provider loader uses the same CommonJS module-directory lookup as the shipped extension, so the suite needs no runtime source-rewriting adapter.
 
 Type checks use `tsc --noEmit` and `tsc -b webview-ui`. Build the webview with Vite and the extension with `node esbuild.mjs --production`. These checks do not install or reload the user's running extension.

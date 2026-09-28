@@ -98,6 +98,32 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: marketplace-vsix-${{ matrix.target }}
-          path: dist/lumi*.vsix
+          path: |
+            dist/lumi-vscode-*.vsix
+            dist/lumi-[0-9]*.vsix
+          if-no-files-found: error
+          retention-days: 14
+
+  collect:
+    name: Collect all marketplace VSIX packages
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: marketplace-vsix-*
+          path: dist
+          merge-multiple: true
+      - name: Verify all platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist -maxdepth 1 -type f -name 'lumi-vscode-*.vsix' | wc -l | tr -d ' ')" -eq 4
+          test "$(find dist -maxdepth 1 -type f -name 'lumi-*.vsix' ! -name 'lumi-vscode-*.vsix' | wc -l | tr -d ' ')" -eq 4
+          ls -l dist/*.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marketplace-vsix-all-platforms
+          path: dist/*.vsix
           if-no-files-found: error
           retention-days: 14

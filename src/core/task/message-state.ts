@@ -10,6 +10,7 @@ import { getApiMetrics } from "@/shared/getApiMetrics"
 import { HistoryItem } from "@/shared/HistoryItem"
 import { DietCodeStorageMessage } from "@/shared/messages/content"
 import { Logger } from "@/shared/services/Logger"
+import { parseSubagentStatusPayload } from "@/shared/subagents"
 import { getCwd, getDesktopDir } from "@/utils/path"
 import { ensureTaskDirectoryExists, saveApiConversationHistory, saveDietCodeMessages } from "../storage/disk"
 import { TaskState } from "./TaskState"
@@ -55,11 +56,17 @@ export class MessageStateHandler extends EventEmitter<MessageStateHandlerEvents>
 	private ulid: string
 	private taskState: TaskState
 
-	// Mutex to prevent concurrent state modifications (RC-4)
+	// Serializes conversation mutations and persistence (RC-4). Live helper rows
+	// are synchronously replaced by identity, never by a captured array index.
 	// Protects against data loss from race conditions when multiple
 	// operations try to modify message state simultaneously
 	// This follows the same pattern as Task.stateMutex for consistency
 	private stateMutex = new Mutex()
+	private helperSavePending = false
+	private helperSave: Promise<void> | undefined
+	private helperSaveUrgent = false
+	private lastHelperSaveAt = Number.NEGATIVE_INFINITY
+	private resumeHelperSave?: () => void
 
 	constructor(params: MessageStateHandlerParams) {
 		super()
@@ -100,6 +107,81 @@ export class MessageStateHandler extends EventEmitter<MessageStateHandlerEvents>
 
 	getDietCodeMessages(): DietCodeMessage[] {
 		return this.dietcodeMessages
+	}
+
+	/**
+	 * Live helper telemetry is an atomic, synchronous in-memory change. Disk/history
+	 * work remains serialized, but cannot hold presentation behind a filesystem scan.
+	 * Only the owning task/batch may update this row; deleted rows are not recreated.
+	 */
+	publishSubagentStatus(message: DietCodeMessage, create: boolean): boolean {
+		const next = message.say === "subagent" ? parseSubagentStatusPayload(message.text) : undefined
+		if (!next || next.taskId !== this.taskId || !next.revision) return false
+		let index = this.dietcodeMessages.findIndex((item) => item.ts === message.ts)
+		const previousMessage = this.dietcodeMessages[index]
+		if (previousMessage) {
+			const previous = previousMessage.say === "subagent" ? parseSubagentStatusPayload(previousMessage.text) : undefined
+			if (
+				!previous ||
+				previous.taskId !== next.taskId ||
+				previous.batchId !== next.batchId ||
+				previous.items[0].id !== next.items[0].id ||
+				(previous.revision ?? 0) >= next.revision
+			)
+				return false
+			if (!previousMessage.partial && message.partial) return false
+			this.dietcodeMessages[index] = { ...previousMessage, ...message }
+		} else {
+			if (!create) return false
+			index = this.dietcodeMessages.length
+			this.dietcodeMessages.push({
+				...message,
+				conversationHistoryIndex: this.apiConversationHistory.length - 1,
+				conversationHistoryDeletedRange: this.taskState.conversationHistoryDeletedRange,
+			})
+		}
+		try {
+			this.emitDietCodeMessagesChanged({
+				type: previousMessage ? "update" : "add",
+				messages: this.dietcodeMessages,
+				index,
+				previousMessage,
+				message: this.dietcodeMessages[index],
+			})
+		} catch (error) {
+			// An auxiliary observer cannot prevent persistence or dedicated live delivery.
+			Logger.warn("Helper message observer failed", error)
+		}
+		this.helperSavePending = true
+		this.helperSaveUrgent ||= !message.partial
+		if (this.helperSaveUrgent) this.resumeHelperSave?.()
+		this.helperSave ??= Promise.resolve().then(async () => {
+			try {
+				while (this.helperSavePending) {
+					// Live delivery can run at 10 Hz; filesystem scans/history updates cannot.
+					const waitMs = 1000 - (Date.now() - this.lastHelperSaveAt)
+					if (!this.helperSaveUrgent && waitMs > 0) {
+						await new Promise<void>((resolve) => {
+							const timer = setTimeout(resolve, waitMs)
+							this.resumeHelperSave = () => {
+								clearTimeout(timer)
+								resolve()
+							}
+						})
+						this.resumeHelperSave = undefined
+					}
+					this.helperSavePending = false
+					this.helperSaveUrgent = false
+					this.lastHelperSaveAt = Date.now()
+					await this.saveDietCodeMessagesAndUpdateHistory()
+				}
+			} catch (error) {
+				Logger.warn("Could not persist helper progress", error)
+			} finally {
+				this.helperSave = undefined
+			}
+		})
+		return true
 	}
 
 	setDietCodeMessages(newMessages: DietCodeMessage[]) {

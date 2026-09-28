@@ -49,6 +49,25 @@ async function main() {
 	let didPatchName = false
 	let didReconcileWorkspaceLink = false
 	let ignoreFilePath
+	const restorePackagingState = () => {
+		if (ignoreFilePath) {
+			fs.rmSync(path.dirname(ignoreFilePath), { recursive: true, force: true })
+			ignoreFilePath = undefined
+		}
+		workspaceLinks.restore({
+			fromName: MARKETPLACE_EXTENSION_NAME,
+			toName: OPENVSX_EXTENSION_NAME,
+			didReconcile: didReconcileWorkspaceLink,
+		})
+		if (didReconcileWorkspaceLink) {
+			console.log(`[openvsx] restored workspace self-link: ${OPENVSX_EXTENSION_NAME} → ${MARKETPLACE_EXTENSION_NAME}`)
+			didReconcileWorkspaceLink = false
+		}
+		if (didPatchName) {
+			restorePackageJson(originalPackageJson)
+			didPatchName = false
+		}
+	}
 
 	fs.mkdirSync(path.dirname(outPath), { recursive: true })
 
@@ -79,6 +98,10 @@ async function main() {
 		args.push("--out", outPath)
 		runVsce({ repoRoot, args, skipPrepublish })
 
+		// Restore the repository before async archive validation. This keeps a
+		// later packaging command from observing the temporary Open VSX name even
+		// if the validator has no active event-loop handles.
+		restorePackagingState()
 		await assertVsixHasNativeModule(outPath)
 		console.log(`[openvsx] packaged ${outPath}`)
 	} catch (error) {
@@ -88,17 +111,7 @@ async function main() {
 		}
 	} finally {
 		if (ignoreFilePath) fs.rmSync(path.dirname(ignoreFilePath), { recursive: true, force: true })
-		workspaceLinks.restore({
-			fromName: MARKETPLACE_EXTENSION_NAME,
-			toName: OPENVSX_EXTENSION_NAME,
-			didReconcile: didReconcileWorkspaceLink,
-		})
-		if (didReconcileWorkspaceLink) {
-			console.log(`[openvsx] restored workspace self-link: ${OPENVSX_EXTENSION_NAME} → ${MARKETPLACE_EXTENSION_NAME}`)
-		}
-		if (didPatchName) {
-			restorePackageJson(originalPackageJson)
-		}
+		restorePackagingState()
 	}
 }
 

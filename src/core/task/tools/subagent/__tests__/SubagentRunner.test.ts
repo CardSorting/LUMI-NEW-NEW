@@ -400,6 +400,63 @@ describe("SubagentRunner", () => {
 	function callChunk(id: number, name: DietCodeDefaultTool, params: Record<string, unknown>) {
 		return { type: "tool_calls", tool_call: { function: { id: `call-${id}`, name, arguments: JSON.stringify(params) } } }
 	}
+	it("publishes public commentary and tool progress before work finishes, retaining immutable snapshots", async () => {
+		let turns = 0
+		const updates: any[] = []
+		const createMessage = sinon.stub().callsFake(async function* () {
+			if (++turns === 1) {
+				yield { type: "reasoning", reasoning: "private reasoning" }
+				yield { type: "text", text: "Implementing safe openings." }
+				assert.ok(updates.some((update) => update.latestMessage === "Implementing safe openings."))
+				yield { type: "text", text: " Then I’ll add chording tests." }
+				yield callChunk(1, DietCodeDefaultTool.FILE_NEW, { path: "src/domain/game.ts", content: "game code" })
+			} else {
+				yield callChunk(2, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			}
+		})
+		const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+		execute.callsFake(async () => {
+			assert.ok(updates.some((update) => update.activity?.detail === "Writing src/domain/game.ts"))
+			assert.ok(updates.some((update) => update.latestMessage?.endsWith("chording tests.")))
+			assert.ok(updates.some((update) => update.recentTools?.at(-1).status === "running"))
+			return "Saved file"
+		})
+		const result = await runner.run("Build the game", (update) => updates.push(update))
+		assert.equal(result.status, "completed", result.error)
+		assert.doesNotMatch(JSON.stringify(updates), /private reasoning/)
+		assert.ok(updates.some((update) => update.responseChunks === 1 && update.responseBytes > 0))
+		assert.ok(updates.some((update) => update.requestCount === 2))
+		assert.ok(
+			updates.some((update) => update.activity?.phase === "waiting" && update.activity.deadlineAt > update.lastActivityAt),
+		)
+		assert.ok(updates.some((update) => update.activity?.detail === "Preparing: Writing src/domain/game.ts"))
+		assert.ok(updates.some((update) => update.activity?.detail === "Preparing tool call: write_to_file"))
+		assert.equal(updates.find((update) => update.recentTools)?.recentTools[0].status, "running")
+		assert.equal(updates.filter((update) => update.recentTools).at(-1).recentTools[0].status, "returned")
+		assert.equal(updates.filter((update) => update.recentTools).at(-1).recentTools[0].output, "Saved file")
+		assert.deepEqual(result.filesModified, ["src/domain/game.ts"])
+	})
+
+	it("bounds recent tool history without losing a failed result or mutating previous updates", async () => {
+		let turns = 0
+		const updates: any[] = []
+		const createMessage = sinon.stub().callsFake(async function* () {
+			yield ++turns <= 10
+				? callChunk(turns, DietCodeDefaultTool.FILE_READ, { path: `file-${turns}.ts` })
+				: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+		})
+		const { runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_READ)
+		execute.onCall(8).resolves(formatResponse.toolError("File unavailable"))
+		const result = await runner.run("Read files", (update) => updates.push(update))
+		assert.equal(result.status, "completed", result.error)
+		const histories = updates.filter((update) => update.recentTools).map((update) => update.recentTools)
+		assert.ok(histories.every((history) => history.length <= 8))
+		assert.equal(histories[0].length, 1)
+		assert.equal(histories.at(-1)[0].label, "Reading file-3.ts")
+		assert.equal(histories.at(-1)[6].status, "failed")
+		assert.equal(histories.at(-1)[7].status, "returned")
+	})
+
 	for (const partial of [false, true]) {
 		it(`retains ${partial ? "partially committed" : "all successful"} patch paths in helper handoffs`, async () => {
 			let turns = 0
@@ -581,6 +638,43 @@ describe("SubagentRunner", () => {
 	})
 
 	for (const phase of ["collision", "guard", "completion"] as const) {
+		it(`fails a stalled ${phase} check at its visible deadline without dispatching unchecked work`, async () => {
+			const clock = sinon.useFakeTimers({ now: 1000 })
+			let turns = 0
+			const createMessage = sinon.stub().callsFake(async function* () {
+				yield ++turns === 1
+					? callChunk(turns, DietCodeDefaultTool.FILE_NEW, { path: "saved.ts", content: "saved" })
+					: callChunk(turns, DietCodeDefaultTool.ATTEMPT, { result: VALID_SUBAGENT_COMPLETION_RESULT })
+			})
+			const { config, runner, execute } = prepareProgressRun(createMessage, DietCodeDefaultTool.FILE_NEW)
+			let release!: (value: unknown) => void
+			const pending = sinon.stub().callsFake(
+				() =>
+					new Promise((resolve) => {
+						release = resolve
+					}),
+			)
+			if (phase === "collision") sinon.stub(orchestrator, "checkCollision").callsFake(pending)
+			if (phase === "guard") config.universalGuard = { guardPreExecution: pending } as never
+			if (phase === "completion") sinon.stub(completionGates, "validateSubagentCompletionGates").callsFake(pending)
+			const updates: any[] = []
+			const running = runner.run(
+				"Create saved.ts",
+				(update) => updates.push(update),
+				phase === "collision" ? "child" : undefined,
+			)
+			await clock.tickAsync(0)
+			assert.equal(pending.callCount, 1)
+			const deadline = updates.filter((update) => update.activity?.deadlineAt).at(-1).activity.deadlineAt
+			await clock.tickAsync(deadline - Date.now())
+			const result = await running
+			assert.equal(result.status, "failed")
+			assert.match(result.error ?? "", /timed out.*No unchecked action/)
+			release(phase === "guard" ? { success: true } : null)
+			await clock.tickAsync(0)
+			assert.equal(execute.callCount, phase === "completion" ? 1 : 0)
+			assert.equal(pending.callCount, 1)
+		})
 		it(`settles cancellation while ${phase} validation is still pending`, async () => {
 			let turns = 0
 			const createMessage = sinon.stub().callsFake(async function* () {
