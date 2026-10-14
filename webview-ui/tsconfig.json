@@ -12,6 +12,18 @@
 		"paths": {
 			"@/*": [
 				"./src/*"
+			],
+			"@components/*": [
+				"./src/components/*"
+			],
+			"@context/*": [
+				"./src/context/*"
+			],
+			"@shared/*": [
+				"../src/shared/*"
+			],
+			"@utils/*": [
+				"./src/utils/*"
 			]
 		}
 	}

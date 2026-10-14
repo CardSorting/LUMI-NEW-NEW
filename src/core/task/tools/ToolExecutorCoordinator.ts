@@ -51,14 +51,12 @@ import { StabilityHealHandler } from "./handlers/StabilityHealHandler"
 import { StabilityQueryHandler } from "./handlers/StabilityQueryHandler"
 import { StabilityRecalibrateHandler } from "./handlers/StabilityRecalibrateHandler"
 import { StabilitySweepHandler } from "./handlers/StabilitySweepHandler"
-import { UseSubagentsToolHandler } from "./handlers/SubagentToolHandler"
 import { SummarizeTaskHandler } from "./handlers/SummarizeTaskHandler"
 import { UseMcpToolHandler } from "./handlers/UseMcpToolHandler"
 import { UseSkillToolHandler } from "./handlers/UseSkillToolHandler"
 import { WebFetchToolHandler } from "./handlers/WebFetchToolHandler"
 import { WebSearchToolHandler } from "./handlers/WebSearchToolHandler"
 import { WriteToFileToolHandler } from "./handlers/WriteToFileToolHandler"
-import { AgentConfigLoader } from "./subagent/AgentConfigLoader"
 import { ToolValidator } from "./ToolValidator"
 import type { TaskConfig } from "./types/TaskConfig"
 import {
@@ -81,7 +79,6 @@ export type { IFullyManagedTool, IPartialBlockHandler, IToolHandler, ToolRespons
  */
 export class ToolExecutorCoordinator {
 	private handlers = new Map<string, IToolHandler>()
-	private dynamicSubagentHandlers = new Map<string, IToolHandler>()
 
 	private readonly toolHandlersMap: Record<DietCodeDefaultTool, (v: ToolValidator) => IToolHandler | undefined> = {
 		[DietCodeDefaultTool.ASK]: (_v: ToolValidator) => new AskFollowupQuestionToolHandler(),
@@ -115,7 +112,6 @@ export class ToolExecutorCoordinator {
 		[DietCodeDefaultTool.GENERATE_EXPLANATION]: (_v: ToolValidator) => new GenerateExplanationToolHandler(),
 		[DietCodeDefaultTool.USE_SKILL]: (_v: ToolValidator) => new UseSkillToolHandler(),
 		[DietCodeDefaultTool.PROJECT_MAP]: (_v: ToolValidator) => new ProjectMapHandler(),
-		[DietCodeDefaultTool.USE_SUBAGENTS]: (_v: ToolValidator) => new UseSubagentsToolHandler(),
 		[DietCodeDefaultTool.MEM_QUERY]: (_v: ToolValidator) => new CognitiveMemoryQueryHandler(),
 		[DietCodeDefaultTool.MEM_SNAPSHOT]: (_v: ToolValidator) => new CognitiveMemorySnapshotHandler(),
 		[DietCodeDefaultTool.MEM_LINK]: (_v: ToolValidator) => new CognitiveMemoryLinkHandler(),
@@ -183,22 +179,7 @@ export class ToolExecutorCoordinator {
 			toolName = DietCodeDefaultTool.MCP_USE
 		}
 
-		const staticHandler = this.handlers.get(toolName)
-		if (staticHandler) {
-			return staticHandler
-		}
-
-		if (AgentConfigLoader.getInstance().isDynamicSubagentTool(toolName)) {
-			const existingHandler = this.dynamicSubagentHandlers.get(toolName)
-			if (existingHandler) {
-				return existingHandler
-			}
-			const handler = new SharedToolHandler(toolName as DietCodeDefaultTool, new UseSubagentsToolHandler())
-			this.dynamicSubagentHandlers.set(toolName, handler)
-			return handler
-		}
-
-		return undefined
+		return this.handlers.get(toolName)
 	}
 
 	/**

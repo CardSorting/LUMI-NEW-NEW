@@ -1,4 +1,3 @@
-import { ADVISORY_AUTO_SCROLL_MODE_LABELS } from "@shared/audit/auditAutoScrollPolicy"
 import { UpdateSettingsRequest } from "@shared/proto/dietcode/state"
 import { memo, type ReactNode, useCallback, useId } from "react"
 import { Label } from "@/components/ui/label"
@@ -7,7 +6,6 @@ import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { VscIcon } from "@/components/ui/vsc-icon"
 import { useExtensionState } from "@/context/ExtensionStateContext"
-import { AuditIntentThresholdPanel } from "../AuditIntentThresholdPanel"
 import Section from "../Section"
 import SettingsSlider from "../SettingsSlider"
 import { updateSetting } from "../utils/settingsHandlers"
@@ -45,13 +43,6 @@ const agentFeatures: FeatureToggle[] = [
 		settingKey: "yoloModeToggled",
 	},
 	{
-		id: "subagents",
-		label: "Delegate to subagents",
-		description: "Let the parent agent assign independent work to helpers and combine their results.",
-		stateKey: "subagentsEnabled",
-		settingKey: "subagentsEnabled",
-	},
-	{
 		id: "native-tool-call",
 		label: "Direct tool calls",
 		description: "Use built-in tool calling when your model supports it.",
@@ -78,14 +69,6 @@ const agentFeatures: FeatureToggle[] = [
 		description: "Automatically tidy up when the conversation gets very long.",
 		stateKey: "useAutoCondense",
 		settingKey: "useAutoCondense",
-	},
-	{
-		id: "focus-chain",
-		label: "Gentle reminders",
-		description: "Soft nudges to stay on track during longer tasks.",
-		stateKey: "focusChainEnabled",
-		settingKey: "focusChainSettings",
-		nestedKey: "enabled",
 	},
 ]
 
@@ -143,13 +126,6 @@ const experimentalFeatures: FeatureToggle[] = [
 		settingKey: "auditCompletionGateCriticalOnly",
 	},
 	{
-		id: "audit-act-mode-advisory",
-		label: "Helpful nudges while coding",
-		description: "Light suggestions as you go, before wrapping up.",
-		stateKey: "auditActModeAdvisoryEnabled",
-		settingKey: "auditActModeAdvisoryEnabled",
-	},
-	{
 		id: "audit-advisory-escalation",
 		label: "Escalate unresolved audit findings",
 		description: "When completion audits are enabled, treat unresolved findings as blockers.",
@@ -169,34 +145,6 @@ const experimentalFeatures: FeatureToggle[] = [
 		description: "Glance at test or build output and suggest fixes when something looks wrong.",
 		stateKey: "auditToolOutputAdvisoryEnabled",
 		settingKey: "auditToolOutputAdvisoryEnabled",
-	},
-	{
-		id: "audit-file-write-advisory",
-		label: "Catch rough drafts",
-		description: "Flag TODOs or placeholders left in files before we call it done.",
-		stateKey: "auditFileWriteAdvisoryEnabled",
-		settingKey: "auditFileWriteAdvisoryEnabled",
-	},
-	{
-		id: "audit-intent-threshold-adjustments",
-		label: "Stricter checks for risky tasks",
-		description: "A little extra care when fixing bugs or writing tests.",
-		stateKey: "auditIntentThresholdAdjustmentsEnabled",
-		settingKey: "auditIntentThresholdAdjustmentsEnabled",
-	},
-	{
-		id: "audit-sarif-hook-export",
-		label: "Export check results (advanced)",
-		description: "Include structured reports for teams that want them. Most people can leave this off.",
-		stateKey: "auditSarifHookExportEnabled",
-		settingKey: "auditSarifHookExportEnabled",
-	},
-	{
-		id: "audit-workspace-artifacts",
-		label: "Save check notes in your project",
-		description: "Write summary notes to a `.audit/` folder in your workspace when you finish.",
-		stateKey: "auditWorkspaceArtifactsEnabled",
-		settingKey: "auditWorkspaceArtifactsEnabled",
 	},
 ]
 
@@ -267,10 +215,8 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		strictPlanModeEnabled,
 		yoloModeToggled,
 		useAutoCondense,
-		subagentsEnabled,
 		dietcodeWebToolsEnabled,
 		worktreesEnabled,
-		focusChainSettings,
 		remoteConfigSettings,
 		nativeToolCallSetting,
 		enableParallelToolCalling,
@@ -279,24 +225,10 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		auditCompletionGateEnabled,
 		auditCompletionGateThreshold,
 		auditCompletionGateCriticalOnly,
-		auditActModeAdvisoryEnabled,
 		auditAdvisoryEscalationEnabled,
-		auditAdvisoryAutoScrollMode,
 		auditPlanRegressionGateEnabled,
 		auditToolOutputAdvisoryEnabled,
-		auditFileWriteAdvisoryEnabled,
-		auditIntentThresholdAdjustmentsEnabled,
-		auditIntentThresholdOverrides,
-		auditSarifHookExportEnabled,
-		auditWorkspaceArtifactsEnabled,
 	} = useExtensionState()
-
-	const handleFocusChainIntervalChange = useCallback(
-		(value: number) => {
-			updateSetting("focusChainSettings", { ...focusChainSettings, remindDietcodeInterval: value })
-		},
-		[focusChainSettings],
-	)
 
 	const isYoloRemoteLocked = remoteConfigSettings?.yoloModeToggled !== undefined
 
@@ -305,9 +237,7 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		enableCheckpointsSetting,
 		strictPlanModeEnabled,
 		nativeToolCallSetting,
-		focusChainEnabled: focusChainSettings?.enabled,
 		useAutoCondense,
-		subagentsEnabled,
 		dietcodeWebToolsEnabled: dietcodeWebToolsEnabled?.user,
 		worktreesEnabled: worktreesEnabled?.user,
 		enableParallelToolCalling,
@@ -315,14 +245,9 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		doubleCheckCompletionEnabled,
 		auditCompletionGateEnabled,
 		auditCompletionGateCriticalOnly,
-		auditActModeAdvisoryEnabled,
 		auditAdvisoryEscalationEnabled,
 		auditPlanRegressionGateEnabled,
 		auditToolOutputAdvisoryEnabled,
-		auditFileWriteAdvisoryEnabled,
-		auditIntentThresholdAdjustmentsEnabled,
-		auditSarifHookExportEnabled,
-		auditWorkspaceArtifactsEnabled,
 		yoloModeToggled: isYoloRemoteLocked ? remoteConfigSettings?.yoloModeToggled : yoloModeToggled,
 	}
 
@@ -332,22 +257,10 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		worktreesEnabled: worktreesEnabled?.featureFlag,
 	}
 
-	// Handler for feature toggle changes, supports nested settings like focusChainSettings
-	const handleFeatureChange = useCallback(
-		(feature: FeatureToggle, checked: boolean) => {
-			if (feature.nestedKey) {
-				// For nested settings, spread the existing value and set the nested key
-				let currentValue = {}
-				if (feature.settingKey === "focusChainSettings") {
-					currentValue = focusChainSettings ?? {}
-				}
-				updateSetting(feature.settingKey, { ...currentValue, [feature.nestedKey]: checked })
-			} else {
-				updateSetting(feature.settingKey, checked)
-			}
-		},
-		[focusChainSettings],
-	)
+	// Handler for feature toggle changes
+	const handleFeatureChange = useCallback((feature: FeatureToggle, checked: boolean) => {
+		updateSetting(feature.settingKey, checked)
+	}, [])
 
 	const renderFeature = (feature: FeatureToggle) => (
 		<div key={feature.id}>
@@ -374,46 +287,6 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 					step={5}
 					value={auditCompletionGateThreshold ?? 50}
 					valueWidth="w-8"
-				/>
-			)}
-			{feature.id === "audit-act-mode-advisory" && featureState[feature.stateKey] && (
-				<div className="ml-6 mb-2 space-y-1">
-					<Label className="text-[10px] text-description/80">Auto-scroll to nudges</Label>
-					<Select
-						onValueChange={(value) => updateSetting("auditAdvisoryAutoScrollMode", value)}
-						value={auditAdvisoryAutoScrollMode ?? "critical"}>
-						<SelectTrigger className="h-7 text-xs">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{(
-								Object.keys(ADVISORY_AUTO_SCROLL_MODE_LABELS) as Array<
-									keyof typeof ADVISORY_AUTO_SCROLL_MODE_LABELS
-								>
-							).map((mode) => (
-								<SelectItem key={mode} value={mode}>
-									{ADVISORY_AUTO_SCROLL_MODE_LABELS[mode]}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</div>
-			)}
-			{feature.id === "audit-intent-threshold-adjustments" && featureState[feature.stateKey] && (
-				<AuditIntentThresholdPanel
-					enabled={!!featureState[feature.stateKey]}
-					overridesJson={auditIntentThresholdOverrides}
-				/>
-			)}
-			{feature.id === "focus-chain" && featureState[feature.stateKey] && (
-				<SettingsSlider
-					label="Reminder Interval (1-10)"
-					max={10}
-					min={1}
-					onChange={handleFocusChainIntervalChange}
-					step={1}
-					value={focusChainSettings?.remindDietcodeInterval || 6}
-					valueWidth="w-6"
 				/>
 			)}
 		</div>

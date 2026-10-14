@@ -10,8 +10,6 @@ export function useAuditGateConfig() {
 		auditCompletionGateCriticalOnly,
 		auditAdvisoryEscalationEnabled,
 		auditPlanRegressionGateEnabled,
-		auditIntentThresholdAdjustmentsEnabled,
-		auditIntentThresholdOverrides,
 	} = useExtensionState()
 
 	return useMemo(
@@ -22,8 +20,6 @@ export function useAuditGateConfig() {
 				auditCompletionGateCriticalOnly: auditCompletionGateCriticalOnly ?? false,
 				auditAdvisoryEscalationEnabled: auditAdvisoryEscalationEnabled ?? true,
 				auditPlanRegressionGateEnabled: auditPlanRegressionGateEnabled ?? true,
-				auditIntentThresholdAdjustmentsEnabled: auditIntentThresholdAdjustmentsEnabled ?? true,
-				auditIntentThresholdOverrides: auditIntentThresholdOverrides ?? "{}",
 			}),
 		[
 			auditCompletionGateEnabled,
@@ -31,8 +27,6 @@ export function useAuditGateConfig() {
 			auditCompletionGateCriticalOnly,
 			auditAdvisoryEscalationEnabled,
 			auditPlanRegressionGateEnabled,
-			auditIntentThresholdAdjustmentsEnabled,
-			auditIntentThresholdOverrides,
 		],
 	)
 }

@@ -12,17 +12,13 @@ import { CommandExecutor } from "@/integrations/terminal/CommandExecutor"
 import { CommandRuntimeRegistry } from "@/integrations/terminal/CommandRuntime"
 import type { CommandExecutorCallbacks, ITerminalManager, TerminalProcessResultPromise } from "@/integrations/terminal/types"
 import type { DietCodeMessage } from "@/shared/ExtensionMessage"
-import { parseSubagentStatusPayload } from "@/shared/subagents"
 import { DietCodeDefaultTool } from "@/shared/tools"
 import { ActionExecutionRegistry } from "../ActionExecutionRegistry"
 import { ActionExecutor } from "../ActionExecutor"
 import { ExecutionRecoveryStore, executionFingerprint } from "../ExecutionRecovery"
 import { reconcileCommandExecutions } from "../reconcileCommandExecutions"
-import { reconcileHelperExecutions } from "../reconcileHelperExecutions"
 import { TaskState } from "../TaskState"
 import { ToolExecutor } from "../ToolExecutor"
-import { UseSubagentsToolHandler } from "../tools/handlers/SubagentToolHandler"
-import type { TaskConfig } from "../tools/types/TaskConfig"
 
 describe("execution recovery across extension-host restarts", () => {
 	let directory: string
@@ -376,105 +372,6 @@ describe("execution recovery across extension-host restarts", () => {
 		recovered.executions.attachRecovery(identity.ulid, recovery)
 		recovered.executions.attachRecovery(identity.ulid, recovery)
 		assert.equal(recovered.executions.list(identity.ulid).recent.length, 3)
-	})
-
-	it("duplicate recovered batch deliveries replay the result without helpers or another status row", async () => {
-		const block = {
-			type: "tool_use" as const,
-			name: DietCodeDefaultTool.USE_SUBAGENTS,
-			call_id: "batch-1",
-			partial: false,
-			params: { prompt_1: "implement A" },
-		}
-		const fingerprint = executionFingerprint([block.name, Object.entries(block.params)])
-		const first = store()
-		first.put("batch-1", {
-			kind: "batch",
-			fingerprint,
-			result: "saved completed result",
-			messageTs: 99,
-			status: JSON.stringify({
-				batchId: "batch-1",
-				status: "running",
-				items: [
-					{
-						id: "helper-a",
-						executionId: "action-a",
-						prompt: "implement A",
-						status: "cancelled",
-						filesModified: ["a.ts"],
-						result: "saved partial A",
-					},
-					{
-						id: "helper-b",
-						executionId: "action-b",
-						prompt: "implement B",
-						status: "running",
-						pendingCommandIds: ["shell-b"],
-					},
-				],
-			}),
-		})
-		const recovery = store()
-		const state = new TaskState()
-		state.recovery = recovery
-		const config = { taskState: state } as TaskConfig
-		const handler = new UseSubagentsToolHandler()
-		assert.deepEqual(await Promise.all([handler.execute(config, block), handler.execute(config, block)]), [
-			"saved completed result",
-			"saved completed result",
-		])
-		assert.match(
-			String(await handler.execute(config, { ...block, params: { prompt_1: "different" } })),
-			/different persisted arguments/,
-		)
-		const rows = reconcileHelperExecutions([], recovery)
-		const again = reconcileHelperExecutions(rows, recovery)
-		assert.equal(again.length, 1)
-		const payload = parseSubagentStatusPayload(again[0].text)!
-		assert.deepEqual(
-			payload.items.map((item) => [item.id, item.status]),
-			[
-				["helper-a", "cancelled"],
-				["helper-b", "interrupted"],
-			],
-		)
-		assert.deepEqual(payload.items[1].pendingCommandIds, ["shell-b"])
-		assert.deepEqual(payload.items[0].filesModified, ["a.ts"])
-	})
-
-	it("restores completed helper truth even when its UI row never arrived", () => {
-		const first = store()
-		const registry = new ActionExecutionRegistry()
-		registry.attachRecovery(identity.ulid, first)
-		const helper = registry.claim(identity.ulid, helperIdentity("helper:ui-offline"))
-		first.put("batch-ui", {
-			kind: "batch",
-			fingerprint: "intent",
-			status: JSON.stringify({
-				batchId: "batch-ui",
-				status: "running",
-				items: [{ id: "card", executionId: helper.snapshot.execution_id, prompt: "save A", status: "running" }],
-			}),
-		})
-		registry.finish(helper, "completed", { result: "saved A", filesModified: ["a.ts"] })
-		const recovery = store()
-		const restored = new ActionExecutionRegistry()
-		restored.attachRecovery(identity.ulid, recovery)
-		const completion: DietCodeMessage = {
-			ts: Date.now() + 1000,
-			type: "ask",
-			ask: "completion_result",
-			text: "task finished",
-		}
-		const rows = reconcileHelperExecutions([completion], recovery, (id) => restored.get(identity.ulid, id))
-		const payload = parseSubagentStatusPayload(rows[0].text)!
-		assert.equal(payload.status, "completed")
-		assert.equal(payload.items[0].status, "completed")
-		assert.equal(payload.items[0].result, "saved A")
-		assert.deepEqual(payload.items[0].filesModified, ["a.ts"])
-		assert.equal(rows.at(-1), completion)
-		assert.equal(reconcileHelperExecutions(rows, recovery, (id) => restored.get(identity.ulid, id)).length, 2)
 	})
 
 	for (const defect of ["malformed", "version", "identity", "outcome", "oversized"] as const)

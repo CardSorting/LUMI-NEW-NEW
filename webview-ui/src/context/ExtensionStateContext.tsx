@@ -11,7 +11,6 @@ import { type TerminalProfile } from "@shared/proto/dietcode/state"
 import { convertProtoToDietCodeMessage } from "@shared/proto-conversions/dietcode-message"
 import { convertProtoMcpServersToMcpServers } from "@shared/proto-conversions/mcp/mcp-server-conversion"
 import { fromProtobufModels } from "@shared/proto-conversions/models/typeConversion"
-import { applySubagentMessage, parseSubagentStatusPayload, preserveSubagentProgress } from "@shared/subagents"
 import type React from "react"
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
 import {
@@ -279,7 +278,6 @@ export const ExtensionStateContextProvider: React.FC<{
 		yoloModeToggled: true,
 		customPrompt: undefined,
 		useAutoCondense: false,
-		subagentsEnabled: false,
 		dietcodeWebToolsEnabled: { user: true, featureFlag: false },
 		worktreesEnabled: { user: true, featureFlag: false },
 		favoritedModelIds: [],
@@ -295,16 +293,10 @@ export const ExtensionStateContextProvider: React.FC<{
 		auditCompletionGateEnabled: false,
 		auditCompletionGateThreshold: 50,
 		auditCompletionGateCriticalOnly: false,
-		auditActModeAdvisoryEnabled: true,
 		auditAdvisoryEscalationEnabled: false,
 		auditAdvisoryAutoScrollMode: "critical",
 		auditPlanRegressionGateEnabled: false,
 		auditToolOutputAdvisoryEnabled: true,
-		auditFileWriteAdvisoryEnabled: true,
-		auditIntentThresholdAdjustmentsEnabled: true,
-		auditIntentThresholdOverrides: "{}",
-		auditSarifHookExportEnabled: true,
-		auditWorkspaceArtifactsEnabled: true,
 		globalSkillsToggles: {},
 		localSkillsToggles: {},
 
@@ -394,11 +386,6 @@ export const ExtensionStateContextProvider: React.FC<{
 								stateData.dietcodeMessages = stateData.dietcodeMessages?.length
 									? stateData.dietcodeMessages
 									: prevState.dietcodeMessages
-								stateData.dietcodeMessages = preserveSubagentProgress(
-									stateData.dietcodeMessages,
-									prevState.dietcodeMessages,
-									stateData.currentTaskItem?.id,
-								)
 							}
 
 							const newState = {
@@ -565,16 +552,6 @@ export const ExtensionStateContextProvider: React.FC<{
 
 					const partialMessage = convertProtoToDietCodeMessage(protoMessage)
 					setState((prevState) => {
-						if (partialMessage.say === "subagent") {
-							const messages = applySubagentMessage(
-								prevState.dietcodeMessages,
-								partialMessage,
-								prevState.currentTaskItem?.id,
-							)
-							// Legacy rows without task/revision metadata keep the existing update-only path.
-							if (messages !== prevState.dietcodeMessages) return { ...prevState, dietcodeMessages: messages }
-							if (parseSubagentStatusPayload(partialMessage.text)?.revision) return prevState
-						}
 						// worth noting it will never be possible for a more up-to-date message to be sent here or in normal messages post since the presentAssistantContent function uses lock
 						const lastIndex = findLastIndex(prevState.dietcodeMessages, (msg) => msg.ts === partialMessage.ts)
 						if (lastIndex !== -1) {

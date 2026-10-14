@@ -50,7 +50,6 @@ import { RedTeamAlerts } from "./RedTeamAlerts"
 import ReportBugPreview from "./ReportBugPreview"
 import { RequestStartRow } from "./RequestStartRow"
 import SearchResultsDisplay from "./SearchResultsDisplay"
-import SubagentStatusRow from "./SubagentStatusRow"
 import { ThinkingRow } from "./ThinkingRow"
 import UserMessage from "./UserMessage"
 
@@ -742,10 +741,6 @@ export const ChatRowContent = memo(
 			)
 		}
 
-		if (message.ask === "use_subagents" || message.say === "use_subagents") {
-			return <SubagentStatusRow isLast={isLast} lastModifiedMessage={lastModifiedMessage} message={message} />
-		}
-
 		if (message.ask === "use_mcp_server" || message.say === "use_mcp_server") {
 			const useMcpServer = JSON.parse(message.text || "{}") as DietCodeAskUseMcpServer
 			const server = mcpServers.find((server) => server.name === useMcpServer.serverName)
@@ -1105,8 +1100,6 @@ export const ChatRowContent = memo(
 					case "hook_output_stream":
 						// hook_output_stream messages are combined with hook_status messages, so we don't render them separately
 						return <InvisibleSpacer />
-					case "subagent":
-						return <SubagentStatusRow isLast={isLast} lastModifiedMessage={lastModifiedMessage} message={message} />
 					case "shell_integration_warning_with_suggestion":
 						return (
 							<div className="p-2 bg-link/10 border border-link/30 rounded-xs">

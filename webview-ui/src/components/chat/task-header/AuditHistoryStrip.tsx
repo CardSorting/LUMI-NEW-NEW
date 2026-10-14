@@ -17,7 +17,6 @@ import { type AuditHealthSummary, computeAuditHealthSummary } from "@shared/audi
 import { partitionViolationsBySeverity } from "@shared/audit/auditSeverity"
 import { computeAuditSnapshotDiff } from "@shared/audit/auditSnapshotDiff"
 import { AUDIT_HEALTH_TREND_LABELS, AUDIT_SNAPSHOT_SOURCE_LABELS } from "@shared/audit/auditSnapshotLabels"
-import type { SubagentAuditSummary } from "@shared/audit/auditSubagentRollup"
 import { computeTrailingViolationAges } from "@shared/audit/auditViolationAge"
 import { getViolationRemediation } from "@shared/audit/auditViolationRemediation"
 import { formatAuditTime, formatViolationLabel, HARDENING_GRADE_STYLES } from "@shared/audit/taskAuditUtils"
@@ -32,7 +31,6 @@ import { AuditScoreSparkline } from "./AuditScoreSparkline"
 interface AuditHistoryStripProps {
 	snapshots: AuditMessageSnapshot[]
 	auditHealth?: AuditHealthSummary
-	subagentAuditSummary?: SubagentAuditSummary
 	checklistSummary?: PreCompletionChecklistSummary
 	onScrollToAuditMessage?: (ts: number) => void
 	onScrollToLatestGateBlock?: () => void
@@ -54,7 +52,6 @@ export const AuditHistoryStrip = memo(
 	({
 		snapshots,
 		auditHealth,
-		subagentAuditSummary,
 		checklistSummary,
 		onScrollToAuditMessage,
 		onScrollToLatestGateBlock,
@@ -82,7 +79,6 @@ export const AuditHistoryStrip = memo(
 				const markdown = buildUnifiedAuditExportMarkdown({
 					snapshots,
 					health,
-					subagentSummary: subagentAuditSummary,
 					checklistSummary,
 				})
 				try {
@@ -93,7 +89,7 @@ export const AuditHistoryStrip = memo(
 					console.error("Failed to copy audit history:", error)
 				}
 			},
-			[snapshots, health, subagentAuditSummary, checklistSummary],
+			[snapshots, health, checklistSummary],
 		)
 
 		useEffect(() => {

@@ -8,7 +8,6 @@ import { type CompletionGateDecision, evaluateCompletionGate } from "@shared/aud
 import { getLatestPlanAuditFromMessages } from "@shared/audit/auditMessages"
 import { buildPreCompletionChecklistBlock, buildPreCompletionChecklistSummary } from "@shared/audit/auditPreCompletionChecklist"
 import { buildCompletionGateMessage, runCompletionAudit } from "@shared/audit/completionAudit"
-import { parseIntentThresholdOverrides } from "@shared/audit/gatePolicy"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { Logger } from "@shared/services/Logger"
 import {
@@ -31,7 +30,6 @@ import {
 	validateCompletionDemoCommand,
 	validateCompletionResultQuality,
 	validateCompletionTaskProgress,
-	validateFocusChainComplete,
 } from "./attemptCompletionUtils"
 import type { TaskConfig } from "./types/TaskConfig"
 
@@ -127,10 +125,6 @@ export const PREFLIGHT_STAGE_RUNNERS: ReadonlyArray<{
 	{
 		stage: "task_progress_complete",
 		validate: (ctx) => validateCompletionTaskProgress(ctx.params.taskProgress),
-	},
-	{
-		stage: "focus_chain",
-		validate: (ctx) => validateFocusChainComplete(ctx.config),
 	},
 	{
 		stage: "cooldown",
@@ -261,7 +255,7 @@ export async function evaluateCompletionAuditGate(
 		logPrefix: string
 	},
 ): Promise<CompletionAuditGateResult> {
-	if (!config.auditCompletionGateEnabled || config.isSubagentExecution) {
+	if (!config.auditCompletionGateEnabled) {
 		markCompletionGatesPassed(config)
 		return { status: "skipped" }
 	}
@@ -291,8 +285,6 @@ export async function evaluateCompletionAuditGate(
 				buildCompletionGateMessage(auditMetadata, {
 					scoreThreshold: config.auditCompletionGateThreshold,
 					criticalOnly: config.auditCompletionGateCriticalOnly,
-					intentAdjustedThreshold: config.auditIntentThresholdAdjustmentsEnabled,
-					intentThresholdOverrides: parseIntentThresholdOverrides(config.auditIntentThresholdOverrides),
 					advisoryMetadata: config.taskState.lastAdvisoryAudit,
 					planBaselineMetadata: planBaseline,
 					gateDecision,

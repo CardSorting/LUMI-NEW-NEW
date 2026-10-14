@@ -9,12 +9,7 @@ import { buildAdvisoryRollupSection, shouldEscalateFromAdvisory } from "./auditR
 import { partitionViolationsBySeverity } from "./auditSeverity"
 import { getViolationRemediation } from "./auditViolationRemediation"
 import { COMPLETION_GATE_SCORE_THRESHOLD } from "./gatePolicy"
-import {
-	buildAuditReportMarkdown,
-	computeHardeningAssessment,
-	formatViolationLabel,
-	getIntentClassification,
-} from "./taskAuditUtils"
+import { buildAuditReportMarkdown, computeHardeningAssessment, formatViolationLabel } from "./taskAuditUtils"
 
 export { COMPLETION_GATE_SCORE_THRESHOLD }
 
@@ -33,8 +28,6 @@ export function buildCompletionGateMessage(
 	options?: {
 		scoreThreshold?: number
 		criticalOnly?: boolean
-		intentAdjustedThreshold?: boolean
-		intentThresholdOverrides?: Partial<Record<import("./types").IntentClassification, number>>
 		advisoryMetadata?: TaskAuditMetadata
 		planBaselineMetadata?: TaskAuditMetadata
 		gateDecision?: CompletionGateDecision
@@ -45,13 +38,9 @@ export function buildCompletionGateMessage(
 		evaluateCompletionGate(metadata, {
 			scoreThreshold: options?.scoreThreshold,
 			criticalOnly: options?.criticalOnly,
-			intentAdjustedThreshold: options?.intentAdjustedThreshold,
-			intentThresholdOverrides: options?.intentThresholdOverrides,
 			advisoryMetadata: options?.advisoryMetadata,
 			planBaselineMetadata: options?.planBaselineMetadata,
 		})
-	const baseThreshold = options?.scoreThreshold ?? COMPLETION_GATE_SCORE_THRESHOLD
-	const intent = getIntentClassification(metadata.intent_classification)
 	const threshold = gateDecision.effectiveThreshold
 	const assessment = computeHardeningAssessment(metadata)
 	const violations = metadata.violations ?? []
@@ -68,14 +57,9 @@ export function buildCompletionGateMessage(
 
 	const joyLines = metadata.joy_zoning_violations?.map((v) => `- Architecture signal: \`${v}\``).slice(0, 3) ?? []
 
-	const intentNote =
-		threshold !== baseThreshold && options?.intentAdjustedThreshold !== false
-			? ` (base ${baseThreshold}, +${threshold - baseThreshold} for ${intent} intent)`
-			: ""
-
 	return [
 		"⛔ COMPLETION BLOCKED — Architectural hardening audit failed.",
-		`Grade: **${metadata.hardening_grade ?? assessment.grade}** (${metadata.hardening_score ?? assessment.score}/100, threshold ${threshold}${intentNote}).`,
+		`Grade: **${metadata.hardening_grade ?? assessment.grade}** (${metadata.hardening_score ?? assessment.score}/100, threshold ${threshold}).`,
 		options?.criticalOnly && warning.length > 0
 			? `\n_Note: ${warning.length} warning-level violation(s) did not trigger the gate._`
 			: "",

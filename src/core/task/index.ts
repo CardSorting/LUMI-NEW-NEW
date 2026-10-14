@@ -142,7 +142,6 @@ import { type ExecutionState, type ExecutionStateResult, getExecutionAuthority }
 import { FocusChainManager } from "./focus-chain"
 import { MessageStateHandler } from "./message-state"
 import { reconcileCommandExecutions } from "./reconcileCommandExecutions"
-import { reconcileHelperExecutions } from "./reconcileHelperExecutions"
 import { StreamResponseHandler } from "./StreamResponseHandler"
 import { buildInterruptedAssistantContent, STREAM_RECOVERY_INSTRUCTION } from "./streamRecovery"
 import { TaskState } from "./TaskState"
@@ -283,7 +282,6 @@ export class Task {
 	// Callbacks
 	private updateTaskHistory: (historyItem: HistoryItem) => Promise<HistoryItem[]>
 	private postStateToWebview: () => Promise<void>
-	private reinitExistingTaskFromId: (taskId: string, initialState?: Partial<TaskState>) => Promise<void>
 	private cancelTask: () => Promise<void>
 
 	// Cache service
@@ -338,7 +336,7 @@ export class Task {
 		this.mcpHub = mcpHub
 		this.updateTaskHistory = updateTaskHistory
 		this.postStateToWebview = postStateToWebview
-		this.reinitExistingTaskFromId = reinitExistingTaskFromId
+		void reinitExistingTaskFromId
 		this.cancelTask = cancelTask
 		this.dietcodeIgnoreController = new DietCodeIgnoreController(cwd)
 		this.commandPermissionController = new CommandPermissionController()
@@ -1421,10 +1419,8 @@ export class Task {
 
 		const historyMessages = stripPartialPlanSummaryMessages(await getSavedDietCodeMessages(this.taskId))
 		this.commandExecutor.restoreCommandHistory(historyMessages)
-		const savedDietCodeMessages = reconcileHelperExecutions(
-			reconcileCommandExecutions(historyMessages, (id) => this.commandExecutor.getExecutionSnapshot(id)),
-			this.taskState.recovery,
-			(id) => executor.executions.get(this.ulid, id),
+		const savedDietCodeMessages = reconcileCommandExecutions(historyMessages, (id) =>
+			this.commandExecutor.getExecutionSnapshot(id),
 		)
 
 		// Remove any resume messages that may have been added before
@@ -2442,12 +2438,10 @@ export class Task {
 			preferredLanguageInstructions,
 			browserSettings: this.stateManager.getGlobalSettingsKey("browserSettings"),
 			yoloModeToggled: this.stateManager.getGlobalSettingsKey("yoloModeToggled"),
-			subagentsEnabled: this.stateManager.getGlobalSettingsKey("subagentsEnabled"),
 			dietcodeWebToolsEnabled:
 				this.stateManager.getGlobalSettingsKey("dietcodeWebToolsEnabled") && featureFlagsService.getWebtoolsEnabled(),
 			isMultiRootEnabled: multiRootEnabled,
 			workspaceRoots,
-			isSubagentRun: false,
 			isCliEnvironment,
 			enableNativeToolCalls:
 				providerInfo.model.info.apiFormat === ApiFormat.OPENAI_RESPONSES ||

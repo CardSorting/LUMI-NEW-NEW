@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "mocha"
 import { formatResponse } from "@/core/prompts/responses"
-import { ToolProgressTracker } from "../../../ToolProgressTracker"
+import { ToolProgressTracker } from "../ToolProgressTracker"
 
 describe("agent progress tracking", () => {
 	it("stops roadmap rescans despite changing timestamps, echoed plans, formatting, or the checkpoint alias", () => {

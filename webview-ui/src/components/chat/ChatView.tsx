@@ -12,7 +12,6 @@ import {
 import { findAuditMessageIndex, findMessageIndexForAuditTs } from "@shared/audit/auditNavigation"
 import { buildPreCompletionChecklistSummary } from "@shared/audit/auditPreCompletionChecklist"
 import { computeAuditHealthSummaryWithBaseline } from "@shared/audit/auditRollup"
-import { buildSubagentAuditSummary } from "@shared/audit/auditSubagentRollup"
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
 import { combineErrorRetryMessages } from "@shared/combineErrorRetryMessages"
@@ -100,7 +99,6 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 		() => computeAuditHealthSummaryWithBaseline(auditSnapshots, planAuditBaseline),
 		[auditSnapshots, planAuditBaseline],
 	)
-	const subagentAuditSummary = useMemo(() => buildSubagentAuditSummary(messages), [messages])
 	const gateConfig = useAuditGateConfig()
 	const auditAutoScrollPolicy = useAuditAutoScrollPolicy()
 	const checklistSummary = useMemo(
@@ -456,7 +454,6 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 										supportsImages: selectedModelInfo.supportsImages || false,
 									}}
 									showFocusChainPlaceholder={showFocusChainPlaceholder}
-									subagentAuditSummary={subagentAuditSummary}
 									task={task}
 								/>
 							</div>

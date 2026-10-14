@@ -27,9 +27,6 @@ export class ReadFileToolHandler implements IFullyManagedTool {
 		const relPath = block.params.path
 
 		const config = uiHelpers.getConfig()
-		if (config.isSubagentExecution) {
-			return
-		}
 
 		// Create and show partial UI message
 		const sharedMessageProps = {
@@ -62,7 +59,7 @@ export class ReadFileToolHandler implements IFullyManagedTool {
 		// Validate required parameters and check dietcodeignore access
 		const validation = await this.validator.validate(block, "path")
 		if (!validation.ok) {
-			if (!config.isSubagentExecution && validation.error.includes("RESTRICTED")) {
+			if (validation.error.includes("RESTRICTED")) {
 				await config.callbacks.say("dietcodeignore_error", relPath)
 			}
 
@@ -100,14 +97,11 @@ export class ReadFileToolHandler implements IFullyManagedTool {
 
 		const completeMessage = JSON.stringify(sharedMessageProps)
 
-		const shouldAutoApprove =
-			config.isSubagentExecution || (await config.callbacks.shouldAutoApproveToolWithPath(block.name, relPath))
+		const shouldAutoApprove = await config.callbacks.shouldAutoApproveToolWithPath(block.name, relPath)
 		if (shouldAutoApprove) {
 			// Auto-approval flow
-			if (!config.isSubagentExecution) {
-				await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "tool")
-				await config.callbacks.say("tool", completeMessage, undefined, undefined, false)
-			}
+			await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "tool")
+			await config.callbacks.say("tool", completeMessage, undefined, undefined, false)
 
 			// Capture telemetry
 			telemetryService.captureToolUsage(

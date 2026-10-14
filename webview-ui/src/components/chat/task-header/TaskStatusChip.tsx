@@ -1,5 +1,4 @@
 import type { AuditHealthSummary } from "@shared/audit/auditRollup"
-import type { SubagentAuditSummary } from "@shared/audit/auditSubagentRollup"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { memo } from "react"
 import { cn } from "@/lib/utils"
@@ -7,7 +6,6 @@ import { cn } from "@/lib/utils"
 export interface TaskStatusChipProps {
 	auditHealth?: AuditHealthSummary
 	auditMetadata?: TaskAuditMetadata
-	subagentAuditSummary?: SubagentAuditSummary
 	onExpand: () => void
 }
 
@@ -15,11 +13,10 @@ export interface TaskStatusChipProps {
  * Single status affordance when the task header is collapsed —
  * replaces a row of audit badges in narrow sidebars.
  */
-export const TaskStatusChip = memo(({ auditHealth, auditMetadata, subagentAuditSummary, onExpand }: TaskStatusChipProps) => {
+export const TaskStatusChip = memo(({ auditHealth, auditMetadata, onExpand }: TaskStatusChipProps) => {
 	const hasGateBlock = auditMetadata?.gate_blocked === true
 	const hasWarnings = (auditHealth?.warningViolationCount ?? 0) + (auditHealth?.criticalViolationCount ?? 0) > 0
-	const hasSubagent = (subagentAuditSummary?.parentGateSignals.length ?? 0) > 0
-	const hasNotes = hasGateBlock || hasWarnings || hasSubagent || Boolean(auditHealth?.latestGrade)
+	const hasNotes = hasGateBlock || hasWarnings || Boolean(auditHealth?.latestGrade)
 
 	if (!hasNotes) {
 		return null

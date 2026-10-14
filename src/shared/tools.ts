@@ -37,7 +37,6 @@ export enum DietCodeDefaultTool {
 	APPLY_PATCH = "apply_patch",
 	GENERATE_EXPLANATION = "generate_explanation",
 	USE_SKILL = "use_skill",
-	USE_SUBAGENTS = "use_subagents",
 	PROJECT_MAP = "project_map",
 	MEM_QUERY = "query_cognitive_memory",
 	MEM_SNAPSHOT = "create_cognitive_snapshot",
@@ -104,7 +103,6 @@ export const READ_ONLY_TOOLS = [
 	DietCodeDefaultTool.WEB_FETCH,
 	DietCodeDefaultTool.USE_SKILL,
 	DietCodeDefaultTool.PROJECT_MAP,
-	DietCodeDefaultTool.USE_SUBAGENTS,
 	DietCodeDefaultTool.STABILITY_DIAGNOSE,
 ] as const
 
@@ -122,7 +120,6 @@ export function withExecutionObservation<T extends string>(
 		DietCodeDefaultTool.FILE_NEW,
 		DietCodeDefaultTool.FILE_EDIT,
 		DietCodeDefaultTool.APPLY_PATCH,
-		DietCodeDefaultTool.USE_SUBAGENTS,
 	]
 	if (tools.some((tool) => executionTools.includes(tool))) observed.push(DietCodeDefaultTool.GET_EXECUTION_STATE)
 	return [...new Set(observed)]

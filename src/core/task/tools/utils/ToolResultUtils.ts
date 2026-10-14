@@ -135,9 +135,6 @@ export class ToolResultUtils {
 		config: TaskConfig,
 		notificationMessage?: string,
 	) {
-		if (config.isSubagentExecution) {
-			return true
-		}
 		const feedbackVersion = () => {
 			const messages = config.messageState?.getDietCodeMessages?.() || []
 			for (let i = messages.length - 1; i >= 0; i--) {

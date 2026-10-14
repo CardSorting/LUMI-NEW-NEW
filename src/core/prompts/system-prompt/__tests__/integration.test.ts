@@ -129,7 +129,6 @@ const baseContext: SystemPromptContext = {
 	ide: "TestIde",
 	supportsBrowserUse: true,
 	dietcodeWebToolsEnabled: true,
-	subagentsEnabled: true,
 	mcpHub: {
 		getServers: () => [
 			{

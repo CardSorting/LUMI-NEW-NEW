@@ -4,7 +4,6 @@ import type { ToolUse } from "@core/assistant-message"
 import { constructNewFileContent, getLineNumberFromCharIndex } from "@core/assistant-message/diff"
 import { formatResponse } from "@core/prompts/responses"
 import { getWorkspaceBasename, resolveWorkspacePath } from "@core/workspace"
-import { buildFileWriteContentAdvisory } from "@shared/audit/auditFileWrite"
 import { DietCodeSayTool } from "@shared/ExtensionMessage"
 import { getLastApiReqTotalTokens } from "@shared/getApiMetrics"
 import { fileExistsAtPath } from "@utils/fs"
@@ -12,10 +11,6 @@ import { arePathsEqual, getReadablePath, isLocatedInWorkspace } from "@utils/pat
 import { telemetryService } from "@/services/telemetry"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { AnomalyRegistry } from "../../../integrity/AnomalyRegistry"
-import { StabilityDoctor } from "../../../policy/StabilityDoctor"
-import { StabilityGuard } from "../../../policy/StabilityGuard"
-import { SpiderEngine } from "../../../policy/spider/SpiderEngine"
 import { executor } from "../../ActionExecutor"
 import type { ToolValidator } from "../ToolValidator"
 import type { TaskConfig } from "../types/TaskConfig"
@@ -184,7 +179,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 				await config.services.diffViewProvider.open(absolutePath, { displayPath: relPath })
 			}
 			await config.services.diffViewProvider.update(newContent, true)
-			if (!config.isSubagentExecution) await setTimeoutPromise(300) // visual editors need time to render
+			await setTimeoutPromise(300) // visual editors need time to render
 			await config.services.diffViewProvider.scrollToFirstDiff()
 			// showOmissionWarning(this.diffViewProvider.originalContent || "", newContent)
 
@@ -272,38 +267,6 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 				}
 				throw error
 			}
-
-			// --- JoyZoning Sovereign Integration ---
-			if (config.auditFileWriteAdvisoryEnabled && !config.isSubagentExecution)
-				try {
-					const engine = new SpiderEngine(config.cwd)
-					await engine.loadRegistry()
-					const guard = new StabilityGuard(config.cwd)
-
-					// Audit the proposed content
-					const anomalies = new AnomalyRegistry(config.cwd)
-					const signal = await guard.scrutinize(relPath, newContent, engine, anomalies)
-
-					if (!signal.approved) {
-						await config.callbacks.say("error", `Stability Blockade: ${signal.reason}`)
-					}
-
-					// Check for drift/optimizations
-					const doctor = new StabilityDoctor(config.cwd)
-					const report = await doctor.diagnose(engine)
-					const optimization = report.optimizations.find((o) => o.file === relPath)
-
-					if (optimization) {
-						// Add to a "Directive" queue to be appended to the return message
-						const state = config.taskState as unknown as { sovereignDirective?: string }
-						state.sovereignDirective = `\n\n[ARCHITECTURAL OPTIMIZATION]: ${optimization.reason}. Recommended Layer: ${optimization.recommendedLayer}.`
-					}
-
-					// Advice must not mutate the file before the approved edit is saved.
-				} catch (e) {
-					Logger.error("[JoyZoning] Integration error:", e)
-				}
-			// ----------------------------------------
 
 			// Save the changes and get the result with reliability wrapper
 			const { newProblemsMessage, userEdits, autoFormattingEdits, finalContent } = await executor.execute(
@@ -394,12 +357,7 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 			const directive = state.sovereignDirective || ""
 			if (directive) delete state.sovereignDirective
 
-			let fileWriteAdvisory = ""
-			if (config.auditFileWriteAdvisoryEnabled && !config.isSubagentExecution && finalContent) {
-				fileWriteAdvisory = buildFileWriteContentAdvisory(finalContent, relPath)
-			}
-
-			return baseResult + directive + auditReport + fileWriteAdvisory
+			return baseResult + directive + auditReport
 		} catch (error) {
 			if (savedReceipt !== undefined) {
 				Logger.warn("File saved; follow-up observation failed. Returning the committed result:", error)

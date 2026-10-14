@@ -33,7 +33,6 @@ describe("file write execution receipts", () => {
 			cwd,
 			ulid: cwd,
 			taskState,
-			isSubagentExecution: true,
 			api: { getModel: () => ({ id: "test" }) },
 			callbacks: {
 				shouldAutoApproveToolWithPath: sinon.stub().resolves(true),

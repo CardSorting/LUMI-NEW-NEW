@@ -15,7 +15,6 @@ interface ApiMetrics {
  * It includes:
  * - 'api_req_started' messages that have been combined with their corresponding 'api_req_finished' messages
  * - 'deleted_api_reqs' messages, which are aggregated from deleted messages
- * - 'subagent_usage' messages, which are aggregated usage snapshots emitted by subagent batches
  * It extracts and sums up the tokensIn, tokensOut, cacheWrites, cacheReads, and cost from these messages.
  *
  * @param messages - An array of DietCodeMessage objects to process.
@@ -38,11 +37,7 @@ export function getApiMetrics(messages: DietCodeMessage[]): ApiMetrics {
 	}
 
 	messages.forEach((message) => {
-		if (
-			message.type === "say" &&
-			(message.say === "api_req_started" || message.say === "deleted_api_reqs" || message.say === "subagent_usage") &&
-			message.text
-		) {
+		if (message.type === "say" && (message.say === "api_req_started" || message.say === "deleted_api_reqs") && message.text) {
 			try {
 				const parsedData = JSON.parse(message.text)
 				const { tokensIn, tokensOut, cacheWrites, cacheReads, cost } = parsedData

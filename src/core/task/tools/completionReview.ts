@@ -36,7 +36,7 @@ export function buildCompletionReview(
 			: {
 					id: "audit",
 					status: "not_run",
-					detail: config.isSubagentExecution ? "Not required for this helper task." : "Not enabled for this task.",
+					detail: "Not enabled for this task.",
 				},
 	)
 	const reviewed = config.doubleCheckCompletionEnabled && config.taskState.doubleCheckCompletionPending

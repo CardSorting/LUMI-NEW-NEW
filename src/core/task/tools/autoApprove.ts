@@ -71,7 +71,6 @@ export class AutoApprove {
 				DietCodeDefaultTool.FILE_EDIT,
 				DietCodeDefaultTool.APPLY_PATCH,
 				DietCodeDefaultTool.BASH,
-				DietCodeDefaultTool.USE_SUBAGENTS,
 				DietCodeDefaultTool.RENAME,
 				DietCodeDefaultTool.MOVE,
 				DietCodeDefaultTool.DELETE,
@@ -86,7 +85,6 @@ export class AutoApprove {
 			case DietCodeDefaultTool.LIST_FILES:
 			case DietCodeDefaultTool.LIST_CODE_DEF:
 			case DietCodeDefaultTool.SEARCH:
-			case DietCodeDefaultTool.USE_SUBAGENTS:
 				return [autoApprovalSettings.actions.readFiles, autoApprovalSettings.actions.readFilesExternally ?? false]
 			case DietCodeDefaultTool.NEW_RULE:
 			case DietCodeDefaultTool.FILE_NEW:

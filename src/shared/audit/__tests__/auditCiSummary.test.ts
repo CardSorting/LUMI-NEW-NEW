@@ -50,8 +50,6 @@ describe("auditCiSummary", () => {
 			auditCompletionGateCriticalOnly: false,
 			auditAdvisoryEscalationEnabled: true,
 			auditPlanRegressionGateEnabled: true,
-			auditIntentThresholdAdjustmentsEnabled: true,
-			auditIntentThresholdOverrides: "{}",
 		})
 		expect(snapshot.schemaVersion).to.equal(1)
 		expect(snapshot.scoreThreshold).to.equal(60)

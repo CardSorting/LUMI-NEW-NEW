@@ -1,5 +1,5 @@
-import type { DietCodeMessage } from "@shared/ExtensionMessage"
 import { describe, expect, it } from "vitest"
+import type { DietCodeMessage } from "./buttonConfig"
 import { BUTTON_CONFIGS, getButtonConfig } from "./buttonConfig"
 
 describe("getButtonConfig", () => {
@@ -99,7 +99,6 @@ describe("getButtonConfig", () => {
 			{ ask: "followup", expectedConfig: "followup" },
 			{ ask: "browser_action_launch", expectedConfig: "browser_action_launch" },
 			{ ask: "use_mcp_server", expectedConfig: "use_mcp_server" },
-			{ ask: "use_subagents", expectedConfig: "use_subagents" },
 			{ ask: "plan_mode_respond", expectedConfig: "plan_mode_respond" },
 			{ ask: "completion_result", expectedConfig: "completion_result" },
 			{ ask: "resume_task", expectedConfig: "resume_task" },

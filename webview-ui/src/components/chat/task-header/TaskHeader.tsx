@@ -1,7 +1,6 @@
 import type { AuditMessageSnapshot, AuditTrend } from "@shared/audit/auditMessages"
 import type { PreCompletionChecklistSummary } from "@shared/audit/auditPreCompletionChecklist"
 import type { AuditHealthSummary } from "@shared/audit/auditRollup"
-import type { SubagentAuditSummary } from "@shared/audit/auditSubagentRollup"
 import { DietCodeMessage } from "@shared/ExtensionMessage"
 import { StringArrayRequest } from "@shared/proto/dietcode/common"
 import React, { useCallback, useLayoutEffect, useMemo, useState } from "react"
@@ -34,7 +33,6 @@ interface TaskHeaderProps {
 	auditTrend?: AuditTrend
 	auditSnapshots?: AuditMessageSnapshot[]
 	auditHealth?: AuditHealthSummary
-	subagentAuditSummary?: SubagentAuditSummary
 	checklistSummary?: PreCompletionChecklistSummary
 	showFocusChainPlaceholder?: boolean
 	onScrollToAuditMessage?: (ts: number) => void
@@ -59,7 +57,6 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 	auditTrend: _auditTrend,
 	auditSnapshots,
 	auditHealth,
-	subagentAuditSummary,
 	checklistSummary,
 	showFocusChainPlaceholder,
 	onScrollToAuditMessage,
@@ -207,7 +204,6 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 							onScrollToAuditMessage={onScrollToAuditMessage}
 							onScrollToLatestAdvisory={onScrollToLatestAdvisory}
 							onScrollToLatestGateBlock={onScrollToLatestGateBlock}
-							subagentAuditSummary={subagentAuditSummary}
 						/>
 
 						<div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2 mt-1 border-t border-border/20">

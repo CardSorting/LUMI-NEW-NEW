@@ -8,7 +8,7 @@ import type { TaskConfig } from "../../types/TaskConfig"
 import { createUIHelpers } from "../../types/UIHelpers"
 import { AskFollowupQuestionToolHandler } from "../AskFollowupQuestionToolHandler"
 
-function fixture(yoloModeToggled: boolean, isSubagentExecution = false) {
+function fixture(yoloModeToggled: boolean) {
 	const callbacks = {
 		ask: sinon.stub().resolves({ text: "blue" }),
 		say: sinon.stub().resolves(),
@@ -17,7 +17,6 @@ function fixture(yoloModeToggled: boolean, isSubagentExecution = false) {
 	}
 	const config = {
 		yoloModeToggled,
-		isSubagentExecution,
 		callbacks,
 		taskState: new TaskState(),
 		autoApprovalSettings: { enableNotifications: false },
@@ -33,22 +32,16 @@ function fixture(yoloModeToggled: boolean, isSubagentExecution = false) {
 }
 
 describe("follow-up question flow", () => {
-	for (const [autonomous, helper] of [
-		[true, false],
-		[false, true],
-	]) {
-		it(`keeps ${helper ? "helpers" : "autonomous tasks"} moving without flashing an unanswered question`, async () => {
-			const { config, callbacks, block, handler } = fixture(autonomous, helper)
-			await handler.handlePartialBlock({ ...block, partial: true }, createUIHelpers(config))
-			const result = await handler.execute(config, block)
-			sinon.assert.notCalled(callbacks.ask)
-			sinon.assert.notCalled(callbacks.say)
-			sinon.assert.calledOnceWithExactly(callbacks.removeLastPartialMessageIfExistsWithType, "ask", "followup")
-			assert.match(String(result), /reasonable assumption and proceed/)
-			assert.match(String(result), /Do not invent credentials/)
-			if (helper) assert.match(String(result), /handoff to the parent/)
-		})
-	}
+	it("keeps autonomous tasks moving without flashing an unanswered question", async () => {
+		const { config, callbacks, block, handler } = fixture(true)
+		await handler.handlePartialBlock({ ...block, partial: true }, createUIHelpers(config))
+		const result = await handler.execute(config, block)
+		sinon.assert.notCalled(callbacks.ask)
+		sinon.assert.notCalled(callbacks.say)
+		sinon.assert.calledOnceWithExactly(callbacks.removeLastPartialMessageIfExistsWithType, "ask", "followup")
+		assert.match(String(result), /reasonable assumption and proceed/)
+		assert.match(String(result), /Do not invent credentials/)
+	})
 	it("retains interactive questions when the user chose that mode", async () => {
 		const { config, callbacks, block, handler } = fixture(false)
 		assert.match(String(await handler.execute(config, block)), /<answer>\nblue\n<\/answer>/)

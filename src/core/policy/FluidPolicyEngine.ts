@@ -5,7 +5,6 @@ import * as path from "path"
 import { orchestrator } from "@/infrastructure/ai/Orchestrator"
 import { Logger } from "@/shared/services/Logger"
 import { getLayer, suggestLayerForContent } from "@/utils/joy-zoning"
-import { SafeNumber } from "../../shared/utils/SafeNumber"
 import { ToolUse } from "../assistant-message"
 import { ContextStalenessTracker } from "../context/ContextStalenessTracker"
 import { AnomalyRegistry } from "../integrity/AnomalyRegistry"
@@ -15,14 +14,10 @@ import { EnvironmentIntegrity, EnvironmentLease } from "../integrity/Environment
 import { StabilityMonitor } from "../integrity/StabilityMonitor"
 import { StateManager } from "../storage/StateManager"
 import { ForensicDiagnostic, RefactorHealer } from "../task/tools/RefactorHealer"
-import { StabilityScribe } from "../task/tools/utils/StabilityScribe"
 import { AxiomVerificationService } from "./AxiomVerificationService"
 import { IntegrityGarbageCollector } from "./IntegrityGarbageCollector"
 import { IntegrityOptimizer } from "./IntegrityOptimizer"
-import { IntegrityProtocol, StabilityDiagnostics } from "./IntegrityProtocol"
 import { SemanticAxiomEngine } from "./SemanticAxiomEngine"
-import { SimulationEngine } from "./SimulationEngine"
-import { RefactoringSuggestion, SpiderRefactorer } from "./SpiderRefactorer"
 import { StabilityForensics } from "./StabilityForensics"
 import { StabilityPolicy } from "./StabilityPolicy"
 import { StabilityTelemetrics } from "./StabilityTelemetrics"
@@ -56,11 +51,9 @@ export class FluidPolicyEngine {
 	private readonly spiderEngine: SpiderEngine
 	private mode: "plan" | "act" = "act"
 	private commitSeal: string | null = null
-	private sealReason: string | null = null
 	private layerCache: Map<string, string> = new Map()
 	private sessionFiles: Map<string, string> = new Map()
 	private auditRecorder: AuditRecorder
-	private simulationEngine: SimulationEngine
 	private stalenessTracker: ContextStalenessTracker
 	private dashboardGenerator: DashboardGenerator
 	private axiomEngine: SemanticAxiomEngine
@@ -69,9 +62,7 @@ export class FluidPolicyEngine {
 	private anomalies: AnomalyRegistry
 	private buildAlarmActive = false
 	private alarmViolations: string[] = []
-	private stateRestored = false // V150: Immortality tracking
 	private lastBuildHealth = 100
-	private lastViolationCount = 0
 	private telemetrics: StabilityTelemetrics
 	private verification: AxiomVerificationService
 	private refactorTurnsRemaining = 0 // V70: Stability Refactor Window
@@ -94,7 +85,6 @@ export class FluidPolicyEngine {
 	) {
 		this.spiderEngine = new SpiderEngine(this.cwd)
 		this.auditRecorder = new AuditRecorder(this.cwd)
-		this.simulationEngine = new SimulationEngine(this.cwd)
 		this.stalenessTracker = new ContextStalenessTracker(this.cwd)
 		this.dashboardGenerator = new DashboardGenerator(this.cwd)
 		this.axiomEngine = new SemanticAxiomEngine()
@@ -216,9 +206,8 @@ export class FluidPolicyEngine {
 		this.streamId = streamId
 	}
 
-	public setCommitSeal(seal: string, reason: string) {
+	public setCommitSeal(seal: string, _reason?: string) {
 		this.commitSeal = seal
-		this.sealReason = reason
 	}
 
 	public getFileLayerContext(filePath: string): string {
@@ -403,365 +392,6 @@ export class FluidPolicyEngine {
 			result.warning =
 				(result.warning ? `${result.warning}\n` : "") +
 				`⚠️ [ADVISORY] Environment Toolchain issues detected:\n${lease.error}\n\n${guidedSetup}`
-		}
-
-		// Architectural coaching is opt-in. Required command, workspace, and tool
-		// policies are enforced by their handlers regardless of this preference.
-		if (!this.stateManager?.getGlobalSettingsKey("auditActModeAdvisoryEnabled")) return result
-
-		if (this.streamId && !this.stateRestored) {
-			// V189: Unified Environment handles activity state
-		}
-
-		// V150: Sovereign Breath tool is ALWAYS allowed for cognitive recovery
-		if (block.name === DietCodeDefaultTool.STABILITY_RECALIBRATE) {
-			return { success: true }
-		}
-
-		// V18/V19: Harmonic Healing Intent Sensing
-		let intent = null
-		const content = (block.params as { content?: string })?.content || ""
-		const thrashing = this.telemetrics.getAgenticHealth()
-
-		// V185: Cognitive Interdiction - Block when agentic failure spiral is detected
-		if (
-			thrashing.loop &&
-			block.name !== DietCodeDefaultTool.FILE_EDIT // Allow editing scratchpad/audit
-		) {
-			const isTargetingAudit = (block.params as { path?: string })?.path?.endsWith("scratchpad.md")
-			if (!isTargetingAudit) {
-				result.warning =
-					(result.warning ? `${result.warning}\n` : "") +
-					"Repeated investigation detected. Use the evidence already collected to make the next concrete change, or report the specific missing input. This advisory does not block execution."
-				return result // Total Deblocking: No longer blocking
-			}
-		}
-
-		// V188: Concurrent Substrate Drift Detection
-		const driftAlert = await this.detectConcurrentDrift(block)
-		if (driftAlert) {
-			result.warning = (result.warning ? `${result.warning}\n` : "") + driftAlert
-		}
-
-		// V189: Substrate Immune Response Check (Fragility Alarm)
-		const targetPath =
-			(block.params as { path?: string; target_file?: string })?.path ||
-			(block.params as { path?: string; target_file?: string })?.target_file
-		if (targetPath && (block.name === DietCodeDefaultTool.FILE_EDIT || block.name === DietCodeDefaultTool.APPLY_PATCH)) {
-			const absPath = path.resolve(this.cwd, targetPath)
-			const cci = this.spiderEngine.computeCCI(absPath, this.anomalies, this.stabilityMonitor)
-			if (cci > 0.8) {
-				result.warning =
-					(result.warning ? `${result.warning}\n` : "") +
-					`🛑 [STABILITY SAFETY ALERT]: \`${path.basename(targetPath)}\` has high complexity (Index: ${SafeNumber.format(cci, 2)}). ` +
-					`This module is a 'Structural Hotspot' (${SafeNumber.formatPercent(cci, 0)} risk). Strategic Review suggested before further edits.`
-			}
-		}
-
-		// Step 0: Read scratchpad context for Sovereign Protocols
-		let scratchpadContent = ""
-		let hasAudit = false
-		let hasBreath = false
-
-		try {
-			const scratchpadPath = path.join(this.cwd, "scratchpad.md")
-			scratchpadContent = await fs.readFile(scratchpadPath, "utf-8")
-			hasAudit = scratchpadContent.includes(IntegrityProtocol.HEADERS.AUDIT)
-			hasBreath = scratchpadContent.includes(IntegrityProtocol.HEADERS.BREATH)
-		} catch (_e) {
-			// Missing optional notes must not cause preflight to write workspace files.
-
-			// V28: Virtual Substrate Fallback (Search history if disk is empty)
-			if (!hasAudit && !hasBreath && this.streamId) {
-				const history = await orchestrator.getConversationHistory(this.streamId)
-				if (history) {
-					const virtual = StabilityScribe.findVirtualReviewInHistory(history)
-					if (virtual.valid) {
-						scratchpadContent = virtual.content
-						hasAudit = true
-						Logger.info(
-							"[FluidPolicyEngine] Strategic Interdiction bypassed via Virtual Scratchpad (History Synthesis).",
-						)
-					}
-				}
-			}
-		}
-
-		if (
-			(block.name === DietCodeDefaultTool.FILE_EDIT || block.name === DietCodeDefaultTool.APPLY_PATCH) &&
-			(this.stabilityMonitor.getCooldownStatus().active || this.buildAlarmActive)
-		) {
-			intent = this.verification.detectHealingIntent(block)
-			if (intent) {
-				Logger.info(`[FluidPolicyEngine] Stabilization Intent detected. Resetting activity pressure for ${intent}.`)
-				this.resetSystemPressure()
-			}
-		}
-
-		const isHealingMode = this.buildAlarmActive || !!intent || !!content.match(/#HEAL|#HEALING|#CURE|#FIX|#REPAIR|#TIDY/)
-
-		// V100: Activity Damping Scaling
-		const resonance = isHealingMode || this.refactorTurnsRemaining > 0 ? 0.5 : 1.0
-		this.stabilityMonitor.setVelocityDamping(resonance)
-
-		// 0. Rule: Cognitive Drift Sensing (Thrashing Prevention)
-		// 0. Rule: Activity Cooldown Enforcement (Substrate Immune System)
-		if (block.name === DietCodeDefaultTool.FILE_EDIT || block.name === DietCodeDefaultTool.APPLY_PATCH) {
-			const isRefactoring = scratchpadContent.includes("#REFACTOR") || scratchpadContent.includes("#INFRASTRUCTURE")
-			const cooldown = this.stabilityMonitor.getCooldownStatus(isRefactoring)
-			if (cooldown.active && !this.commitSeal) {
-				if (hasBreath) {
-					Logger.info("[FluidPolicyEngine] Activity cooldown cleared via # STABILITY BREAK")
-				} else if (hasAudit) {
-					Logger.info("[FluidPolicyEngine] Activity cooldown cleared via # STRATEGIC REVIEW")
-				}
-
-				if (!hasBreath && !hasAudit) {
-					// V32: Therapeutic Leniency
-					if (isHealingMode) {
-						result.warning =
-							(result.warning ? `${result.warning}\n` : "") +
-							`⚠️ STABILITY ASSISTANCE: The project has a high workload stage (${cooldown.reason}), but your fix intent (#HEAL/FIX) was noted. Proceeding with extra care for stability.`
-						return result
-					}
-
-					result.warning =
-						(result.warning ? `${result.warning}\n` : "") +
-						`Activity advisory: ${cooldown.reason}. Continue the scoped repair and check its result. No planning pause or extra artifact is required.`
-					return result // Total Deblocking: No longer blocking
-				}
-			}
-		}
-
-		// V24: Implicit Guideline Injection (Contextual Awareness)
-		if (block.name === DietCodeDefaultTool.FILE_READ) {
-			const targetPath = (block.params as { path?: string })?.path
-			if (targetPath) {
-				const absolutePath = path.resolve(this.cwd, targetPath)
-				const violations = this.spiderEngine.getViolations().filter((v) => v.path === absolutePath)
-				const isRefactoring = scratchpadContent.includes("#REFACTOR") || scratchpadContent.includes("#INFRASTRUCTURE")
-				const status = this.stabilityMonitor.isHighlyActive(absolutePath, isRefactoring)
-
-				if (violations.length > 0 || status.active) {
-					const alerts: string[] = []
-					if (status.active) alerts.push(`⚠️ HIGH RECENT ACTIVITY: ${status.reason}`)
-					violations.forEach((v) => {
-						alerts.push(`🚨 STABILITY WARNING: ${v.message}`)
-					})
-
-					result.warning =
-						(result.warning ? `${result.warning}\n` : "") +
-						`🏗️ PROJECT ADVISORY: \`${path.basename(targetPath)}\` has active health alerts:\n${alerts.join("\n")}`
-					return result
-				}
-			}
-		}
-
-		// 0. Rule: Activity Cooldown (Inflammation Control)
-		if (block.name === DietCodeDefaultTool.FILE_EDIT || block.name === DietCodeDefaultTool.APPLY_PATCH) {
-			const targetPath = (block.params as { path?: string })?.path
-			if (targetPath) {
-				const absolutePath = path.resolve(this.cwd, targetPath)
-				const isScratchpad = targetPath.endsWith("scratchpad.md")
-
-				// V22: Implicit Recovery - Scratchpad edits are NEVER blocked.
-				if (isScratchpad) {
-					return result
-				}
-
-				// V24: Symbol Lockdown (Audit-to-Action Binding)
-				if (hasAudit && !isScratchpad) {
-					// Silent High-Velocity: Disable focus protection to allow unrestricted editing
-					// const isCovered = this.verification.isImplicitlyAudited(targetPath, scratchpadContent, block)
-					// ...
-				}
-
-				const isRefactoring =
-					this.refactorTurnsRemaining > 0 ||
-					scratchpadContent.includes("#REFACTOR") ||
-					scratchpadContent.includes("#INFRASTRUCTURE")
-				const normPath = this.normalize(absolutePath)
-				const nodeSize = this.spiderEngine.nodes.get(normPath)?.astComplexity || 0
-				const status = this.stabilityMonitor.isHighlyActive(normPath, isRefactoring, nodeSize)
-
-				// V100: Restoration Buffer Management
-				const tokens = this.restorationTokens.get(targetPath) || 0
-				if (status.active && isHealingMode && tokens === 0) {
-					this.restorationTokens.set(targetPath, 3)
-					Logger.info(
-						`[FluidPolicyEngine] Recovery Buffer Activated: 3 restoration tokens granted for ${path.basename(targetPath)}`,
-					)
-				}
-
-				// V26: Axiom Lockdown (Structural Debt Prevention)
-				if (!isScratchpad && block.name === DietCodeDefaultTool.FILE_EDIT) {
-					const content = (block.params as { content: string }).content
-					if (content) {
-						const result = this.verification.calculateAxiomaticDrift(targetPath, content)
-						if (result.status === "NEGATIVE" && !scratchpadContent.includes("# STABILITY_AGILE")) {
-							Logger.info(
-								`[FluidPolicyEngine] Axiomatic Drift detected in ${targetPath} but bypassed in Silent Velocity mode.`,
-							)
-						}
-					}
-				}
-
-				const hasOverride = (block.params as { content?: string }).content?.includes(
-					"[STABILITY_EXCEPTION: Activity Cooldown Override]",
-				)
-				const hasBreath = (block.params as { content?: string }).content?.includes("# STABILITY_RECALIBRATE")
-
-				if (hasBreath) {
-					this.resetSystemPressure()
-					Logger.info(`[FluidPolicyEngine] Activity level reset via # STABILITY BREAK for ${targetPath}`)
-				}
-
-				const currentTokens = this.restorationTokens.get(targetPath) || 0
-				if (status.active && currentTokens > 0) {
-					this.restorationTokens.set(targetPath, currentTokens - 1)
-					Logger.info(
-						`[FluidPolicyEngine] Recovery Buffer Consumed for ${path.basename(targetPath)} (${currentTokens - 1} remain)`,
-					)
-					return {
-						success: true,
-						warning: `🩹 RESTORATION ACTIVE: Stability bypass granted. ${currentTokens - 1} recovery writes remaining for this file.`,
-					}
-				}
-
-				if (status.active && !hasOverride && !hasBreath && !this.commitSeal) {
-					result.warning =
-						(result.warning ? `${result.warning}\n` : "") +
-						`Activity advisory: \`${path.basename(targetPath)}\` is changing frequently (${status.reason}). Keep the next edit focused and validate the affected behavior. Execution can continue.`
-					return result // Total Deblocking: No longer blocking
-				}
-			}
-		}
-		// 0. Rule: Logic Axiom Guard (Substrate Maturity)
-		if (block.name === DietCodeDefaultTool.FILE_NEW || block.name === DietCodeDefaultTool.APPLY_PATCH) {
-			const { path: filePath, content } = block.params as unknown as { path: string; content?: string }
-			if (content) {
-				const axiomViolations = this.axiomEngine.validateAxioms(filePath, content, this.spiderEngine)
-				const errors = axiomViolations.filter((v) => v.severity === "ERROR")
-
-				// Axiom findings are advisory; do not perform a separate repair here.
-
-				if (errors.length > 0 && !this.commitSeal) {
-					// v10 HARDENING: Aromatic Extraction Sensing.
-					// If we detect a zero-sum move, suggest an extraction immediately.
-					const currentViolations = this.spiderEngine
-						.getViolations()
-						.map((v) => ({ axiom: "STRUCTURAL", severity: "WARN" as const, message: v.message }))
-					const nextViolations = axiomViolations
-					const compare = this.axiomEngine.compareAxiomSessions(currentViolations, nextViolations)
-					let directive = ""
-					if (compare.status === "ZERO_SUM") {
-						const suggestions = SpiderRefactorer.getRefactoringSuggestions(this.spiderEngine)
-						const extract = suggestions.find(
-							(s: RefactoringSuggestion) => s.type === "EXTRACT" && filePath.includes(s.target),
-						)
-						const synthesis = extract?.synthesis
-							? `\n\n📝 SYNTHESIZED CONTRACT:\n\`\`\`typescript\n${extract.synthesis}\n\`\`\``
-							: ""
-						directive = `\n\n🧩 AROMATIC EXTRACTION DIRECTIVE: You are trading architectural debt. STRATEGY: Extract an interface to src/domain/interfaces/ and inject it to break the coupling.${synthesis}`
-					}
-
-					return {
-						success: true,
-						warning:
-							`⚠️ LOGIC CONSISTENCY WARNING: Logic Integrity has been compromised.\n` +
-							`${errors.map((v) => `  - [AXIOM: ${v.axiom}] ${v.message}`).join("\n")}\n\n` +
-							`💡 Consider splitting this logic if it helps the requested change. This finding is advisory.${directive}`,
-					}
-				}
-			}
-		}
-
-		// 0. Rule: Simulation Guard (Pre-flight Prophet)
-		if (block.name === DietCodeDefaultTool.RENAME || block.name === DietCodeDefaultTool.MOVE) {
-			const { oldPath, newPath } = block.params as { oldPath: string; newPath: string }
-
-			// V8: Detect agile mode in turn
-			let isAgile = false
-			try {
-				const scratchpadPath = path.join(this.cwd, "scratchpad.md")
-				const scratchpadContent = await fs.readFile(scratchpadPath, "utf-8")
-				if (scratchpadContent.includes("# SOVEREIGN_AGILE")) {
-					isAgile = true
-				}
-			} catch (_e) {}
-
-			const sim = await this.simulationEngine.simulateMove(
-				oldPath,
-				newPath,
-				this.spiderEngine,
-				this.anomalies,
-				isHealingMode,
-				isAgile,
-			)
-			if (!sim.safe && !this.commitSeal && !isHealingMode) {
-				const healingHint = !isHealingMode
-					? "\n\n💡 PRO-TIP: To bypass simulation blocks during structural repairs, add `# HEALING TURN` to your `scratchpad.md`."
-					: ""
-				return {
-					success: true,
-					[isHealingMode ? "info" : "warning"]:
-						`⚠️ SIMULATION ALERT: ${sim.message}\n` +
-						`Your proposed move predicts a significant architectural regression.\n` +
-						`Violations predicted: \n${sim.violations.map((v: string) => `  - ${v}`).join("\n")}\n\n` +
-						`💡 Fix these structural issues in the source before moving, or use a Commit Seal to bypass.${healingHint}`,
-				}
-			}
-		}
-
-		// V70: Sovereign Refactor Window Detection
-		if (scratchpadContent.includes("#REFACTOR") || scratchpadContent.includes("#MIGRATION")) {
-			if (this.refactorTurnsRemaining <= 0) {
-				this.refactorTurnsRemaining = 3 // Standard 3-turn window
-				Logger.info("[FluidPolicyEngine] Sovereign Refactor Window opened (3 turns of architectural leniency).")
-			}
-		}
-
-		// 0. Update Session Awareness (V71)
-		this.spiderEngine.setSessionBuffer(this.sessionFiles)
-
-		// V80: Adaptive Activity Rate Tuning
-		// V189: Removed unused diagnostic variables (entropyDiscovery, drift)
-
-		const velocity = 1.0 + (this.karma / 1000) * 0.5
-		this.stabilityMonitor.setThresholdMultiplier(Math.max(0.5, Math.min(2.0, velocity)))
-		Logger.info(`[FluidPolicyEngine] Activity Rate calibrated to ${SafeNumber.format(velocity, 2)}x.`)
-
-		// 0. Rule: Architectural Alarm (Soft-Lock / Healing Mode)
-		const isCriticalHealth = this.lastBuildHealth < 50
-		const isRefactoringWindow = this.refactorTurnsRemaining > 0
-
-		if (
-			(this.buildAlarmActive || (isCriticalHealth && !isRefactoringWindow)) &&
-			(block.name === DietCodeDefaultTool.FILE_NEW ||
-				block.name === DietCodeDefaultTool.FILE_EDIT ||
-				block.name === DietCodeDefaultTool.APPLY_PATCH ||
-				block.name === DietCodeDefaultTool.BASH)
-		) {
-			const intent = this.verification.detectHealingIntent(block)
-
-			// Detect #HEAL or #FIX in the scratchpad (via isHealingMode logic)
-			if (!intent && !isHealingMode) {
-				const actualViolations = this.spiderEngine
-					.getViolations()
-					.filter((v) => this.alarmViolations.includes(v.message))
-					.slice(0, 5)
-				const recipes = actualViolations.map((v) => this.refactorHealer.generateHealingRecipe(v))
-
-				result.warning =
-					(result.warning ? `${result.warning}\n` : "") +
-					`⚠️ [ADVISORY] BUILD ALARM ACTIVE (Health: ${this.lastBuildHealth}/100)\n` +
-					`Structural changes are discouraged until the following violations are healed:\n\n` +
-					`${actualViolations.map((v) => `  - ${v.message}`).join("\n")}\n\n` +
-					`🛠️ HEALING RECIPES:\n${recipes.join("\n")}\n\n` +
-					`💡 Proceeding with changes, but focus on these repairs is highly recommended.`
-
-				return result // Total Deblocking: No longer blocking
-			}
 		}
 
 		return result
@@ -1080,7 +710,10 @@ export class FluidPolicyEngine {
 	 * Inspects and enriches tool results with proactive layer context.
 	 * V300: Shadow Documentation & Strategic Guidance.
 	 */
-	public async observeToolOutcome(toolName: string, output: any): Promise<{ hint?: string }> {
+	public async observeToolOutcome(
+		toolName: string,
+		output: { success?: boolean; content?: unknown } | null | undefined,
+	): Promise<{ hint?: string }> {
 		if (this.mode === "act" && (toolName === DietCodeDefaultTool.FILE_EDIT || toolName === DietCodeDefaultTool.FILE_NEW)) {
 			// If tool was successful, suggest documentation updates
 			if (output?.success || output?.content) {
@@ -1095,9 +728,9 @@ export class FluidPolicyEngine {
 	public async onRead(
 		filePath: string,
 		content: string,
-		totalReadCount = 0,
-		perFileReadCount = 0,
-		globalFileReadCount = 0,
+		_totalReadCount = 0,
+		_perFileReadCount = 0,
+		_globalFileReadCount = 0,
 	): Promise<string> {
 		const absolutePath = path.resolve(this.cwd, filePath)
 
@@ -1105,166 +738,7 @@ export class FluidPolicyEngine {
 		this.sessionFiles.set(absolutePath, content)
 		this.spiderEngine.updateNode(absolutePath, content)
 		await this.stalenessTracker.recordRead(absolutePath, content)
-		this.stabilityMonitor.recordRead(absolutePath, content)
-		if (!this.stateManager?.getGlobalSettingsKey("auditActModeAdvisoryEnabled")) return content
-
-		// V189: Neural Forensic Extraction
-		const symbolRegex = /(?:class|function|interface)\s+([a-zA-Z0-9_$]+)/g
-		let match = symbolRegex.exec(content)
-		while (match !== null) {
-			this.stabilityMonitor.recordSymbolObservation(absolutePath, match[1])
-			match = symbolRegex.exec(content)
-		}
-
-		const entropy = this.spiderEngine.computeEntropy()
-		const latestSnapshot = await this.spiderEngine.getLatestSnapshot()
-		const delta = latestSnapshot ? this.spiderEngine.compareWith(latestSnapshot) : 0
-
-		if (this.streamId) {
-			await orchestrator.storeMemory(this.streamId, "last_entropy_score", entropy.score.toString())
-			if (delta > 0.01) {
-				await orchestrator.storeMemory(this.streamId, "entropy_decay", delta.toString())
-			}
-		}
-
-		const layerContext = this.getFileLayerContext(absolutePath)
-		const validation = this.tspPlugin.validateSource(absolutePath, content, this.virtualResolver)
-		const layer = this.getCachedLayer(absolutePath)
-		const refactorSuggestions = SpiderRefactorer.getRefactoringSuggestions(this.spiderEngine)
-
-		let header = `${layerContext}\n`
-
-		if (refactorSuggestions.length > 0) {
-			header += `🕷️ ARCHITECTURAL REFACTORING OPPORTUNITIES:\n${refactorSuggestions.map((s: RefactoringSuggestion) => `  - [${s.type}] ${s.target}: ${s.reason} (${s.benefit})`).join("\n")}\n`
-		}
-
-		if (!validation.success) {
-			header += `⚠️ Existing issues in this file:\n${validation.errors.map((v) => `  - ${v}`).join("\n")}\n`
-
-			// V29: Pathogen Nudging (Remediation Injection)
-			const pathogens = this.spiderEngine.getViolations().filter((v) => v.path === absolutePath && v.remediation)
-			if (pathogens.length > 0) {
-				header += `💡 ARCHITECTURAL REMEDIATION:\n${pathogens.map((p) => `  - [${p.id}] ${p.remediation}`).join("\n")}\n`
-			}
-			header += `Keep these in mind — avoid propagating these patterns.\n`
-		}
-
-		// Proactive Dependency Detection (AST-based)
-		const sourceFile = require("typescript").createSourceFile(
-			absolutePath,
-			content,
-			require("typescript").ScriptTarget.Latest,
-			true,
-		)
-		const crossLayerViolations = this.tspPlugin.findCrossLayerViolations(sourceFile, absolutePath)
-		if (crossLayerViolations.length > 0) {
-			header += `⚠️ ARCHITECTURAL SMELL DETECTED (Cross-Layer Dependency):\n${crossLayerViolations.map((v) => `  - ${v}`).join("\n")}\n`
-		}
-
-		// Proactive Context Freshness
-		const stalenessWarning = this.stalenessTracker.getStaleWarning(absolutePath)
-		if (stalenessWarning) {
-			header += `${stalenessWarning}\n`
-		}
-
-		// V186: Total Deblocking - Karma-based Leniency (V300)
-		const buildHealth = this.computeBuildHealth(this.spiderEngine.getViolations().map((v) => v.message))
-		const karmaBonus = this.karma > 1500 ? " (Elite Karma Active)" : ""
-
-		if (buildHealth < 70) {
-			header += `\n🛡️ [STABILITY ADVISORY]: Structural Integrity is ${buildHealth}/100${karmaBonus}. Prioritize healing circularities and layer violations.\n`
-		}
-
-		// Axiomatic Logic Report
-		const axioms = this.axiomEngine.validateAxioms(absolutePath, content, this.spiderEngine)
-		if (axioms.length > 0) {
-			header += `\n🧠 LOGIC AXIOM ANALYSIS:\n${axioms.map((v) => `  - [${v.axiom}] ${v.message}`).join("\n")}\n`
-		}
-
-		// V300: Drift Prophecy in PLAN mode
-		if (this.mode === "plan") {
-			const enforcer = new (require("./PlanModeEnforcer").PlanModeEnforcer)(this.cwd)
-			const status = await enforcer.getStrategicReviewStatus(this.stabilityMonitor)
-			if (status.prophecy) {
-				header += `\n${status.prophecy}\n`
-			}
-		}
-
-		// Workload Activity Injection
-		const doubt = this.stabilityMonitor.getDoubtSignal(path.relative(this.cwd, absolutePath))
-		const cooldown = this.stabilityMonitor.getCooldownStatus()
-
-		if (doubt > 1.0) {
-			header += `\n⚠️ HIGH WORKLOAD DETECTED (Ratio: ${SafeNumber.format(doubt, 1)}, Cooldown: ${cooldown.active})\n`
-		}
-
-		if (doubt > 5 || cooldown.active) {
-			header +=
-				"\nInvestigation advisory: use the findings so far to implement the next scoped change. Continue without creating extra review documents.\n"
-		}
-
-		// V33: Refactor awareness for diagnostic injection
-		const isRefactoringIntent =
-			this.refactorTurnsRemaining > 0 || this.spiderEngine.getViolations().length > 0 || this.buildAlarmActive
-		const normPath = this.normalize(absolutePath)
-		const nodeSize = this.spiderEngine.nodes.get(normPath)?.astComplexity || 0
-		const drift = this.stabilityMonitor.getTaskDrift(this.mode === "plan", isRefactoringIntent)
-		const activity = this.stabilityMonitor.isHighlyActive(normPath, isRefactoringIntent, nodeSize)
-
-		if (activity.active) {
-			header += `\n🔥 HIGH ACTIVITY LEVEL DETECTED:\n${activity.reason}\nThis file is changing very rapidly. Consider a quick Strategic Review to stay aligned.\n`
-		}
-
-		if (drift.warning) {
-			header += `\n${drift.warning}\n`
-		}
-
-		if (drift.drift > 0.15) {
-			header += `\n🕸️ [STRUCTURAL DRIFT]: Graph is ${SafeNumber.formatPercent(drift.drift, 1)}% cross-layer (Target: < 15%).\n`
-		}
-
-		// V340: Sovereign Drafting & Instruction Pruning
-		const isAgileLayer = ["ui", "infrastructure", "api", "utils", "shared", "plumbing"].includes(layer)
-		const isCoreLayer = layer === "domain" || layer === "core"
-		const isSaturated = totalReadCount >= 5
-
-		if (this.mode === "plan") {
-			const enforcer = new (require("./PlanModeEnforcer").PlanModeEnforcer)(this.cwd)
-			const status = await enforcer.getStrategicReviewStatus(this.stabilityMonitor)
-			if (status.prophecy) header += `\n${status.prophecy}\n`
-
-			if (isSaturated) {
-				header += `\n⚡ [CONTEXT SATURATED]: Sufficient info gathered. Call \`plan_mode_respond\` NOW.\n`
-				header += `📍 [SOVEREIGN DRAFTING]: Focus purely on logic. Secondary audits are DEFERRED to ACT mode.\n`
-			} else {
-				const node = this.spiderEngine.nodes.get(this.normalize(absolutePath))
-				if (node && node.dependents.length > 5 && isCoreLayer) {
-					header += `\n⚠️ [BLAST RADIUS]: Critical module (Dependents: ${node.dependents.length}). Verify impacts before planning.\n`
-				}
-				if (isCoreLayer) {
-					header += `\n🛡️ [CORE RIGOR]: INVESTIGATION BUDGET: 15 files. Draft your ripple analysis in \`scratchpad.md\`.\n`
-				}
-				if (isAgileLayer && !isCoreLayer) {
-					const rapidTemplate = IntegrityProtocol.generateRapidAuditTemplate("Surgical Update")
-					header += `\n⚡ [RAPID-FIRE]: AGILE layer. Use minimalist template to move faster:\n\n\`\`\`markdown\n${rapidTemplate}\`\`\`\n`
-				}
-			}
-
-			if (perFileReadCount >= 3) {
-				header += `\n⚠️ [RECURSIVE STALLING]: Stop reading and start planning.\n`
-			} else if (totalReadCount >= (isCoreLayer ? 15 : 7)) {
-				header += `\n⚠️ [SCANNING LIMIT]: Call \`plan_mode_respond\`.\n`
-			}
-		} else if (this.mode === "act") {
-			header += `🛠️ Layer: ${layer.toUpperCase()} | Karma: ${this.karma}\n`
-
-			// Context-Aware Tool Guidance
-			if (this.commitSeal) {
-				header += `🔓 COMMIT SEAL ACTIVE: '${this.commitSeal}'\n  Reason: ${this.sealReason}\n  Continue with care — architectural debt is being recorded.\n\n`
-			}
-		}
-
-		return `${header}\n${content}`
+		return content
 	}
 
 	/**
@@ -1440,8 +914,6 @@ export class FluidPolicyEngine {
 				this.stabilityMonitor.importState(payload.stability || payload.metabolic) // V215: Stability Migration
 				this.telemetrics.importState(payload.telemetrics)
 				this.karma = payload.karma || 0
-
-				this.stateRestored = true
 				Logger.info(`[FluidPolicyEngine] Stability Substrate V189 restored and verified for stream ${this.streamId}.`)
 			} else {
 				// Fallback to legacy or rebuild
@@ -1458,54 +930,6 @@ export class FluidPolicyEngine {
 		return getLayer(filePath)
 	}
 
-	private async ensureScratchpadIntegrity(taskName = "Architectural Recovery"): Promise<{ content: string; created: boolean }> {
-		const scratchpadPath = path.join(this.cwd, "scratchpad.md")
-		try {
-			const content = await fs.readFile(scratchpadPath, "utf-8")
-			if (content.trim().length > 0) {
-				return { content, created: false }
-			}
-		} catch (_e) {}
-
-		const currentViolations = this.spiderEngine.getViolations()
-		const diagnostics: StabilityDiagnostics = {
-			buildHealth: this.computeBuildHealth(currentViolations.map((v) => v.message)),
-			workloadLevel: "Restoring...",
-			buildErrors: currentViolations.filter((v) => v.severity === "ERROR").map((v) => `[${v.id}] ${v.path}: ${v.message}`),
-			lintWarnings: [],
-			hotspots: [],
-		}
-
-		const template = IntegrityProtocol.generateAuditTemplate(taskName, diagnostics)
-		await fs.writeFile(scratchpadPath, template, "utf-8")
-		return { content: template, created: true }
-	}
-	/**
-	 * V188: Detects if the physical substrate has been modified externally since the last edit.
-	 */
-	private async detectConcurrentDrift(block: ToolUse): Promise<string | undefined> {
-		if (block.name !== DietCodeDefaultTool.FILE_EDIT && block.name !== DietCodeDefaultTool.APPLY_PATCH) return undefined
-
-		const params = block.params as { path?: string; target_file?: string }
-		const filePath = params?.path || params?.target_file
-		if (!filePath) return undefined
-
-		const absPath = path.resolve(this.cwd, filePath)
-		try {
-			const metrics = this.stabilityMonitor.getMetrics(absPath)
-			if (metrics?.lastObservedHash) {
-				const currentContent = await fs.readFile(absPath, "utf-8")
-				const currentHash = crypto.createHash("md5").update(currentContent).digest("hex")
-
-				if (currentHash !== metrics.lastObservedHash) {
-					return `⚠️ CONCURRENT DRIFT DETECTED: ${path.basename(filePath)} has been modified externally. Syncing substrate...`
-				}
-			}
-		} catch (_e) {
-			// File might not exist yet or be inaccessible
-		}
-		return undefined
-	}
 	/**
 	 * V202: Manual Trigger for Sovereign Sweep.
 	 */
@@ -1544,13 +968,7 @@ export class FluidPolicyEngine {
 	}
 
 	/**
-	 * V202-B: Generates a passive integrity advisor hint.
-	 * Removed raw XML to prevent agentic spiraling.
-	 */
-	private generateIntegrityAdvisor(files: string[]): string {
-		return `💡 [INTEGRITY_ADVISORY]: Auto-healing available. Run 'sovereign_integrity_sweep' with files: ${JSON.stringify(files)} to resolve.`
-	}
-	/**
+
 	 * V225: Sovereign Forensic Gate (PASSIVE).
 	 * Verifies if the Knowledge Ledger has been updated. Returns an advisory instead of blocking.
 	 */

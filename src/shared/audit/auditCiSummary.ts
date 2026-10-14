@@ -134,8 +134,6 @@ export function buildGatePolicySnapshot(settings: {
 	auditCompletionGateCriticalOnly: boolean
 	auditAdvisoryEscalationEnabled: boolean
 	auditPlanRegressionGateEnabled: boolean
-	auditIntentThresholdAdjustmentsEnabled: boolean
-	auditIntentThresholdOverrides: string
 }): Record<string, unknown> {
 	return {
 		schemaVersion: 1,
@@ -145,7 +143,5 @@ export function buildGatePolicySnapshot(settings: {
 		criticalOnly: settings.auditCompletionGateCriticalOnly,
 		advisoryEscalationEnabled: settings.auditAdvisoryEscalationEnabled,
 		planRegressionGateEnabled: settings.auditPlanRegressionGateEnabled,
-		intentThresholdAdjustmentsEnabled: settings.auditIntentThresholdAdjustmentsEnabled,
-		intentThresholdOverrides: settings.auditIntentThresholdOverrides,
 	}
 }

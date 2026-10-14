@@ -1,4 +1,6 @@
 import type { DietCodeMessage, DietCodeSayTool } from "@shared/ExtensionMessage"
+export type { DietCodeMessage }
+
 import type { Mode } from "@shared/storage/types"
 
 /**
@@ -94,14 +96,6 @@ export const BUTTON_CONFIGS: Record<string, ButtonConfig> = {
 		secondaryAction: "reject",
 	},
 	use_mcp_server: {
-		sendingDisabled: false,
-		enableButtons: true,
-		primaryText: "Go ahead",
-		secondaryText: "Not now",
-		primaryAction: "approve",
-		secondaryAction: "reject",
-	},
-	use_subagents: {
 		sendingDisabled: false,
 		enableButtons: true,
 		primaryText: "Go ahead",
@@ -285,8 +279,6 @@ export function getButtonConfig(message: DietCodeMessage | undefined, _mode: Mod
 				return BUTTON_CONFIGS.browser_action_launch
 			case "use_mcp_server":
 				return BUTTON_CONFIGS.use_mcp_server
-			case "use_subagents":
-				return BUTTON_CONFIGS.use_subagents
 			case "plan_mode_respond":
 				return BUTTON_CONFIGS.plan_mode_respond
 

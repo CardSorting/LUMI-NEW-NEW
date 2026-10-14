@@ -177,20 +177,11 @@ export class ToolExecutor {
 			auditCompletionGateEnabled: this.stateManager.getGlobalSettingsKey("auditCompletionGateEnabled"),
 			auditCompletionGateThreshold: this.stateManager.getGlobalSettingsKey("auditCompletionGateThreshold"),
 			auditCompletionGateCriticalOnly: this.stateManager.getGlobalSettingsKey("auditCompletionGateCriticalOnly"),
-			auditActModeAdvisoryEnabled: this.stateManager.getGlobalSettingsKey("auditActModeAdvisoryEnabled"),
 			auditAdvisoryEscalationEnabled: this.stateManager.getGlobalSettingsKey("auditAdvisoryEscalationEnabled"),
 			auditPlanRegressionGateEnabled: this.stateManager.getGlobalSettingsKey("auditPlanRegressionGateEnabled"),
 			auditToolOutputAdvisoryEnabled: this.stateManager.getGlobalSettingsKey("auditToolOutputAdvisoryEnabled"),
-			auditFileWriteAdvisoryEnabled: this.stateManager.getGlobalSettingsKey("auditFileWriteAdvisoryEnabled"),
-			auditIntentThresholdAdjustmentsEnabled: this.stateManager.getGlobalSettingsKey(
-				"auditIntentThresholdAdjustmentsEnabled",
-			),
-			auditIntentThresholdOverrides: this.stateManager.getGlobalSettingsKey("auditIntentThresholdOverrides"),
-			auditSarifHookExportEnabled: this.stateManager.getGlobalSettingsKey("auditSarifHookExportEnabled"),
-			auditWorkspaceArtifactsEnabled: this.stateManager.getGlobalSettingsKey("auditWorkspaceArtifactsEnabled"),
 			vscodeTerminalExecutionMode: this.vscodeTerminalExecutionMode,
 			enableParallelToolCalling: this.isParallelToolCallingEnabled(),
-			isSubagentExecution: false,
 			cwd: this.cwd,
 			workspaceManager: this.workspaceManager,
 			isMultiRootEnabled: this.isMultiRootEnabled,
@@ -276,7 +267,7 @@ export class ToolExecutor {
 		}
 		const recovery = this.taskState.recovery
 		if (block.partial) {
-			if (recovery?.get("tool", callId) || recovery?.get("batch", callId)) return
+			if (recovery?.get("tool", callId)) return
 			await this.execute(block)
 			return
 		}
@@ -846,7 +837,7 @@ export class ToolExecutor {
 						const { NativeMutationManager } = require("@/services/mutation/NativeMutationManager")
 						const mutationManager = NativeMutationManager.getInstance()
 						await mutationManager.autoTrackFileRead(this.cwd, block.params.path, config.taskId || config.ulid)
-					} catch (err) {
+					} catch {
 						// Silent fallback
 					}
 				}
@@ -862,17 +853,7 @@ export class ToolExecutor {
 				? await this.guard.guardPostExecution(block, toolResult, prevHash)
 				: { success: false, violations: [], warning: undefined }
 
-			// Layer confirmation + architectural feedback for write operations
-			if (
-				executionSuccess &&
-				this.stateManager.getGlobalSettingsKey("auditActModeAdvisoryEnabled") &&
-				(block.name === DietCodeDefaultTool.FILE_NEW || block.name === DietCodeDefaultTool.FILE_EDIT) &&
-				block.params.path
-			) {
-				const telemetry = this.guard.getStabilityTelemetry(block.params.path)
-				const summary = (formatResponse as any).postExecutionSummary(telemetry, postExecResult.violations)
-				this.say("text", summary).catch(() => {})
-			} else if (postExecResult.warning) {
+			if (postExecResult.warning) {
 				this.say("text", postExecResult.warning).catch(() => {})
 			}
 		} catch (error) {

@@ -40,8 +40,6 @@ describe("auditWorkspaceArtifacts", () => {
 				auditCompletionGateCriticalOnly: false,
 				auditAdvisoryEscalationEnabled: true,
 				auditPlanRegressionGateEnabled: true,
-				auditIntentThresholdAdjustmentsEnabled: true,
-				auditIntentThresholdOverrides: "{}",
 			},
 		})
 

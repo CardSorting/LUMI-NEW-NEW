@@ -1,17 +1,9 @@
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
-import { shouldEmitAdvisoryAuditChatEvent } from "@shared/audit/auditAdvisoryDedup"
-import { applyWorkspaceAuditPolicy } from "@shared/audit/auditGatePolicyLoader"
-import { buildActModeAuditAdvisory, buildAdvisoryAuditEventSummary, runAdvisoryAudit } from "@shared/audit/completionAudit"
-import { Logger } from "@shared/services/Logger"
 import { DietCodeDefaultTool } from "@shared/tools"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { IPartialBlockHandler, IToolHandler, ToolResponse } from "../types/ToolContracts"
 import type { StronglyTypedUIHelpers } from "../types/UIHelpers"
-import { getInitialTaskPreview } from "../utils/taskPreview"
-
-/** Run advisory audit every N act_mode_respond calls to limit overhead. */
-const ACT_MODE_AUDIT_INTERVAL = 3
 
 export class ActModeRespondHandler implements IToolHandler, IPartialBlockHandler {
 	readonly name = DietCodeDefaultTool.ACT_MODE
@@ -73,53 +65,13 @@ export class ActModeRespondHandler implements IToolHandler, IPartialBlockHandler
 			await config.callbacks.updateFCListFromToolResponse(taskProgress)
 		}
 
-		let auditAdvisory = ""
-		if (config.auditActModeAdvisoryEnabled) {
-			config.taskState.actModeAuditCounter = (config.taskState.actModeAuditCounter ?? 0) + 1
-			const shouldAudit =
-				config.taskState.actModeAuditCounter % ACT_MODE_AUDIT_INTERVAL === 0 ||
-				/\b(TODO|FIXME|not implemented|placeholder)\b/i.test(response)
-
-			if (shouldAudit) {
-				try {
-					const taskPreview = getInitialTaskPreview(config) || ""
-					let advisoryMetadata = await runAdvisoryAudit(config.taskId, taskPreview, response, taskPreview)
-					advisoryMetadata = await applyWorkspaceAuditPolicy(config.cwd, advisoryMetadata, config)
-					const previousAdvisory = config.taskState.lastAdvisoryAudit
-					config.taskState.lastAdvisoryAudit = advisoryMetadata
-					const shouldSurfaceAdvisory = shouldEmitAdvisoryAuditChatEvent(advisoryMetadata, previousAdvisory)
-					auditAdvisory = shouldSurfaceAdvisory ? buildActModeAuditAdvisory(advisoryMetadata) : ""
-
-					if (shouldSurfaceAdvisory) {
-						try {
-							await config.callbacks.say(
-								"info",
-								buildAdvisoryAuditEventSummary(advisoryMetadata, previousAdvisory),
-								undefined,
-								undefined,
-								false,
-								advisoryMetadata,
-							)
-						} catch (error) {
-							Logger.warn("[ActModeRespondHandler] Failed to emit advisory audit event:", error)
-						}
-					}
-				} catch (error) {
-					Logger.warn("[ActModeRespondHandler] Advisory audit failed:", error)
-				}
-			}
-		}
-
-		// Note: lastToolName is tracked centrally by ToolExecutor after tool execution
-
 		// Return success immediately to allow LLM to continue execution
 		// The key difference from plan_mode_respond: no blocking for user input
 		// NOTE: We explicitly tell the model to use a different tool next to prevent narration loops
 		return formatResponse.toolResult(
 			`[Message displayed. Now proceed with your next tool call - ` +
 				`it must be a different tool (read_file, replace_in_file, execute_command, etc.), ` +
-				`not act_mode_respond again.]` +
-				auditAdvisory,
+				`not act_mode_respond again.]`,
 		)
 	}
 }

@@ -3,9 +3,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { z } from "zod"
 import type { CommandExecutionSnapshot } from "@/integrations/terminal/types"
-import { COMMAND_EXECUTION_STATUSES, type DietCodeSaySubagentStatus } from "@/shared/ExtensionMessage"
+import { COMMAND_EXECUTION_STATUSES } from "@/shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
-import { parseSubagentStatusPayload } from "@/shared/subagents"
 
 const VERSION = 1
 const MAX_RECORDS = 1024
@@ -96,15 +95,6 @@ const recordSchema = z.discriminatedUnion("kind", [
 			key: z.string().regex(/^[a-f0-9]{64}$/),
 			snapshot: actionSchema,
 			finished: z.boolean(),
-		})
-		.strict(),
-	z
-		.object({
-			kind: z.literal("batch"),
-			fingerprint: id,
-			result: text.optional(),
-			status: text.optional(),
-			messageTs: timestamp.optional(),
 		})
 		.strict(),
 	z.object({ kind: z.literal("tool"), fingerprint: id, result: text.optional() }).strict(),
@@ -263,11 +253,6 @@ export class ExecutionRecoveryStore {
 				["completed", "failed", "not_started", "cancelled", "unconfirmed"].includes(record.snapshot.status)
 		)
 			throw new Error("Inconsistent action lifecycle")
-		if (record.kind === "batch" && record.status !== undefined) {
-			const payload = parseSubagentStatusPayload(record.status)
-			if (!payload || payload.batchId !== id || payload.items.length !== JSON.parse(record.status).items.length)
-				throw new Error("Invalid helper correlation")
-		}
 	}
 	private matches(identity: RecoveryIdentity): boolean {
 		return (
@@ -326,20 +311,7 @@ export function restoredCommand(record: CommandRecoveryRecord, observedAt: numbe
 	}
 }
 
-export function recoveredBatch(record: Extract<RecoveryRecord, { kind: "batch" }>): DietCodeSaySubagentStatus | undefined {
-	const payload = parseSubagentStatusPayload(record.status)
-	if (!payload) return undefined
-	for (const item of payload.items)
-		if (item.status === "pending" || item.status === "running") {
-			item.status = "interrupted"
-			item.activity = undefined
-			item.error =
-				"The extension host ended. This helper was not resumed. Reconcile its saved work and command IDs in the parent."
-		}
-	return parseSubagentStatusPayload(JSON.stringify(payload))
-}
-
-export function recoveryResult(record: Extract<RecoveryRecord, { kind: "batch" | "tool" }>): string {
+export function recoveryResult(record: Extract<RecoveryRecord, { kind: "tool" }>): string {
 	return (
 		record.result ??
 		"No settled result is retained for this execution. No work was replayed. Inspect get_execution_state and saved partial results before issuing a new assignment."

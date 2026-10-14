@@ -31,7 +31,6 @@ export const DEFAULT_AUDIT_AUTO_SCROLL_POLICY: AuditAutoScrollPolicy = {
 
 /** Maps extension audit settings to auto-scroll policy — avoids chat noise when advisories disabled. */
 export function buildAutoScrollPolicyFromSettings(settings: {
-	auditActModeAdvisoryEnabled?: boolean
 	auditAdvisoryEscalationEnabled?: boolean
 	auditAdvisoryAutoScrollMode?: AdvisoryAutoScrollMode
 }): AuditAutoScrollPolicy {
@@ -41,7 +40,7 @@ export function buildAutoScrollPolicyFromSettings(settings: {
 			advisoryMode: settings.auditAdvisoryAutoScrollMode,
 		}
 	}
-	if (settings.auditActModeAdvisoryEnabled === false || settings.auditAdvisoryEscalationEnabled === false) {
+	if (settings.auditAdvisoryEscalationEnabled === false) {
 		return { scrollGateBlocks: true, advisoryMode: "never" }
 	}
 	return DEFAULT_AUDIT_AUTO_SCROLL_POLICY

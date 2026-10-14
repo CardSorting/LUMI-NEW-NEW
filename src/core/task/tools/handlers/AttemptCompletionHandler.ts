@@ -9,18 +9,13 @@ import { normalizeShellCommand } from "@integrations/terminal/normalizeCommand"
 import { telemetryService } from "@services/telemetry"
 import { findLast, findLastIndex } from "@shared/array"
 import { buildGateBlockEventSummary, enrichAuditMetadataWithGateDecision } from "@shared/audit/auditGateCatalog"
-import {
-	applyWorkspaceAuditPolicy,
-	type GatePolicyProvenance,
-	resolveCompletionGateOptions,
-} from "@shared/audit/auditGatePolicyLoader"
+import { applyWorkspaceAuditPolicy, resolveCompletionGateOptions } from "@shared/audit/auditGatePolicyLoader"
 import { buildPreCompletionChecklist } from "@shared/audit/auditGateReport"
 import { getLatestPlanAuditFromMessages } from "@shared/audit/auditMessages"
 import {
 	buildPreCompletionChecklistMarkdown,
 	buildPreCompletionChecklistSummary,
 } from "@shared/audit/auditPreCompletionChecklist"
-import { enrichAuditMetadataWithArtifactPaths, persistAuditWorkspaceArtifacts } from "@shared/audit/auditWorkspaceArtifacts"
 import { buildAuditHookMetadata, buildDoubleCheckAuditSection, runAdvisoryAudit } from "@shared/audit/completionAudit"
 import { detectReplanIntent } from "@shared/detectReplanIntent"
 import { COMPLETION_RESULT_CHANGES_FLAG, type DietCodeMessage, type TaskAuditMetadata } from "@shared/ExtensionMessage"
@@ -73,36 +68,6 @@ async function buildAuditGateOptions(
 
 async function applyWorkspaceAuditPolicyForTask(config: TaskConfig, metadata: TaskAuditMetadata): Promise<TaskAuditMetadata> {
 	return applyWorkspaceAuditPolicy(config.cwd, metadata, config)
-}
-
-async function persistAuditArtifactsIfEnabled(
-	config: TaskConfig,
-	metadata: TaskAuditMetadata,
-	event: "completion" | "gate_block",
-	gateOptions?: Awaited<ReturnType<typeof buildAuditGateOptions>>,
-	policyProvenance?: GatePolicyProvenance,
-): Promise<TaskAuditMetadata> {
-	if (!config.auditWorkspaceArtifactsEnabled) {
-		return metadata
-	}
-	try {
-		const result = await persistAuditWorkspaceArtifacts({
-			cwd: config.cwd,
-			taskId: config.taskId,
-			metadata,
-			event,
-			includeSarif: config.auditSarifHookExportEnabled,
-			gateOptions: gateOptions ?? (await buildAuditGateOptions(config)),
-			gatePolicySettings: config,
-			policyProvenance,
-		})
-		if (result) {
-			return enrichAuditMetadataWithArtifactPaths(metadata, result)
-		}
-	} catch (error) {
-		Logger.warn("[AttemptCompletionHandler] Failed to persist audit workspace artifacts:", error)
-	}
-	return metadata
 }
 
 export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHandler {
@@ -238,20 +203,6 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			)
 		}
 
-		// V225: Sovereign Forensic Gate (Passive)
-		// We perform a non-blocking check for Knowledge Ledger compliance.
-		// If non-compliant, we provide a passive advisory to the agent.
-		if (config.auditActModeAdvisoryEnabled && config.universalGuard) {
-			try {
-				const compliance = await config.universalGuard.checkForensicCompliance()
-				if (!compliance.compliant && compliance.advisory) {
-					await config.callbacks.say("info", compliance.advisory)
-				}
-			} catch (error) {
-				Logger.warn("[AttemptCompletionHandler] Passive forensic compliance check skipped:", error)
-			}
-		}
-
 		// Run task audit to capture hardening & safety metrics (before emitting completion_result)
 		let auditMetadata: TaskAuditMetadata | undefined
 		let planBaseline: TaskAuditMetadata | undefined
@@ -263,17 +214,10 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 		})
 
 		if (auditGateResult.status === "blocked") {
-			let enrichedAudit = enrichAuditMetadataWithGateDecision(
+			const enrichedAudit = enrichAuditMetadataWithGateDecision(
 				auditGateResult.auditMetadata,
 				auditGateResult.gateDecision,
 				auditGateResult.blockCount,
-			)
-			enrichedAudit = await persistAuditArtifactsIfEnabled(
-				config,
-				enrichedAudit,
-				"gate_block",
-				auditGateResult.gateOptions,
-				auditGateResult.policyProvenance,
 			)
 			config.taskState.lastCompletionAudit = enrichedAudit
 			planBaseline = auditGateResult.auditMetadata
@@ -331,13 +275,6 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 				workspacePolicyApplied: auditGateResult.policyProvenance.workspacePolicyApplied,
 			})
 
-			auditMetadata = await persistAuditArtifactsIfEnabled(
-				config,
-				auditMetadata,
-				"completion",
-				auditGateResult.gateOptions,
-				auditGateResult.policyProvenance,
-			)
 			config.taskState.lastCompletionAudit = auditMetadata
 		}
 
@@ -586,7 +523,6 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 							command: block.params.command || "",
 							...(config.taskState.lastCompletionAudit
 								? buildAuditHookMetadata(config.taskState.lastCompletionAudit, {
-										includeSarif: config.auditSarifHookExportEnabled,
 										gateOptions,
 										taskUri: `task://${config.taskId}`,
 									})

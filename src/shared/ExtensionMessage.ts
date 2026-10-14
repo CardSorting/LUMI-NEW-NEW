@@ -85,7 +85,6 @@ export interface ExtensionState {
 	strictPlanModeEnabled?: boolean
 	yoloModeToggled?: boolean
 	useAutoCondense?: boolean
-	subagentsEnabled?: boolean
 	dietcodeWebToolsEnabled?: DietCodeFeatureSetting
 	worktreesEnabled?: DietCodeFeatureSetting
 	focusChainSettings: FocusChainSettings
@@ -112,16 +111,10 @@ export interface ExtensionState {
 	auditCompletionGateEnabled?: boolean
 	auditCompletionGateThreshold?: number
 	auditCompletionGateCriticalOnly?: boolean
-	auditActModeAdvisoryEnabled?: boolean
 	auditAdvisoryEscalationEnabled?: boolean
 	auditAdvisoryAutoScrollMode?: "never" | "critical" | "all"
 	auditPlanRegressionGateEnabled?: boolean
 	auditToolOutputAdvisoryEnabled?: boolean
-	auditFileWriteAdvisoryEnabled?: boolean
-	auditIntentThresholdAdjustmentsEnabled?: boolean
-	auditIntentThresholdOverrides?: string
-	auditSarifHookExportEnabled?: boolean
-	auditWorkspaceArtifactsEnabled?: boolean
 	banners?: BannerCardData[]
 	welcomeBanners?: BannerCardData[]
 	openAiCodexIsAuthenticated?: boolean
@@ -205,7 +198,6 @@ export type DietCodeAsk =
 	| "condense"
 	| "summarize_task"
 	| "report_bug"
-	| "use_subagents"
 
 export type DietCodeSay =
 	| "task"
@@ -242,9 +234,6 @@ export type DietCodeSay =
 	| "task_progress"
 	| "hook_status"
 	| "hook_output_stream"
-	| "subagent"
-	| "use_subagents"
-	| "subagent_usage"
 	| "plan_summary"
 	| "conditional_rules_applied"
 
@@ -336,107 +325,6 @@ export interface DietCodeSayGenerateExplanation {
 	error?: string
 }
 
-export type SubagentExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted"
-
-export interface SubagentActivity {
-	phase: "preparing" | "waiting" | "responding" | "tool" | "retrying" | "recovering"
-	/** User-facing description of the current operation, without tool payloads. */
-	detail?: string
-	startedAt?: number
-	/** Deadline for this specific wait, not an estimate of total completion. */
-	deadlineAt?: number
-	/** Present only during an automatic retry. Includes the initial request. */
-	attempt?: number
-	maxAttempts?: number
-	retryAt?: number
-}
-
-export interface SubagentToolActivity {
-	id: string
-	label: string
-	/** A returned tool may still have a background command running. */
-	status: "running" | "returned" | "failed"
-	startedAt?: number
-	finishedAt?: number
-	output?: string
-}
-
-export interface SubagentActivityEvent {
-	id: string
-	at: number
-	kind: "phase" | "message" | "tool" | "warning"
-	label: string
-}
-
-export interface SubagentCommandActivity {
-	id: string
-	command: string
-	status: CommandExecutionState["status"]
-	output: string
-	exitCode?: number
-}
-
-export interface SubagentStatusItem {
-	id: string
-	executionId?: string
-	pendingCommandIds?: string[]
-	name: string
-	index: number
-	prompt: string
-	status: SubagentExecutionStatus
-	toolCalls: number
-	inputTokens: number
-	outputTokens: number
-	totalCost: number
-	contextTokens: number
-	contextWindow: number
-	contextUsagePercentage: number
-	latestToolCall?: string
-	activity?: SubagentActivity
-	latestMessage?: string
-	recentTools?: SubagentToolActivity[]
-	startedAt?: number
-	queuedAt?: number
-	queuePosition?: number
-	/** Last actual helper activity; heartbeats never advance this. */
-	lastActivityAt?: number
-	/** Extension runtime check-in, separate from provider/tool progress. */
-	heartbeatAt?: number
-	responseChunks?: number
-	responseBytes?: number
-	requestCount?: number
-	activityEvents?: SubagentActivityEvent[]
-	omittedActivityEvents?: number
-	commands?: SubagentCommandActivity[]
-	result?: string
-	error?: string
-	criticalSignals?: string[]
-	filesModified?: string[]
-	filesViewed?: string[]
-	durationMs?: number
-}
-
-export interface DietCodeSaySubagentStatus {
-	/** Correlates a batch with its request without relying on prompt text. */
-	batchId?: string
-	/** Scope and ordering for live delivery independent of full-state refreshes. */
-	taskId?: string
-	revision?: number
-	status: "running" | "completed" | "failed" | "cancelled" | "interrupted"
-	total: number
-	completed: number
-	successes: number
-	failures: number
-	cancelled?: number
-	toolCalls: number
-	inputTokens: number
-	outputTokens: number
-	contextWindow: number
-	maxContextTokens: number
-	maxContextUsagePercentage: number
-	items: SubagentStatusItem[]
-}
-
 export type BrowserActionResult = {
 	error?: string
 	screenshot?: string
@@ -451,11 +339,6 @@ export interface DietCodeAskUseMcpServer {
 	toolName?: string
 	arguments?: string
 	uri?: string
-}
-
-export interface DietCodeAskUseSubagents {
-	batchId?: string
-	prompts: string[]
 }
 
 /**
@@ -552,15 +435,6 @@ export interface DietCodeApiReqInfo {
 		delaySec: number
 		errorSnippet?: string
 	}
-}
-
-export interface DietCodeSubagentUsageInfo {
-	source: "subagents"
-	tokensIn: number
-	tokensOut: number
-	cacheWrites: number
-	cacheReads: number
-	cost: number
 }
 
 export type DietCodeApiReqCancelReason = "streaming_failed" | "user_cancelled" | "retries_exhausted"

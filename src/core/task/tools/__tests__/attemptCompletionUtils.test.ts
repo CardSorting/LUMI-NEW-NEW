@@ -78,7 +78,6 @@ import {
 	validateCompletionResultQuality,
 	validateCompletionResultTone,
 	validateCompletionTaskProgress,
-	validateFocusChainComplete,
 } from "../attemptCompletionUtils"
 import type { TaskConfig } from "../types/TaskConfig"
 
@@ -722,13 +721,6 @@ describe("attemptCompletionUtils", () => {
 	describe("validateCompletionTaskProgress", () => {
 		it("rejects incomplete task_progress checklists", () => {
 			expectErrorMessage(validateCompletionTaskProgress("- [x] done\n- [ ] pending"), "task_progress")
-		})
-	})
-
-	describe("validateFocusChainComplete", () => {
-		it("rejects completion when focus chain has open items", () => {
-			taskState.currentFocusChainChecklist = "- [x] done\n- [ ] pending"
-			expectErrorMessage(validateFocusChainComplete(configWithState(taskState)), "focus chain")
 		})
 	})
 

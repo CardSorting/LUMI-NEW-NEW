@@ -34,8 +34,8 @@ describe("auditHealthDigest", () => {
 })
 
 describe("buildAutoScrollPolicyFromSettings", () => {
-	it("disables advisory scroll when act-mode advisory is off", () => {
-		const policy = buildAutoScrollPolicyFromSettings({ auditActModeAdvisoryEnabled: false })
+	it("disables advisory scroll when advisory escalation is off", () => {
+		const policy = buildAutoScrollPolicyFromSettings({ auditAdvisoryEscalationEnabled: false })
 		expect(policy.advisoryMode).to.equal("never")
 		expect(policy.scrollGateBlocks).to.equal(true)
 	})
@@ -47,7 +47,7 @@ describe("buildAutoScrollPolicyFromSettings", () => {
 
 	it("explicit mode overrides disabled advisory flags", () => {
 		const policy = buildAutoScrollPolicyFromSettings({
-			auditActModeAdvisoryEnabled: false,
+			auditAdvisoryEscalationEnabled: false,
 			auditAdvisoryAutoScrollMode: "critical",
 		})
 		expect(policy.advisoryMode).to.equal("critical")

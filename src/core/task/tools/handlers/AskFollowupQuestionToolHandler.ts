@@ -23,7 +23,7 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 
 	async handlePartialBlock(block: ToolUse, uiHelpers: StronglyTypedUIHelpers): Promise<void> {
 		const config = uiHelpers.getConfig()
-		if (config.yoloModeToggled || config.isSubagentExecution) return
+		if (config.yoloModeToggled) return
 		const question = block.params.question || ""
 		const optionsRaw = block.params.options || "[]"
 		const sharedMessage = {
@@ -45,13 +45,13 @@ export class AskFollowupQuestionToolHandler implements IToolHandler, IPartialBlo
 		}
 		config.taskState.consecutiveMistakeCount = 0
 
-		if (config.yoloModeToggled || config.isSubagentExecution) {
+		if (config.yoloModeToggled) {
 			await config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "followup")
 			return formatResponse.toolResult(
 				`No user answer was requested. Use existing context and your judgment for routine, reversible decisions within the task. ` +
 					`If a relevant fact can be found with a targeted check, check it once; otherwise state a reasonable assumption and proceed. ` +
 					`Do not invent credentials, required facts, or authorization. If those are essential, report the specific blocker once ` +
-					`${config.isSubagentExecution ? "in your handoff to the parent" : "to the user"} and continue independent work. ` +
+					`to the user and continue independent work. ` +
 					`Do not repeat this question or scan for a personal preference that is not in the workspace. Question: "${question}"`,
 			)
 		}

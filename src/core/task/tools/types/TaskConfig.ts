@@ -49,19 +49,11 @@ export interface TaskConfig {
 	auditCompletionGateEnabled: boolean
 	auditCompletionGateThreshold: number
 	auditCompletionGateCriticalOnly: boolean
-	auditActModeAdvisoryEnabled: boolean
 	auditAdvisoryEscalationEnabled: boolean
 	auditPlanRegressionGateEnabled: boolean
 	auditToolOutputAdvisoryEnabled: boolean
-	auditFileWriteAdvisoryEnabled: boolean
-	auditIntentThresholdAdjustmentsEnabled: boolean
-	auditIntentThresholdOverrides: string
-	auditSarifHookExportEnabled: boolean
-	auditWorkspaceArtifactsEnabled: boolean
 	vscodeTerminalExecutionMode: "vscodeTerminal"
 	enableParallelToolCalling: boolean
-	isSubagentExecution: boolean
-	recursionDepth?: number
 
 	// Multi-workspace support (optional for backward compatibility)
 	workspaceManager?: WorkspaceRootManager

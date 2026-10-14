@@ -44,7 +44,6 @@ export const COMPLETION_PREFLIGHT_STAGES = [
 	"circuit_breaker",
 	"quality",
 	"task_progress_complete",
-	"focus_chain",
 	"cooldown",
 	"duplicate",
 	"demo_command",
@@ -55,6 +54,7 @@ export const COMPLETION_PREFLIGHT_STAGES = [
 // Retired stages remain readable in persisted history; they never run as checks.
 export type CompletionPreflightStage =
 	| (typeof COMPLETION_PREFLIGHT_STAGES)[number]
+	| "focus_chain"
 	| "roadmap"
 	| "checklist_in_result"
 	| "min_length"
@@ -98,11 +98,7 @@ export function getCompletionRetryCooldownMs(blockCount: number): number {
 }
 
 export function getCompletionCooldownRemainingMs(config: TaskConfig): number {
-	if (
-		config.yoloModeToggled ||
-		config.isSubagentExecution ||
-		hasWorkspaceChangedSinceGateBlock(config, getLatestCheckpointHashFromMessages(config))
-	) {
+	if (config.yoloModeToggled || hasWorkspaceChangedSinceGateBlock(config, getLatestCheckpointHashFromMessages(config))) {
 		return 0
 	}
 	const blockCount = config.taskState.completionGateBlockCount ?? 0
@@ -971,28 +967,6 @@ export function validateCompletionAttemptCooldown(config: TaskConfig): string | 
 		`Completion throttled: wait ${waitSeconds}s before retrying after a gate block (backoff ${Math.round(cooldownMs / 1000)}s). ` +
 		"Use this time to fix violations in the workspace."
 	)
-}
-
-export function validateFocusChainComplete(config: TaskConfig): string | null {
-	if (!config.focusChainSettings?.enabled) {
-		return null
-	}
-
-	const checklist = config.taskState.currentFocusChainChecklist
-	if (!checklist?.trim()) {
-		return null
-	}
-
-	const { totalItems, completedItems } = parseFocusChainListCounts(checklist)
-	if (totalItems > 0 && completedItems < totalItems) {
-		const incomplete = totalItems - completedItems
-		return (
-			`Completion rejected: focus chain has ${incomplete} incomplete item(s). ` +
-			"Mark all items [x] or update the list before attempt_completion."
-		)
-	}
-
-	return null
 }
 
 export function validateCompletionTaskProgress(taskProgress: string | undefined): string | null {

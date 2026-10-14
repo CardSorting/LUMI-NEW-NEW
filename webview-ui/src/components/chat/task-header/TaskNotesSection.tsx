@@ -4,7 +4,6 @@ import { buildOrchestratorGateStatus } from "@shared/audit/auditOrchestratorDige
 import type { PreCompletionChecklistSummary } from "@shared/audit/auditPreCompletionChecklist"
 import { buildPreCompletionChecklistSummary, shouldShowPreCompletionChecklist } from "@shared/audit/auditPreCompletionChecklist"
 import type { AuditHealthSummary } from "@shared/audit/auditRollup"
-import type { SubagentAuditSummary } from "@shared/audit/auditSubagentRollup"
 import type { TaskAuditMetadata } from "@shared/ExtensionMessage"
 import { ChevronRight } from "lucide-react"
 import { memo, useEffect, useMemo, useState } from "react"
@@ -13,7 +12,6 @@ import { cn } from "@/lib/utils"
 import { AuditHistoryStrip } from "./AuditHistoryStrip"
 import { OrchestratorGateStrip } from "./OrchestratorGateStrip"
 import { PreCompletionGateStrip } from "./PreCompletionGateStrip"
-import { SubagentHandoffStrip } from "./SubagentHandoffStrip"
 import { ViolationSessionLedgerStrip } from "./ViolationSessionLedgerStrip"
 
 interface TaskNotesSectionProps {
@@ -22,7 +20,6 @@ interface TaskNotesSectionProps {
 	auditTrend?: AuditTrend
 	checklistSummary?: PreCompletionChecklistSummary
 	latestAuditMetadata?: TaskAuditMetadata
-	subagentAuditSummary?: SubagentAuditSummary
 	onScrollToAuditMessage?: (ts: number) => void
 	onScrollToLatestGateBlock?: () => void
 	onScrollToLatestAdvisory?: () => void
@@ -38,7 +35,6 @@ export const TaskNotesSection = memo(
 		auditHealth,
 		checklistSummary,
 		latestAuditMetadata,
-		subagentAuditSummary,
 		onScrollToAuditMessage,
 		onScrollToLatestGateBlock,
 		onScrollToLatestAdvisory,
@@ -67,9 +63,8 @@ export const TaskNotesSection = memo(
 						orchestratorStatus.criticalViolationCount > 0),
 			)
 		const showViolations = Boolean(auditSnapshots && auditSnapshots.length > 0)
-		const showSubagent = Boolean(subagentAuditSummary && subagentAuditSummary.parentGateSignals.length > 0)
 
-		const hasContent = showAuditHistory || showPreCompletion || showOrchestrator || showViolations || showSubagent
+		const hasContent = showAuditHistory || showPreCompletion || showOrchestrator || showViolations
 
 		const summaryLabel = useMemo(() => {
 			if (hasGateBlock) return "Needs your review"
@@ -122,7 +117,6 @@ export const TaskNotesSection = memo(
 							onScrollToAuditMessage={onScrollToAuditMessage}
 							onScrollToLatestGateBlock={onScrollToLatestGateBlock}
 							snapshots={auditSnapshots}
-							subagentAuditSummary={subagentAuditSummary}
 						/>
 					) : null}
 
@@ -143,10 +137,6 @@ export const TaskNotesSection = memo(
 							onScrollToAuditMessage={onScrollToAuditMessage}
 							snapshots={auditSnapshots}
 						/>
-					) : null}
-
-					{showSubagent && subagentAuditSummary ? (
-						<SubagentHandoffStrip embedded summary={subagentAuditSummary} />
 					) : null}
 				</div>
 			</details>

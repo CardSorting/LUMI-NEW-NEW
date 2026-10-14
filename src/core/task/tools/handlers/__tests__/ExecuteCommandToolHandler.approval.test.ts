@@ -113,15 +113,13 @@ describe("command approval execution", () => {
 		)
 		sinon.assert.calledOnceWithMatch(callbacks.executeCommandTool, command)
 	})
-	it("repairs helper commands through the same validation and execution path", async () => {
-		const { config, callbacks, handler } = fixture()
-		config.isSubagentExecution = true
+	it("repairs encoded commands through the same validation and execution path", async () => {
+		const { config, callbacks, handler } = fixture(true, true)
 		const validate = sinon.spy(config.services.commandPermissionController, "validateCommand")
 		await handler.execute(config, { ...block, params: { command: "node --version &amp;&amp; npm --version" } })
 		sinon.assert.calledOnceWithExactly(validate, "node --version && npm --version")
 		sinon.assert.calledOnceWithMatch(callbacks.executeCommandTool, "node --version && npm --version")
 		sinon.assert.notCalled(callbacks.ask)
-		sinon.assert.notCalled(callbacks.say)
 	})
 	it("marks a suppressed duplicate as not started and points at its existing execution", async () => {
 		const { config, callbacks, handler } = fixture()

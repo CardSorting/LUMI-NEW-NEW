@@ -19,11 +19,6 @@ export class StabilityDoctorHandler implements IToolHandler {
 	}
 
 	async execute(config: TaskConfig, _block: ToolUse): Promise<ToolResponse> {
-		if (!config.isSubagentExecution) {
-			return formatResponse.toolError(
-				"🛑 **ACCESS DENIED**: Specialized diagnostic tools are reserved for Stability Sub-Agents. Please use 'attempt_completion' to trigger an autonomous documentation phase.",
-			)
-		}
 		try {
 			const engine = new SpiderEngine(config.cwd)
 			const loaded = await engine.loadRegistry()

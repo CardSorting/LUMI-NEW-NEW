@@ -39,9 +39,6 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 
 	async handlePartialBlock(block: ToolUse, uiHelpers: StronglyTypedUIHelpers): Promise<void> {
 		const command = block.params.command === undefined ? undefined : normalizeShellCommand(block.params.command)
-		if (uiHelpers.getConfig().isSubagentExecution) {
-			return
-		}
 
 		// Check if this should be auto-approved to determine UI flow
 		const shouldAutoApprove = uiHelpers.shouldAutoApproveTool(this.name)
@@ -133,18 +130,14 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 					`Command "${actualCommand}" was denied by CLINE_COMMAND_PERMISSIONS. ` +
 					`Reason: ${permissionResult.reason}${matchedPattern}`
 			}
-			if (!config.isSubagentExecution) {
-				await display.observe(() => config.callbacks.say("command_permission_denied", errorMessage))
-			}
+			await display.observe(() => config.callbacks.say("command_permission_denied", errorMessage))
 			return formatResponse.toolError(formatResponse.permissionDeniedError(errorMessage))
 		}
 
 		// Check dietcodeignore validation for command
 		const commandValidation = this.validator.validateCommand(actualCommand)
 		if (!commandValidation.ok) {
-			if (!config.isSubagentExecution) {
-				await display.observe(() => config.callbacks.say("dietcodeignore_error", commandValidation.error))
-			}
+			await display.observe(() => config.callbacks.say("dietcodeignore_error", commandValidation.error))
 			return formatResponse.toolError(commandValidation.error)
 		}
 
@@ -182,18 +175,14 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 		}
 
 		if (
-			config.isSubagentExecution ||
 			config.autoApprover?.shouldAutoApproveCommand?.(actualCommand) ||
 			(!requiresApprovalPerLLM && autoApproveSafe) ||
 			(requiresApprovalPerLLM && autoApproveSafe && autoApproveAll)
 		) {
 			// Auto-approve flow
-			if (!config.isSubagentExecution) {
-				await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "command"))
-				commandMessageTs =
-					(await display.observe(() => config.callbacks.say("command", actualCommand, undefined, undefined, false))) ??
-					null
-			}
+			await display.observe(() => config.callbacks.removeLastPartialMessageIfExistsWithType("ask", "command"))
+			commandMessageTs =
+				(await display.observe(() => config.callbacks.say("command", actualCommand, undefined, undefined, false))) ?? null
 			didAutoApprove = true
 			telemetryService.captureToolUsage(
 				config.ulid,
@@ -255,7 +244,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 
 		// Setup timeout notification for long-running auto-approved commands
 		let timeoutId: NodeJS.Timeout | undefined
-		if (didAutoApprove && config.autoApprovalSettings.enableNotifications && !config.isSubagentExecution) {
+		if (didAutoApprove && config.autoApprovalSettings.enableNotifications) {
 			// if the command was auto-approved, and it's long running we need to notify the user after some time has passed without proceeding
 			timeoutId = setTimeout(() => {
 				void display.observe(async () =>
@@ -337,7 +326,7 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 					: [{ type: "text", text: errorText }, ...rawResult.filter((part) => part.type !== "text")]
 		}
 
-		if (!userRejected && config.auditToolOutputAdvisoryEnabled && !config.isSubagentExecution) {
+		if (!userRejected && config.auditToolOutputAdvisoryEnabled) {
 			try {
 				const outputText = extractTextFromToolResponse(result)
 				const taskPreview = getInitialTaskPreview(config) || ""

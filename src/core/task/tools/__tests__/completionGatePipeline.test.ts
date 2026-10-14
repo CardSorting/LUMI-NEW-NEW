@@ -162,30 +162,6 @@ describe("completionGatePipeline", () => {
 		flow.status.should.equal("passed")
 	})
 
-	it("lets a helper hand off with parent audit and roadmap checks enabled", async () => {
-		setRoadmapConfigOverride({ enabled: true, block_kanban_on_invalid_schema: true })
-		await fs.writeFile(path.join(tmpDir, "ROADMAP.md"), "# Incomplete roadmap")
-		const flow = await runCompletionGateFlow(
-			{
-				...configWithState(taskState),
-				cwd: tmpDir,
-				isSubagentExecution: true,
-				auditCompletionGateEnabled: true,
-			},
-			{ result: VALID_RESULT },
-			"Test",
-		)
-		flow.status.should.equal("passed")
-	})
-
-	it("allows helper corrections immediately without contradictory cooldown blocks", async () => {
-		const config = { ...configWithState(taskState), isSubagentExecution: true }
-		const first = await runCompletionGateFlow(config, { result: "" }, "Test")
-		first.status.should.equal("blocked")
-		const second = await runCompletionGateFlow(config, { result: VALID_RESULT }, "Test")
-		second.status.should.equal("passed")
-	})
-
 	it("preflight registry stages align with COMPLETION_PREFLIGHT_STAGES order", () => {
 		const registryStages = PREFLIGHT_STAGE_RUNNERS.map((runner) => runner.stage)
 		const expectedSlice = COMPLETION_PREFLIGHT_STAGES.slice(

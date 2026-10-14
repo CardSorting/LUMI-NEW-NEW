@@ -4,7 +4,7 @@ import { SystemPromptSection } from "../templates/placeholders"
 import type { ComponentFunction } from "../types"
 
 export const getRoadmapSteeringSection: ComponentFunction = async (_variant, context) => {
-	if (!getRoadmapConfig().enabled || !context.cwd || context.isSubagentRun) return ""
+	if (!getRoadmapConfig().enabled || !context.cwd) return ""
 	const brief = await getRoadmapPromptContext(context.cwd)
 	if (!brief) return ""
 
