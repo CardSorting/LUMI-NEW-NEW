@@ -4,9 +4,12 @@ sidebarTitle: "Sub-agents"
 description: "How LUMI delegates work via use_subagents and the subagent runtime."
 ---
 
-# Working with Sub-agents
+# Working with Sub-agents (Decommissioned)
 
-LUMI can spawn **subagents** — isolated agent runs with their own prompts, tools, and optional model configuration — through the `use_subagents` tool and dynamic subagent tool names.
+> [!WARNING]
+> **Decommissioned in v24.0.0**: The subagent subsystem described below was completely removed from LUMI due to execution deadlocks, concurrency race conditions, and infinite completion gating. LUMI now operates on a deterministic single-loop architecture. For full forensic details and current architecture, see [Runtime Stabilization & Subagent Decommissioning Report](RUNTIME_STABILIZATION_STRATEGY.md). This document is retained solely for historical reference.
+
+LUMI previously spawned **subagents** — isolated agent runs with their own prompts, tools, and optional model configuration — through the `use_subagents` tool and dynamic subagent tool names.
 
 ## Code map
 

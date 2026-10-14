@@ -191,9 +191,10 @@ When in doubt: session behavior → `docs/`; durable substrate → `broccolidb/d
 |-----|-------------|
 | [Agent stack](AGENT_STACK.md) | Two-layer map (LUMI + BroccoliDB) |
 | [Architecture (current)](architecture/current.md) | Extension module structure |
+| [Runtime stabilization strategy](RUNTIME_STABILIZATION_STRATEGY.md) | Forensic report on v24 subagent removal & single-loop stabilization |
 | [System communication](SYSTEM_COMMUNICATION.md) | gRPC host bridge, webview messaging |
 | [Memory & reasoning](MEMORY_AND_REASONING.md) | Context, cognitive memory tools |
-| [Working with subagents](WORKING_WITH_SUBAGENTS.md) | Background agent delegation |
+| [Working with subagents (decommissioned)](WORKING_WITH_SUBAGENTS.md) | Historical record of pre-v24 subagent delegation |
 | [Security best practices](SECURITY_BEST_PRACTICES.md) | Approval gates, ignore files |
 | [Spider forensic engine](architecture/spider-v20-forensic-engine.md) | Policy/audit layer (BroccoliDB) |
 | [User interface design](USER_INTERFACE_DESIGN.md) | Webview UX patterns |
