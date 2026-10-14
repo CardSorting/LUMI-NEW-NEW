@@ -17,6 +17,10 @@
 			"label": "NousResearch"
 		},
 		{
+			"value": "cline-pass",
+			"label": "Cline Pass"
+		},
+		{
 			"value": "cloudflare",
 			"label": "Cloudflare Workers AI"
 		}

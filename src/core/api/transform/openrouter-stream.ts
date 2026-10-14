@@ -25,12 +25,13 @@ export async function createOpenRouterStream(
 	thinkingBudgetTokens?: number,
 	openRouterProviderSorting?: string,
 	tools?: Array<ChatCompletionTool>,
+	signal?: AbortSignal,
+	preparedMessages?: OpenAI.Chat.ChatCompletionMessageParam[],
 ) {
 	// Convert Anthropic messages to OpenAI format
-	let openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-		{ role: "system", content: systemPrompt },
-		...convertToOpenAiMessages(messages),
-	]
+	let openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = preparedMessages
+		? structuredClone(preparedMessages)
+		: [{ role: "system", content: systemPrompt }, ...convertToOpenAiMessages(messages)]
 
 	const isClaude1m =
 		model.id === openRouterClaudeSonnet41mModelId ||
@@ -200,7 +201,7 @@ export async function createOpenRouterStream(
 	}
 
 	// @ts-expect-error-next-line
-	const stream = await client.chat.completions.create(requestPayload)
+	const stream = await client.chat.completions.create(requestPayload, { signal })
 
 	return stream
 }

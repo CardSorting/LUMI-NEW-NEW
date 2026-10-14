@@ -186,6 +186,11 @@ export function getConfiguredProviders(
 		configured.push("nousResearch")
 	}
 
+	// Cline Pass - requires API key
+	if (apiConfiguration.clineApiKey) {
+		configured.push("cline-pass")
+	}
+
 	// OpenAI Compatible - requires base URL and API key, OR has model configured
 	if (
 		(apiConfiguration.openAiBaseUrl && apiConfiguration.openAiApiKey) ||

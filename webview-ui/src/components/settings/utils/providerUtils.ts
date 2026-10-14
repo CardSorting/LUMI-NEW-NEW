@@ -3,6 +3,8 @@ import {
 	ApiProvider,
 	claudeSubscriptionDirectSdkDefaultModelId,
 	claudeSubscriptionDirectSdkModels,
+	clinePassDefaultModelId,
+	clinePassModels,
 	cloudflareDefaultModelId,
 	cloudflareModels,
 	ModelInfo,
@@ -36,6 +38,8 @@ export function getModelsForProvider(
 			return claudeSubscriptionDirectSdkModels
 		case "nousResearch":
 			return nousResearchModels
+		case "cline-pass":
+			return clinePassModels
 		default:
 			return undefined
 	}
@@ -130,6 +134,17 @@ export function normalizeApiConfiguration(
 						? nousResearchModels[nousResearchModelId as keyof typeof nousResearchModels]
 						: nousResearchModels[nousResearchDefaultModelId],
 			}
+		case "cline-pass":
+			const clinePassModelId =
+				currentMode === "plan" ? apiConfiguration?.planModeClinePassModelId : apiConfiguration?.actModeClinePassModelId
+			return {
+				selectedProvider: provider,
+				selectedModelId: clinePassModelId || clinePassDefaultModelId,
+				selectedModelInfo:
+					clinePassModelId && clinePassModelId in clinePassModels
+						? clinePassModels[clinePassModelId as keyof typeof clinePassModels]
+						: clinePassModels[clinePassDefaultModelId],
+			}
 		default:
 			return {
 				selectedProvider: "openrouter" as ApiProvider,
@@ -163,6 +178,10 @@ export function getModeSpecificFields(apiConfiguration: ApiConfiguration | undef
 		basetenModelId: mode === "plan" ? apiConfiguration?.planModeBasetenModelId : apiConfiguration?.actModeBasetenModelId,
 		basetenModelInfo:
 			mode === "plan" ? apiConfiguration?.planModeBasetenModelInfo : apiConfiguration?.actModeBasetenModelInfo,
+		clinePassModelId:
+			mode === "plan" ? apiConfiguration?.planModeClinePassModelId : apiConfiguration?.actModeClinePassModelId,
+		clinePassModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeClinePassModelInfo : apiConfiguration?.actModeClinePassModelInfo,
 		dietcodeModelId: mode === "plan" ? apiConfiguration?.planModeDietCodeModelId : apiConfiguration?.actModeDietCodeModelId,
 		dietcodeModelInfo:
 			mode === "plan" ? apiConfiguration?.planModeDietCodeModelInfo : apiConfiguration?.actModeDietCodeModelInfo,
@@ -261,6 +280,10 @@ export async function syncModeConfigurations(
 		case "nousResearch":
 			updates.planModeNousResearchModelId = sourceFields.nousResearchModelId
 			updates.actModeNousResearchModelId = sourceFields.nousResearchModelId
+			break
+		case "cline-pass":
+			updates.planModeClinePassModelId = sourceFields.clinePassModelId
+			updates.actModeClinePassModelId = sourceFields.clinePassModelId
 			break
 		default:
 			updates.planModeApiModelId = sourceFields.apiModelId

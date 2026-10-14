@@ -1,9 +1,11 @@
 import { ApiConfiguration } from "@shared/api"
 import { Mode } from "@shared/storage/types"
+import { isClinePassProvider, isNousResearchProvider } from "@/core/providers/provider-ids"
 import { Logger } from "@/shared/services/Logger"
 import { ClaudeSubscriptionDirectSdkHandler } from "./providers/claude-subscription-directsdk"
+import { ClinePassHandler } from "./providers/cline-pass"
 import { CloudflareHandler } from "./providers/cloudflare"
-import { NousResearchHandler } from "./providers/nousresearch"
+import { NousResearchHandler } from "./providers/nous-research"
 import { OpenAiCodexHandler } from "./providers/openai-codex"
 import { OpenRouterHandler } from "./providers/openrouter"
 import { ApiHandler, ApiHandlerModel, ApiProviderInfo, CommonApiHandlerOptions, SingleCompletionHandler } from "./types"
@@ -17,6 +19,33 @@ function createHandlerForProvider(
 	options: Omit<ApiConfiguration, "apiProvider">,
 	mode: Mode,
 ): ApiHandler {
+	if (isClinePassProvider(apiProvider)) {
+		return new ClinePassHandler({
+			onRetryAttempt: options.onRetryAttempt,
+			getRetrySignal: options.getRetrySignal,
+			clineApiKey: options.clineApiKey,
+			clinePassModelId:
+				mode === "plan"
+					? options.planModeApiModelId || options.planModeClinePassModelId
+					: options.actModeApiModelId || options.actModeClinePassModelId,
+			reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
+			thinkingBudgetTokens: mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
+		})
+	}
+	if (isNousResearchProvider(apiProvider)) {
+		return new NousResearchHandler({
+			onRetryAttempt: options.onRetryAttempt,
+			getRetrySignal: options.getRetrySignal,
+			nousResearchApiKey: options.nousResearchApiKey,
+			nousResearchModelId:
+				mode === "plan"
+					? options.planModeApiModelId || options.planModeNousResearchModelId
+					: options.actModeApiModelId || options.actModeNousResearchModelId,
+			reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
+			thinkingBudgetTokens: mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
+		})
+	}
+
 	switch (apiProvider) {
 		case "openrouter":
 			return new OpenRouterHandler({
@@ -56,13 +85,6 @@ function createHandlerForProvider(
 				cloudflareAccountId: options.cloudflareAccountId,
 				cloudflareApiToken: options.cloudflareApiToken,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
-			})
-		case "nousResearch":
-			return new NousResearchHandler({
-				onRetryAttempt: options.onRetryAttempt,
-				getRetrySignal: options.getRetrySignal,
-				nousResearchApiKey: options.nousResearchApiKey,
-				apiModelId: mode === "plan" ? options.planModeNousResearchModelId : options.actModeNousResearchModelId,
 			})
 		default:
 			return new OpenRouterHandler({
@@ -117,7 +139,9 @@ export function buildApiHandler(configuration: ApiConfiguration, mode: Mode): Ap
 		if (
 			apiProvider === "openai-codex" ||
 			apiProvider === "claude-code" ||
-			apiProvider === "claude-subscription-directsdk-experimental"
+			apiProvider === "claude-subscription-directsdk-experimental" ||
+			isClinePassProvider(apiProvider) ||
+			isNousResearchProvider(apiProvider)
 		) {
 			throw error
 		}

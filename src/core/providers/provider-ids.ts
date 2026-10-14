@@ -8,8 +8,15 @@
  */
 export const OPENAI_CODEX_PROVIDER = "openai-codex" as const
 export const CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER = "claude-subscription-directsdk-experimental" as const
+export const CLINE_PASS_PROVIDER = "cline-pass" as const
+export const NOUS_RESEARCH_PROVIDER = "nous" as const
 
-export type AgentProviderId = typeof OPENAI_CODEX_PROVIDER | typeof CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER | (string & {})
+export type AgentProviderId =
+	| typeof OPENAI_CODEX_PROVIDER
+	| typeof CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER
+	| typeof CLINE_PASS_PROVIDER
+	| typeof NOUS_RESEARCH_PROVIDER
+	| (string & {})
 
 /**
  * Offline bootstrap routes from the bundled Claude DirectSDK model catalog.
@@ -25,6 +32,26 @@ export const CLAUDE_SUBSCRIPTION_DIRECTSDK_MODELS = [
 ] as const
 
 export const CLAUDE_SUBSCRIPTION_DIRECTSDK_DEFAULT_MODEL = CLAUDE_SUBSCRIPTION_DIRECTSDK_MODELS[0]
+
+export const CLINE_PASS_DEFAULT_MODEL = "cline-pass/qwen3.7-max"
+export const CLINE_PASS_MODELS = [
+	"cline-pass/qwen3.7-max",
+	"cline-pass/qwen3.7-plus",
+	"cline-pass/mimo-v2.6-flash",
+	"cline-pass/kimi-k2.5",
+] as const
+
+export const NOUS_RESEARCH_DEFAULT_MODEL = "Hermes-4-405B"
+export const NOUS_RESEARCH_MODELS = [
+	"Hermes-4-405B",
+	"~x-ai/grok-4.5",
+	"Hermes-3-Llama-3.1-405B",
+	"Hermes-3-Llama-3.1-70B",
+] as const
+
+const CLINE_PASS_ALIASES = new Set([CLINE_PASS_PROVIDER, "clinepass", "cline"])
+
+const NOUS_RESEARCH_ALIASES = new Set([NOUS_RESEARCH_PROVIDER, "nousresearch", "nous-research", "nous_research", "nous-portal"])
 
 const CLAUDE_NATIVE_MODEL_PATTERN = /^claude-[A-Za-z0-9._-]+(?:\[1m\])?$/i
 const CLAUDE_HAIKU_ONE_MILLION_MODEL = "claude-haiku-4-5-20251001[1m]"
@@ -54,11 +81,27 @@ export function isClaudeSubscriptionDirectSdkProvider(provider: string | undefin
 	return CLAUDE_SUBSCRIPTION_DIRECTSDK_ALIASES.has(normalized)
 }
 
+export function isClinePassProvider(provider: string | undefined): boolean {
+	const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : ""
+	return CLINE_PASS_ALIASES.has(normalized)
+}
+
+export function isNousResearchProvider(provider: string | undefined): boolean {
+	const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : ""
+	return NOUS_RESEARCH_ALIASES.has(normalized)
+}
+
 export function normalizeAgentProvider(provider: string | undefined): AgentProviderId {
 	const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : undefined
 	if (!normalized) return OPENAI_CODEX_PROVIDER
 	if (isClaudeSubscriptionDirectSdkProvider(normalized)) {
 		return CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER
+	}
+	if (isClinePassProvider(normalized)) {
+		return CLINE_PASS_PROVIDER
+	}
+	if (isNousResearchProvider(normalized)) {
+		return NOUS_RESEARCH_PROVIDER
 	}
 	if (normalized === "openai" || normalized === "codex" || normalized === "codex-oauth") {
 		return OPENAI_CODEX_PROVIDER
@@ -108,6 +151,8 @@ export function getAgentProviderLabel(provider: string | undefined): string {
 	const normalized = normalizeAgentProvider(provider)
 	if (normalized === OPENAI_CODEX_PROVIDER) return "OpenAI Codex"
 	if (normalized === CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER) return "Claude Code"
+	if (normalized === CLINE_PASS_PROVIDER) return "Cline Pass"
+	if (normalized === NOUS_RESEARCH_PROVIDER) return "Nous Research"
 
 	return normalized
 		.split(/[-_]+/)

@@ -1,11 +1,12 @@
+import "@testing-library/jest-dom"
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import type { InputHTMLAttributes } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useExtensionState } from "@/context/ExtensionStateContext"
+import { useExtensionState } from "../../../context/ExtensionStateContext"
 import ApiOptions from "../ApiOptions"
 import { useApiConfigurationHandlers } from "../utils/useApiConfigurationHandlers"
 
-vi.mock("@/context/ExtensionStateContext", () => ({ useExtensionState: vi.fn() }))
+vi.mock("../../../context/ExtensionStateContext", () => ({ useExtensionState: vi.fn() }))
 vi.mock("../utils/useApiConfigurationHandlers", () => ({ useApiConfigurationHandlers: vi.fn() }))
 vi.mock("@vscode/webview-ui-toolkit/react", () => ({
 	VSCodeTextField: ({ children: _children, ...props }: InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
@@ -15,6 +16,7 @@ vi.mock("../providers/OpenRouterProvider", () => ({ OpenRouterProvider: () => nu
 vi.mock("../providers/ClaudeSubscriptionDirectSdkProvider", () => ({ ClaudeSubscriptionDirectSdkProvider: () => null }))
 vi.mock("../providers/CloudflareProvider", () => ({ CloudflareProvider: () => null }))
 vi.mock("../providers/NousresearchProvider", () => ({ NousResearchProvider: () => null }))
+vi.mock("../providers/ClinePassProvider", () => ({ ClinePassProvider: () => null }))
 
 describe("API provider selection", () => {
 	const handleModeFieldChange = vi.fn()
@@ -23,8 +25,8 @@ describe("API provider selection", () => {
 		vi.clearAllMocks()
 		vi.mocked(useExtensionState).mockReturnValue({
 			apiConfiguration: { actModeApiProvider: "openai-codex" },
-		} as ReturnType<typeof useExtensionState>)
-		vi.mocked(useApiConfigurationHandlers).mockReturnValue({ handleModeFieldChange } as ReturnType<
+		} as unknown as ReturnType<typeof useExtensionState>)
+		vi.mocked(useApiConfigurationHandlers).mockReturnValue({ handleModeFieldChange } as unknown as ReturnType<
 			typeof useApiConfigurationHandlers
 		>)
 		Element.prototype.scrollIntoView = vi.fn()

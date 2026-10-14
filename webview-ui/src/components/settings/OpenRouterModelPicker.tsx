@@ -85,7 +85,7 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 	}, [apiConfiguration, currentMode])
 
 	useMount(() => {
-		refreshOpenRouterModels()
+		refreshOpenRouterModels?.()
 	})
 
 	// Sync external changes when the modelId changes
@@ -108,7 +108,7 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 	}, [])
 
 	const modelIds = useMemo(() => {
-		const unfilteredModelIds = Object.keys(openRouterModels).sort((a, b) => a.localeCompare(b))
+		const unfilteredModelIds = Object.keys(openRouterModels ?? {}).sort((a, b) => a.localeCompare(b))
 		return filterOpenRouterModelIds(unfilteredModelIds, "openrouter")
 	}, [openRouterModels])
 
@@ -210,7 +210,7 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 			return false
 		}
 		return (
-			Object.entries(openRouterModels)?.some(([id, m]) => id === selectedModelId && m.thinkingConfig) ||
+			Object.entries(openRouterModels ?? {}).some(([id, m]) => id === selectedModelId && m.thinkingConfig) ||
 			selectedModelIdLower.includes("claude-opus-4.6") ||
 			selectedModelIdLower.includes("claude-haiku-4.5") ||
 			selectedModelIdLower.includes("claude-4.5-haiku") ||

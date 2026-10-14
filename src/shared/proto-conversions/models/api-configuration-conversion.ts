@@ -83,6 +83,8 @@ function convertApiProviderToProto(provider: string | undefined): ProtoApiProvid
 			return ProtoApiProvider.OPENROUTER
 		case "nousResearch":
 			return ProtoApiProvider.NOUSRESEARCH
+		case "cline-pass":
+			return ProtoApiProvider.CLINE_PASS
 		case "openai-codex":
 			return ProtoApiProvider.OPENAI_CODEX
 		case "claude-code":
@@ -103,6 +105,8 @@ export function convertProtoToApiProvider(provider: ProtoApiProvider): ApiProvid
 			return "openrouter"
 		case ProtoApiProvider.NOUSRESEARCH:
 			return "nousResearch"
+		case ProtoApiProvider.CLINE_PASS:
+			return "cline-pass"
 		case ProtoApiProvider.OPENAI_CODEX:
 			return "openai-codex"
 		case ProtoApiProvider.CLAUDE_CODE:
@@ -127,6 +131,7 @@ export function convertApiConfigurationToProto(config: ApiConfiguration): ProtoA
 		openRouterApiKey: config.openRouterApiKey,
 		openRouterProviderSorting: config.openRouterProviderSorting,
 		nousResearchApiKey: config.nousResearchApiKey,
+		clineApiKey: config.clineApiKey,
 		cloudflareAccountId: config.cloudflareAccountId,
 		cloudflareApiToken: config.cloudflareApiToken,
 		claudeSubscriptionDirectSdkPythonPath: config.claudeSubscriptionDirectSdkPythonPath,
@@ -140,6 +145,9 @@ export function convertApiConfigurationToProto(config: ApiConfiguration): ProtoA
 		planModeOpenRouterModelId: config.planModeOpenRouterModelId,
 		planModeOpenRouterModelInfo: convertModelInfoToProtoOpenRouter(config.planModeOpenRouterModelInfo),
 		planModeNousResearchModelId: config.planModeNousResearchModelId,
+		planModeNousResearchModelInfo: convertModelInfoToProtoOpenRouter(config.planModeNousResearchModelInfo),
+		planModeClinePassModelId: config.planModeClinePassModelId,
+		planModeClinePassModelInfo: convertModelInfoToProtoOpenRouter(config.planModeClinePassModelInfo),
 
 		// Act mode configurations
 		actModeApiProvider: config.actModeApiProvider ? convertApiProviderToProto(config.actModeApiProvider) : undefined,
@@ -149,6 +157,9 @@ export function convertApiConfigurationToProto(config: ApiConfiguration): ProtoA
 		actModeOpenRouterModelId: config.actModeOpenRouterModelId,
 		actModeOpenRouterModelInfo: convertModelInfoToProtoOpenRouter(config.actModeOpenRouterModelInfo),
 		actModeNousResearchModelId: config.actModeNousResearchModelId,
+		actModeNousResearchModelInfo: convertModelInfoToProtoOpenRouter(config.actModeNousResearchModelInfo),
+		actModeClinePassModelId: config.actModeClinePassModelId,
+		actModeClinePassModelInfo: convertModelInfoToProtoOpenRouter(config.actModeClinePassModelInfo),
 	}
 }
 
@@ -163,6 +174,7 @@ export function convertProtoToApiConfiguration(protoConfig: ProtoApiConfiguratio
 		openRouterApiKey: protoConfig.openRouterApiKey,
 		openRouterProviderSorting: protoConfig.openRouterProviderSorting,
 		nousResearchApiKey: protoConfig.nousResearchApiKey,
+		clineApiKey: protoConfig.clineApiKey,
 		cloudflareAccountId: protoConfig.cloudflareAccountId,
 		cloudflareApiToken: protoConfig.cloudflareApiToken,
 		claudeSubscriptionDirectSdkPythonPath: protoConfig.claudeSubscriptionDirectSdkPythonPath,
@@ -179,6 +191,9 @@ export function convertProtoToApiConfiguration(protoConfig: ProtoApiConfiguratio
 		planModeOpenRouterModelId: protoConfig.planModeOpenRouterModelId,
 		planModeOpenRouterModelInfo: convertProtoToModelInfo(protoConfig.planModeOpenRouterModelInfo),
 		planModeNousResearchModelId: protoConfig.planModeNousResearchModelId,
+		planModeNousResearchModelInfo: convertProtoToModelInfo(protoConfig.planModeNousResearchModelInfo),
+		planModeClinePassModelId: protoConfig.planModeClinePassModelId,
+		planModeClinePassModelInfo: convertProtoToModelInfo(protoConfig.planModeClinePassModelInfo),
 
 		// Act mode configurations
 		actModeApiProvider:
@@ -189,5 +204,8 @@ export function convertProtoToApiConfiguration(protoConfig: ProtoApiConfiguratio
 		actModeOpenRouterModelId: protoConfig.actModeOpenRouterModelId,
 		actModeOpenRouterModelInfo: convertProtoToModelInfo(protoConfig.actModeOpenRouterModelInfo),
 		actModeNousResearchModelId: protoConfig.actModeNousResearchModelId,
+		actModeNousResearchModelInfo: convertProtoToModelInfo(protoConfig.actModeNousResearchModelInfo),
+		actModeClinePassModelId: protoConfig.actModeClinePassModelId,
+		actModeClinePassModelInfo: convertProtoToModelInfo(protoConfig.actModeClinePassModelInfo),
 	}
 }
