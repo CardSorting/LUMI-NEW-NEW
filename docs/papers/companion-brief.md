@@ -1,6 +1,6 @@
 # LUMI Companion Brief
 
-**Executive summary · v22.0.0 · workspace-verified**
+**Executive summary · v24.0.2 · workspace-verified**
 
 *Companion to the [Technical Whitepaper](whitepaper.md). All figures below are measured from the agent workspace (`src/`, `webview-ui/`, root `package.json`).*
 
@@ -8,7 +8,7 @@
 
 ## One sentence
 
-**LUMI** (`CardSorting.lumi-vscode` on VS Marketplace, `CardSorting.lumi` on Open VSX) is a VS Code agent extension in the codemarie-new monorepo: Plan/Act modes, 64 typed tools, configurable approval, MCP and subagent extension, and BroccoliDB-backed memory — designed as a calm coding companion you can keep open all day.
+**LUMI** (`CardSorting.lumi-vscode` on VS Marketplace, `CardSorting.lumi` on Open VSX) is a VS Code agent extension in the codemarie-new monorepo: Plan/Act modes, 63 typed tools, configurable approval, MCP extension, and BroccoliDB-backed memory — designed as a calm coding companion you can keep open all day.
 
 ---
 
@@ -16,13 +16,13 @@
 
 | Metric | Value | Where |
 |--------|-------|-------|
-| Extension version | **22.0.0** | `package.json` |
+| Extension version | **24.0.2** | `package.json` |
 | Publisher / ID | **CardSorting.lumi-vscode** (VS Marketplace) · **CardSorting.lumi** (Open VSX) | `package.json` |
 | Registered VS Code commands | **~25** `lumi.*` | `package.json` `contributes.commands` |
-| Static tool enum values | **64** | `DietCodeDefaultTool` in `src/shared/tools.ts` |
+| Static tool enum values | **63** | `DietCodeDefaultTool` in `src/shared/tools.ts` |
 | Tool handler files | **55** | `src/core/task/tools/handlers/` |
-| Read-only tools (checkpoint-safe) | **14** | `READ_ONLY_TOOLS` in `src/shared/tools.ts` |
-| Wired LLM providers | **5** | `src/shared/providers/providers.json` |
+| Read-only tools (checkpoint-safe) | **13** | `READ_ONLY_TOOLS` in `src/shared/tools.ts` |
+| Wired LLM providers | **7** | `src/shared/providers/providers.json` |
 | Provider handler files (total) | **45** | `src/core/api/providers/` |
 | Built-in slash commands | **10** | `SUPPORTED_DEFAULT_COMMANDS` in `src/core/slash-commands/index.ts` |
 | Lifecycle hook kinds | **8** | `Hooks` in `src/core/hooks/hook-factory.ts` |

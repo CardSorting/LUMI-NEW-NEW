@@ -18,12 +18,12 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/version-22.0.0-green" alt="Version" /></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/version-24.0.2-green" alt="Version" /></a>
   <img src="https://img.shields.io/badge/VS%20Code-%5E1.84.0-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code" />
   <img src="https://img.shields.io/badge/extension-CardSorting.lumi--vscode-purple" alt="VS Marketplace ID" />
   <img src="https://img.shields.io/badge/Open%20VSX-CardSorting.lumi-blue" alt="Open VSX ID" />
-  <img src="https://img.shields.io/badge/tools-64-orange" alt="Tools" />
-  <img src="https://img.shields.io/badge/providers-4-blue" alt="Providers" />
+  <img src="https://img.shields.io/badge/tools-63-orange" alt="Tools" />
+  <img src="https://img.shields.io/badge/providers-7-blue" alt="Providers" />
   <a href="https://github.com/CardSorting/DietCodeMarie"><img src="https://img.shields.io/github/stars/CardSorting/DietCodeMarie?style=social" alt="GitHub" /></a>
 </p>
 
@@ -118,9 +118,9 @@ Workspace-verified metrics: [docs/papers/companion-brief.md](docs/papers/compani
 
 | Metric | Value |
 |--------|-------|
-| Typed tools | **64** (`src/shared/tools.ts`) |
-| Read-only tools | **14** (`READ_ONLY_TOOLS`) |
-| Wired providers | **4** (`providers.json`) |
+| Typed tools | **63** (`src/shared/tools.ts`) |
+| Read-only tools | **13** (`READ_ONLY_TOOLS`) |
+| Wired providers | **7** (`providers.json`) |
 | Slash commands | **10** |
 | Hook kinds | **8** |
 | Agent modes | **plan** · **act** |
@@ -134,7 +134,7 @@ Four design pillars — each maps to code, not marketing copy. Full treatment: [
 | Pillar | What it means in practice |
 |--------|---------------------------|
 | **Calm agency** | Sidebar stays readable; you approve mutating work on your schedule |
-| **Typed tools** | 64 enum values in `src/shared/tools.ts` → dedicated handlers — no ad-hoc shell |
+| **Typed tools** | 63 enum values in `src/shared/tools.ts` → dedicated handlers — no ad-hoc shell |
 | **Plan before mutate** | Plan mode + `plan_mode_respond` before Act mode file changes |
 | **Provable finish** | `attempt_completion` runs through `completionGatePipeline.ts` — “done” is gated |
 
@@ -624,7 +624,7 @@ Substrate papers: [broccolidb/docs/papers/](broccolidb/docs/papers/) — separat
 | `src/core/task/tools/` | `ToolExecutorCoordinator` + 55 handler files |
 | `src/integrations/checkpoints/` | Shadow Git checkpoint system |
 | `src/services/mcp/McpHub.ts` | MCP server connections |
-| `src/shared/tools.ts` | `DietCodeDefaultTool` enum (64 values) |
+| `src/shared/tools.ts` | `DietCodeDefaultTool` enum (63 values) |
 | `webview-ui/` | React sidebar — chat, settings, diffs |
 | `broccolidb/` | BroccoliDB package (`@noorm/broccolidb`) |
 | `docs/` | LUMI user and architecture documentation |
@@ -721,7 +721,7 @@ Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md).
 | **Security (private)** | [SECURITY.md](SECURITY.md) → security@dietcode.bot |
 | **Walkthrough** | Command palette → `LUMI: Open Walkthrough` (`lumi.openWalkthrough`) |
 
-Include VS Code version, LUMI **22.0.0**, provider used, and steps to reproduce.
+Include VS Code version, LUMI **24.0.2**, provider used, and steps to reproduce.
 
 ---
 
