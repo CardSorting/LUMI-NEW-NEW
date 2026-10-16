@@ -995,6 +995,19 @@ export class Controller implements IController {
 		const { openAiCodexOAuthManager } = await import("@/integrations/openai-codex/oauth")
 		const openAiCodexIsAuthenticated = await openAiCodexOAuthManager.isAuthenticated()
 		const openAiCodexAuthInProgress = openAiCodexOAuthManager.isAuthorizationPending()
+
+		const { opencodeOAuthManager } = await import("@/integrations/opencode/oauth")
+		const opencodeIsAuthenticated = await opencodeOAuthManager.isAuthenticated()
+		const opencodeAuthInProgress = opencodeOAuthManager.isAuthorizationPending()
+		const pendingAuth = opencodeOAuthManager.getPendingAuth()
+		const opencodeStatus = await opencodeOAuthManager.getStatus()
+		const opencodeAuthInfo = {
+			userCode: pendingAuth?.userCode,
+			verificationUri: pendingAuth?.verificationUri,
+			email: opencodeStatus.email,
+			orgName: opencodeStatus.orgName,
+		}
+
 		const googleAuthIsAuthenticated = !!(await this.authService.getAuthToken("google"))
 
 		return {
@@ -1085,6 +1098,9 @@ export class Controller implements IController {
 			welcomeBanners,
 			openAiCodexIsAuthenticated,
 			openAiCodexAuthInProgress,
+			opencodeIsAuthenticated,
+			opencodeAuthInProgress,
+			opencodeAuthInfo,
 			googleAuthIsAuthenticated,
 			googleUserInfo: (await this.authService.getProviderUserInfo("google")) || undefined,
 		}

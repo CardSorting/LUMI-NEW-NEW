@@ -105,6 +105,7 @@ message Secrets {
   optional string vertex_api_key = 58;
   optional string openai_codex_oauth_credentials = 95;
   optional string cline_api_key = 96;
+  optional string opencode_oauth_credentials = 97;
 }
 
 // NOTE: Add new fields under API_HANDLER_SETTINGS_FIELDS or USER_SETTINGS_FIELDS
@@ -288,6 +289,10 @@ message Settings {
   optional OpenRouterModelInfo act_mode_nous_research_model_info = 332;
   optional string act_mode_cline_pass_model_id = 333;
   optional OpenRouterModelInfo act_mode_cline_pass_model_info = 334;
+  optional OpenRouterModelInfo plan_mode_opencode_model_info = 335;
+  optional string plan_mode_opencode_model_id = 336;
+  optional OpenRouterModelInfo act_mode_opencode_model_info = 337;
+  optional string act_mode_opencode_model_id = 338;
 }
 
 message State {

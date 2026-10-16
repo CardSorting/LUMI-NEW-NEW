@@ -21,6 +21,10 @@
 			"label": "Cline Pass"
 		},
 		{
+			"value": "opencode",
+			"label": "OpenCode (Console Login)"
+		},
+		{
 			"value": "cloudflare",
 			"label": "Cloudflare Workers AI"
 		}

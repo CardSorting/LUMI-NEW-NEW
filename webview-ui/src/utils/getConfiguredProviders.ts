@@ -56,6 +56,9 @@ export function getConfiguredProviders(
 	// OpenAI Codex - subscription-based OAuth, always available
 	configured.push("openai-codex")
 
+	// OpenCode - CLI session / OAuth based, always available
+	configured.push("opencode")
+
 	// DeepSeek - requires API key
 	if (apiConfiguration.deepSeekApiKey) {
 		configured.push("deepseek")

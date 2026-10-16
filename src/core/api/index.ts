@@ -1,12 +1,13 @@
 import { ApiConfiguration } from "@shared/api"
 import { Mode } from "@shared/storage/types"
-import { isClinePassProvider, isNousResearchProvider } from "@/core/providers/provider-ids"
+import { isClinePassProvider, isNousResearchProvider, isOpencodeProvider } from "@/core/providers/provider-ids"
 import { Logger } from "@/shared/services/Logger"
 import { ClaudeSubscriptionDirectSdkHandler } from "./providers/claude-subscription-directsdk"
 import { ClinePassHandler } from "./providers/cline-pass"
 import { CloudflareHandler } from "./providers/cloudflare"
 import { NousResearchHandler } from "./providers/nous-research"
 import { OpenAiCodexHandler } from "./providers/openai-codex"
+import { OpencodeHandler } from "./providers/opencode"
 import { OpenRouterHandler } from "./providers/openrouter"
 import { ApiHandler, ApiHandlerModel, ApiProviderInfo, CommonApiHandlerOptions, SingleCompletionHandler } from "./types"
 
@@ -41,6 +42,18 @@ function createHandlerForProvider(
 				mode === "plan"
 					? options.planModeApiModelId || options.planModeNousResearchModelId
 					: options.actModeApiModelId || options.actModeNousResearchModelId,
+			reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
+			thinkingBudgetTokens: mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
+		})
+	}
+	if (isOpencodeProvider(apiProvider)) {
+		return new OpencodeHandler({
+			onRetryAttempt: options.onRetryAttempt,
+			getRetrySignal: options.getRetrySignal,
+			apiModelId:
+				mode === "plan"
+					? options.planModeOpencodeModelId || options.planModeApiModelId
+					: options.actModeOpencodeModelId || options.actModeApiModelId,
 			reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
 			thinkingBudgetTokens: mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
 		})
@@ -141,7 +154,8 @@ export function buildApiHandler(configuration: ApiConfiguration, mode: Mode): Ap
 			apiProvider === "claude-code" ||
 			apiProvider === "claude-subscription-directsdk-experimental" ||
 			isClinePassProvider(apiProvider) ||
-			isNousResearchProvider(apiProvider)
+			isNousResearchProvider(apiProvider) ||
+			isOpencodeProvider(apiProvider)
 		) {
 			throw error
 		}

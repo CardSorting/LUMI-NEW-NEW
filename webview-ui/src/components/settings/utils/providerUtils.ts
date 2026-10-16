@@ -10,6 +10,8 @@ import {
 	ModelInfo,
 	nousResearchDefaultModelId,
 	nousResearchModels,
+	opencodeDefaultModelId,
+	opencodeModels,
 	openRouterDefaultModelId,
 	openRouterDefaultModelInfo,
 } from "@shared/api"
@@ -40,6 +42,8 @@ export function getModelsForProvider(
 			return nousResearchModels
 		case "cline-pass":
 			return clinePassModels
+		case "opencode":
+			return opencodeModels
 		default:
 			return undefined
 	}
@@ -145,6 +149,17 @@ export function normalizeApiConfiguration(
 						? clinePassModels[clinePassModelId as keyof typeof clinePassModels]
 						: clinePassModels[clinePassDefaultModelId],
 			}
+		case "opencode":
+			const opencodeModelId =
+				currentMode === "plan" ? apiConfiguration?.planModeOpencodeModelId : apiConfiguration?.actModeOpencodeModelId
+			return {
+				selectedProvider: provider,
+				selectedModelId: opencodeModelId || opencodeDefaultModelId,
+				selectedModelInfo:
+					opencodeModelId && opencodeModelId in opencodeModels
+						? opencodeModels[opencodeModelId as keyof typeof opencodeModels]
+						: opencodeModels[opencodeDefaultModelId],
+			}
 		default:
 			return {
 				selectedProvider: "openrouter" as ApiProvider,
@@ -182,6 +197,9 @@ export function getModeSpecificFields(apiConfiguration: ApiConfiguration | undef
 			mode === "plan" ? apiConfiguration?.planModeClinePassModelId : apiConfiguration?.actModeClinePassModelId,
 		clinePassModelInfo:
 			mode === "plan" ? apiConfiguration?.planModeClinePassModelInfo : apiConfiguration?.actModeClinePassModelInfo,
+		opencodeModelId: mode === "plan" ? apiConfiguration?.planModeOpencodeModelId : apiConfiguration?.actModeOpencodeModelId,
+		opencodeModelInfo:
+			mode === "plan" ? apiConfiguration?.planModeOpencodeModelInfo : apiConfiguration?.actModeOpencodeModelInfo,
 		dietcodeModelId: mode === "plan" ? apiConfiguration?.planModeDietCodeModelId : apiConfiguration?.actModeDietCodeModelId,
 		dietcodeModelInfo:
 			mode === "plan" ? apiConfiguration?.planModeDietCodeModelInfo : apiConfiguration?.actModeDietCodeModelInfo,
@@ -284,6 +302,12 @@ export async function syncModeConfigurations(
 		case "cline-pass":
 			updates.planModeClinePassModelId = sourceFields.clinePassModelId
 			updates.actModeClinePassModelId = sourceFields.clinePassModelId
+			break
+		case "opencode":
+			updates.planModeOpencodeModelId = sourceFields.opencodeModelId
+			updates.actModeOpencodeModelId = sourceFields.opencodeModelId
+			updates.planModeOpencodeModelInfo = sourceFields.opencodeModelInfo
+			updates.actModeOpencodeModelInfo = sourceFields.opencodeModelInfo
 			break
 		default:
 			updates.planModeApiModelId = sourceFields.apiModelId

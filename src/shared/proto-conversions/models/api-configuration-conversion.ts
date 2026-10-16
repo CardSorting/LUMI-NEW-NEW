@@ -93,6 +93,8 @@ function convertApiProviderToProto(provider: string | undefined): ProtoApiProvid
 			return ProtoApiProvider.CLAUDE_SUBSCRIPTION_DIRECTSDK
 		case "cloudflare":
 			return ProtoApiProvider.CLOUDFLARE
+		case "opencode":
+			return ProtoApiProvider.OPENCODE
 		default:
 			return ProtoApiProvider.OPENROUTER
 	}
@@ -115,6 +117,8 @@ export function convertProtoToApiProvider(provider: ProtoApiProvider): ApiProvid
 			return "claude-subscription-directsdk-experimental"
 		case ProtoApiProvider.CLOUDFLARE:
 			return "cloudflare"
+		case ProtoApiProvider.OPENCODE:
+			return "opencode"
 		default:
 			return "openrouter"
 	}
@@ -148,6 +152,8 @@ export function convertApiConfigurationToProto(config: ApiConfiguration): ProtoA
 		planModeNousResearchModelInfo: convertModelInfoToProtoOpenRouter(config.planModeNousResearchModelInfo),
 		planModeClinePassModelId: config.planModeClinePassModelId,
 		planModeClinePassModelInfo: convertModelInfoToProtoOpenRouter(config.planModeClinePassModelInfo),
+		planModeOpencodeModelId: config.planModeOpencodeModelId,
+		planModeOpencodeModelInfo: convertModelInfoToProtoOpenRouter(config.planModeOpencodeModelInfo),
 
 		// Act mode configurations
 		actModeApiProvider: config.actModeApiProvider ? convertApiProviderToProto(config.actModeApiProvider) : undefined,
@@ -160,6 +166,8 @@ export function convertApiConfigurationToProto(config: ApiConfiguration): ProtoA
 		actModeNousResearchModelInfo: convertModelInfoToProtoOpenRouter(config.actModeNousResearchModelInfo),
 		actModeClinePassModelId: config.actModeClinePassModelId,
 		actModeClinePassModelInfo: convertModelInfoToProtoOpenRouter(config.actModeClinePassModelInfo),
+		actModeOpencodeModelId: config.actModeOpencodeModelId,
+		actModeOpencodeModelInfo: convertModelInfoToProtoOpenRouter(config.actModeOpencodeModelInfo),
 	}
 }
 
@@ -194,6 +202,8 @@ export function convertProtoToApiConfiguration(protoConfig: ProtoApiConfiguratio
 		planModeNousResearchModelInfo: convertProtoToModelInfo(protoConfig.planModeNousResearchModelInfo),
 		planModeClinePassModelId: protoConfig.planModeClinePassModelId,
 		planModeClinePassModelInfo: convertProtoToModelInfo(protoConfig.planModeClinePassModelInfo),
+		planModeOpencodeModelId: protoConfig.planModeOpencodeModelId,
+		planModeOpencodeModelInfo: convertProtoToModelInfo(protoConfig.planModeOpencodeModelInfo),
 
 		// Act mode configurations
 		actModeApiProvider:
@@ -207,5 +217,7 @@ export function convertProtoToApiConfiguration(protoConfig: ProtoApiConfiguratio
 		actModeNousResearchModelInfo: convertProtoToModelInfo(protoConfig.actModeNousResearchModelInfo),
 		actModeClinePassModelId: protoConfig.actModeClinePassModelId,
 		actModeClinePassModelInfo: convertProtoToModelInfo(protoConfig.actModeClinePassModelInfo),
+		actModeOpencodeModelId: protoConfig.actModeOpencodeModelId,
+		actModeOpencodeModelInfo: convertProtoToModelInfo(protoConfig.actModeOpencodeModelInfo),
 	}
 }

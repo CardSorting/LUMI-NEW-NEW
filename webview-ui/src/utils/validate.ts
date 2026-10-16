@@ -79,7 +79,8 @@ export function validateApiConfiguration(currentMode: Mode, apiConfiguration?: A
 				break
 			case "openai-codex":
 			case "claude-subscription-directsdk-experimental":
-				// Account and bridge checks run in the selected provider.
+			case "opencode":
+				// Account and session checks run in the selected provider.
 				break
 			case "openai":
 				if (

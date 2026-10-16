@@ -10,12 +10,14 @@ export const OPENAI_CODEX_PROVIDER = "openai-codex" as const
 export const CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER = "claude-subscription-directsdk-experimental" as const
 export const CLINE_PASS_PROVIDER = "cline-pass" as const
 export const NOUS_RESEARCH_PROVIDER = "nous" as const
+export const OPENCODE_PROVIDER = "opencode" as const
 
 export type AgentProviderId =
 	| typeof OPENAI_CODEX_PROVIDER
 	| typeof CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER
 	| typeof CLINE_PASS_PROVIDER
 	| typeof NOUS_RESEARCH_PROVIDER
+	| typeof OPENCODE_PROVIDER
 	| (string & {})
 
 /**
@@ -48,6 +50,40 @@ export const NOUS_RESEARCH_MODELS = [
 	"Hermes-3-Llama-3.1-405B",
 	"Hermes-3-Llama-3.1-70B",
 ] as const
+
+export const OPENCODE_DEFAULT_MODEL = "kimi-k2.6"
+export const OPENCODE_MODELS = [
+	"kimi-k2.6",
+	"kimi-k2.7-code",
+	"kimi-k3",
+	"glm-5.1",
+	"glm-5.2",
+	"glm-5.3",
+	"glm-5.3-flash",
+	"mimo-v2.6-flash",
+	"mimo-v2.6-pro",
+	"minimax-m3",
+	"qwen3.8-max",
+	"qwen3.8-flash",
+	"deepseek-v4-pro",
+	"deepseek-v4.1-flash",
+	"grok-4.7",
+	"gpt-5.6-luna",
+	"beam-free",
+	"deepseek-v4.1-flash-free",
+	"glm-5.3-flash-free",
+	"jev-1.13-free",
+	"ll-alpha-free",
+	"longcat-2.5-preview-free",
+	"mimo-v2.6-flash-free",
+	"muse-spark-1.3-contributor-free",
+	"nemotron-3-ultra-free",
+	"nemotron-3.5-lightning-free",
+	"nemotron-3.5-super-vl-free",
+	"space-bunny-free",
+] as const
+
+const OPENCODE_ALIASES = new Set([OPENCODE_PROVIDER, "opencode-go", "opencode-zen", "opencode-console"])
 
 const CLINE_PASS_ALIASES = new Set([CLINE_PASS_PROVIDER, "clinepass", "cline"])
 
@@ -91,6 +127,11 @@ export function isNousResearchProvider(provider: string | undefined): boolean {
 	return NOUS_RESEARCH_ALIASES.has(normalized)
 }
 
+export function isOpencodeProvider(provider: string | undefined): boolean {
+	const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : ""
+	return OPENCODE_ALIASES.has(normalized)
+}
+
 export function normalizeAgentProvider(provider: string | undefined): AgentProviderId {
 	const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : undefined
 	if (!normalized) return OPENAI_CODEX_PROVIDER
@@ -102,6 +143,9 @@ export function normalizeAgentProvider(provider: string | undefined): AgentProvi
 	}
 	if (isNousResearchProvider(normalized)) {
 		return NOUS_RESEARCH_PROVIDER
+	}
+	if (isOpencodeProvider(normalized)) {
+		return OPENCODE_PROVIDER
 	}
 	if (normalized === "openai" || normalized === "codex" || normalized === "codex-oauth") {
 		return OPENAI_CODEX_PROVIDER
@@ -153,6 +197,7 @@ export function getAgentProviderLabel(provider: string | undefined): string {
 	if (normalized === CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER) return "Claude Code"
 	if (normalized === CLINE_PASS_PROVIDER) return "Cline Pass"
 	if (normalized === NOUS_RESEARCH_PROVIDER) return "Nous Research"
+	if (normalized === OPENCODE_PROVIDER) return "OpenCode"
 
 	return normalized
 		.split(/[-_]+/)

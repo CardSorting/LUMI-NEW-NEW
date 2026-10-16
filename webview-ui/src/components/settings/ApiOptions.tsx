@@ -15,6 +15,7 @@ import { ClinePassProvider } from "./providers/ClinePassProvider"
 import { CloudflareProvider } from "./providers/CloudflareProvider"
 import { NousResearchProvider } from "./providers/NousresearchProvider"
 import { OpenAiCodexProvider } from "./providers/OpenAiCodexProvider"
+import { OpencodeProvider } from "./providers/OpencodeProvider"
 import { OpenRouterProvider } from "./providers/OpenRouterProvider"
 import { useApiConfigurationHandlers } from "./utils/useApiConfigurationHandlers"
 
@@ -314,6 +315,10 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 
 			{apiConfiguration && selectedProvider === "cline-pass" && (
 				<ClinePassProvider currentMode={currentMode} isPopup={isPopup} showModelOptions={showModelOptions} />
+			)}
+
+			{apiConfiguration && selectedProvider === "opencode" && (
+				<OpencodeProvider currentMode={currentMode} isPopup={isPopup} showModelOptions={showModelOptions} />
 			)}
 
 			{apiErrorMessage && (

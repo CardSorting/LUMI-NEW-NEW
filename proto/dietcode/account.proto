@@ -63,6 +63,15 @@ service AccountService {
   rpc getClaudeSubscriptionDirectSdkStatus(StringRequest) returns (String);
   rpc refreshClaudeSubscriptionDirectSdkModels(StringRequest) returns (String);
 
+  // Check OpenCode account status and refresh account models
+  rpc getOpencodeStatus(EmptyRequest) returns (String);
+  rpc refreshOpencodeModels(EmptyRequest) returns (String);
+  rpc opencodeSignIn(EmptyRequest) returns (String);
+  rpc opencodeSignOut(EmptyRequest) returns (Empty);
+  rpc cancelOpencodeSignIn(EmptyRequest) returns (Empty);
+  rpc getOpencodeOrganizations(EmptyRequest) returns (String);
+  rpc switchOpencodeOrganization(StringRequest) returns (Empty);
+
   // Signs out of Google Personal and clears stored credentials
   rpc googleSignOutClicked(EmptyRequest) returns (Empty);
 }

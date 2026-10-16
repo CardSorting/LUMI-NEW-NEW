@@ -119,6 +119,14 @@ export interface ExtensionState {
 	welcomeBanners?: BannerCardData[]
 	openAiCodexIsAuthenticated?: boolean
 	openAiCodexAuthInProgress?: boolean
+	opencodeIsAuthenticated?: boolean
+	opencodeAuthInProgress?: boolean
+	opencodeAuthInfo?: {
+		userCode?: string
+		verificationUri?: string
+		email?: string
+		orgName?: string
+	}
 	googleAuthIsAuthenticated?: boolean
 	googleUserInfo?: UserInfo
 }

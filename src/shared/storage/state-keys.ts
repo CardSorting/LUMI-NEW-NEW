@@ -233,6 +233,8 @@ const API_HANDLER_SETTINGS_FIELDS = {
 	planModeNousResearchModelInfo: { default: undefined as ModelInfo | undefined },
 	planModeClinePassModelId: { default: undefined as string | undefined },
 	planModeClinePassModelInfo: { default: undefined as ModelInfo | undefined },
+	planModeOpencodeModelId: { default: undefined as string | undefined },
+	planModeOpencodeModelInfo: { default: undefined as ModelInfo | undefined },
 	planModeOcaModelId: { default: undefined as string | undefined },
 	planModeOcaModelInfo: { default: undefined as OcaModelInfo | undefined },
 	planModeOcaReasoningEffort: { default: undefined as string | undefined },
@@ -247,6 +249,8 @@ const API_HANDLER_SETTINGS_FIELDS = {
 	actModeNousResearchModelInfo: { default: undefined as ModelInfo | undefined },
 	actModeClinePassModelId: { default: undefined as string | undefined },
 	actModeClinePassModelInfo: { default: undefined as ModelInfo | undefined },
+	actModeOpencodeModelId: { default: undefined as string | undefined },
+	actModeOpencodeModelInfo: { default: undefined as ModelInfo | undefined },
 	actModeOcaModelId: { default: undefined as string | undefined },
 	actModeOcaModelInfo: { default: undefined as OcaModelInfo | undefined },
 	actModeOcaReasoningEffort: { default: undefined as string | undefined },
@@ -377,6 +381,7 @@ const SECRETS_KEYS = [
 	"ocaRefreshToken",
 	"mcpOAuthSecrets",
 	"openai-codex-oauth-credentials", // JSON blob containing OAuth tokens for OpenAI Codex (ChatGPT subscription)
+	"opencode-oauth-credentials", // JSON blob containing OAuth tokens for OpenCode Console
 	"embeddingApiKey",
 ] as const
 

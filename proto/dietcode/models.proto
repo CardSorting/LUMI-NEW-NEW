@@ -471,6 +471,7 @@ enum ApiProvider {
   GOOGLE_PERSONAL = 42;
   CLAUDE_SUBSCRIPTION_DIRECTSDK = 43;
   CLINE_PASS = 44;
+  OPENCODE = 45;
 }
 
 enum ApiFormat {
@@ -667,6 +668,8 @@ message ModelsApiConfiguration {
   optional string plan_mode_cline_pass_model_id = 142;
   optional OpenRouterModelInfo plan_mode_cline_pass_model_info = 143;
   optional OpenRouterModelInfo plan_mode_nous_research_model_info = 144;
+  optional string plan_mode_opencode_model_id = 145;
+  optional OpenRouterModelInfo plan_mode_opencode_model_info = 146;
 
   // Act mode configurations
   optional ApiProvider act_mode_api_provider = 200;
@@ -714,4 +717,6 @@ message ModelsApiConfiguration {
   optional string act_mode_cline_pass_model_id = 242;
   optional OpenRouterModelInfo act_mode_cline_pass_model_info = 243;
   optional OpenRouterModelInfo act_mode_nous_research_model_info = 244;
+  optional string act_mode_opencode_model_id = 245;
+  optional OpenRouterModelInfo act_mode_opencode_model_info = 246;
 }

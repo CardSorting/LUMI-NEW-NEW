@@ -19,6 +19,7 @@ import {
 	moonshotDefaultModelId,
 	nousResearchDefaultModelId,
 	openAiNativeDefaultModelId,
+	opencodeDefaultModelId,
 	openRouterDefaultModelId,
 	requestyDefaultModelId,
 	sapAiCoreDefaultModelId,
@@ -27,6 +28,7 @@ import {
 
 const ProviderKeyMap: Partial<Record<ApiProvider, string>> = {
 	"cline-pass": "ClinePassModelId",
+	opencode: "OpencodeModelId",
 	openrouter: "OpenRouterModelId",
 	dietcode: "DietCodeModelId",
 	openai: "OpenAiModelId",
@@ -91,6 +93,7 @@ export const ProviderToApiKeyMap: Partial<Record<ApiProvider, keyof Secrets | (k
 
 const ProviderDefaultModelMap: Partial<Record<ApiProvider, string>> = {
 	"cline-pass": clinePassDefaultModelId,
+	opencode: opencodeDefaultModelId,
 	"claude-subscription-directsdk-experimental": "claude-sonnet-5[1m]",
 	anthropic: anthropicDefaultModelId,
 	openrouter: openRouterDefaultModelId,
