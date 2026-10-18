@@ -252,6 +252,13 @@ export interface Schema {
 		expiresAt: number
 		createdAt: number
 	}
+	compressed_chunks: {
+		chunk_hash: string
+		raw_len: number
+		deflated_blob: Buffer
+		crc32: number
+		last_accessed_at: number
+	}
 }
 
 let _db: Kysely<Schema> | null = null
@@ -755,10 +762,20 @@ export async function getDb(): Promise<Kysely<Schema>> {
 					createdAt BIGINT NOT NULL
 				)`,
 			)
+			await execute(
+				`CREATE TABLE IF NOT EXISTS compressed_chunks (
+					chunk_hash TEXT PRIMARY KEY,
+					raw_len INTEGER NOT NULL,
+					deflated_blob BLOB NOT NULL,
+					crc32 INTEGER NOT NULL,
+					last_accessed_at BIGINT NOT NULL
+				) WITHOUT ROWID`,
+			)
 
 			// Additional Indices
 			await execute(`CREATE INDEX IF NOT EXISTS idx_swarm_locks_owner ON swarm_locks(ownerId)`)
 			await execute(`CREATE INDEX IF NOT EXISTS idx_swarm_locks_expires ON swarm_locks(expiresAt)`)
+			await execute(`CREATE INDEX IF NOT EXISTS idx_compressed_chunks_accessed ON compressed_chunks(last_accessed_at)`)
 			await execute(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_stream ON agent_tasks(streamId)`)
 			await execute(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status)`)
 			await execute(`CREATE INDEX IF NOT EXISTS idx_agent_streams_status ON agent_streams(status)`)
