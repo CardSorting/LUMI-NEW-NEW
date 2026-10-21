@@ -1,0 +1,12 @@
+{
+  "name": "sample-ecommerce-service",
+  "version": "1.0.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "mocha tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "zod": "^3.22.4"
+  }
+}

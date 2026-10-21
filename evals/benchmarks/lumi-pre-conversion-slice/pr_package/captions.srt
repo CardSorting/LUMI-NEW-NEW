@@ -1,0 +1,75 @@
+1
+00:00:00,000 --> 00:00:04,800
+Most people never think about the machinery inside the software they use.
+
+2
+00:00:05,000 --> 00:00:07,800
+And they shouldn't have to.
+
+3
+00:00:08,000 --> 00:00:11,800
+Developers should be able to focus on their creative flow, not wait for their tools.
+
+4
+00:00:12,000 --> 00:00:15,200
+But that experience is shaped by engineering decisions that are often completely invisible.
+
+5
+00:00:15,474 --> 00:00:20,674
+Before considering any rewrite or language migration for LUMI,
+
+6
+00:00:20,874 --> 00:00:23,674
+we measured what actually exists.
+
+7
+00:00:23,874 --> 00:00:28,474
+We established an empirical baseline across five core local workloads:
+
+8
+00:00:28,674 --> 00:00:33,474
+stream parsing, workspace discovery, SQLite state, diff patching, and full end-to-end cycles.
+
+9
+00:00:33,676 --> 00:00:38,176
+The data reveals that every single local operation already executes in milliseconds or less:
+
+10
+00:00:38,376 --> 00:00:41,176
+from seventeen microseconds for fuzzy diffs,
+
+11
+00:00:41,376 --> 00:00:44,476
+to under three milliseconds for turn dispatch.
+
+12
+00:00:44,758 --> 00:00:46,758
+Why does that matter?
+
+13
+00:00:46,958 --> 00:00:51,758
+Because without a baseline, you cannot know if a proposed rewrite makes things better or simply adds complexity.
+
+14
+00:00:51,958 --> 00:00:55,958
+Measuring first ensures engineering effort targets constraints that actually impact people,
+
+15
+00:00:56,158 --> 00:01:00,158
+rather than optimizing what is already fast.
+
+16
+00:01:00,381 --> 00:01:04,981
+The goal of performance engineering isn't to make a synthetic benchmark look impressive.
+
+17
+00:01:05,181 --> 00:01:08,581
+It's to build software that serves people better.
+
+18
+00:01:08,781 --> 00:01:11,581
+Good infrastructure doesn't need to be visible to be valuable.
+
+19
+00:01:11,781 --> 00:01:13,381
+But its benefits should always be measurable.

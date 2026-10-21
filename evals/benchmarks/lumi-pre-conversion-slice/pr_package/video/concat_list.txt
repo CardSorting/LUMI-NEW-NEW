@@ -1,0 +1,5 @@
+file '/Users/bozoegg/Downloads/LUMI/evals/benchmarks/lumi-pre-conversion-slice/pr_package/video/scene1.mp4'
+file '/Users/bozoegg/Downloads/LUMI/evals/benchmarks/lumi-pre-conversion-slice/pr_package/video/scene2.mp4'
+file '/Users/bozoegg/Downloads/LUMI/evals/benchmarks/lumi-pre-conversion-slice/pr_package/video/scene3.mp4'
+file '/Users/bozoegg/Downloads/LUMI/evals/benchmarks/lumi-pre-conversion-slice/pr_package/video/scene4.mp4'
+file '/Users/bozoegg/Downloads/LUMI/evals/benchmarks/lumi-pre-conversion-slice/pr_package/video/scene5.mp4'

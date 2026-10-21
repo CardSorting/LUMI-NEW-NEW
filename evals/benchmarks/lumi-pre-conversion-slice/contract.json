@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LUMI Language Conversion Benchmark Contract",
+  "version": "1.0.0",
+  "commission": "LUMI — PRE-CONVERSION BENCHMARK SLICE",
+  "commissioningAuthority": "MAJO, Executive Chair",
+  "principal": "EGG",
+  "executionAgent": "Deputy Gemini",
+  "purpose": "Enforce strict semantic and operational equivalence between the TypeScript/Node.js LUMI harness baseline and any future compiled/converted implementation.",
+  "targetHardwareBaseline": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "minimumCores": 10,
+    "memorySubsystem": "Unified LPDDR5 Memory",
+    "storage": "APFS NVMe SSD"
+  },
+  "workloads": [
+    {
+      "workloadId": "1_harness_stream_dispatch",
+      "name": "Core Harness Stream Parsing & Turn Dispatch",
+      "warmupIterations": 5,
+      "sampleIterations": 50,
+      "chunkSizeBytes": 50,
+      "inputTurns": [
+        "I will investigate the codebase first.<list_files><path>src</path><recursive>true</recursive></list_files>",
+        "Now examining the route handler implementation.<read_file><path>src/controllers/orderController.ts</path></read_file>",
+        "I will apply the needed gateway route methods.<replace_in_file><path>src/controllers/orderController.ts</path><diff><<<<<<< SEARCH\npublic async updateOrder\n=======\npublic async updateOrderWithValidation\n>>>>>>> REPLACE</diff></replace_in_file>",
+        "Let us run the test suite to ensure no regressions.<execute_command><command>npm test</command></execute_command>",
+        "The changes are complete and verified.<attempt_completion><result>All 5 routes updated and tested cleanly.</result></attempt_completion>"
+      ],
+      "requiredOperations": [
+        "Simulate incremental chunked streaming token arrival at 50 bytes per chunk",
+        "Stream-parse XML tags preserving tool parameter integrity and partial state",
+        "Enforce FIFO queueing and action reservation before dispatch",
+        "Record 100% of the 5 tool use blocks across every repetition"
+      ],
+      "successCriteria": {
+        "expectedToolCallsPerRepetition": 5,
+        "correctnessThreshold": 1.0
+      }
+    },
+    {
+      "workloadId": "2_project_search_context_prep",
+      "name": "Project Search & Context Preparation",
+      "warmupIterations": 5,
+      "sampleIterations": 30,
+      "projectFixture": "evals/benchmarks/lumi-pre-conversion-slice/fixtures/sample-project",
+      "requiredOperations": [
+        "Recursive filesystem scan excluding build artifacts and ignore patterns",
+        "Ripgrep-equivalent regex search for pattern /class\\s+\\w+Controller/ across project files",
+        "Token budgeting and context history window calculation"
+      ],
+      "successCriteria": {
+        "expectedFilesEnumerated": 25,
+        "expectedSymbolMatches": 8,
+        "correctnessThreshold": 1.0
+      }
+    },
+    {
+      "workloadId": "3_state_persistence_cas",
+      "name": "State & Persistence Substrate (SQLite WAL & CAS)",
+      "warmupIterations": 5,
+      "sampleIterations": 50,
+      "databaseConfiguration": {
+        "engine": "SQLite 3.48+ in WAL mode",
+        "pragmas": ["journal_mode = WAL", "synchronous = NORMAL", "temp_store = MEMORY"]
+      },
+      "requiredOperations": [
+        "Atomic transaction commit of 10 session nodes per repetition",
+        "Point-seek read of 20 content-addressed SHA-256 CAS chunks",
+        "Hydration and deserialization of session graph state"
+      ],
+      "successCriteria": {
+        "expectedCacheHitRate": 1.0,
+        "expectedHydrationCount": 10,
+        "correctnessThreshold": 1.0
+      }
+    },
+    {
+      "workloadId": "4_tool_diff_patching",
+      "name": "Tool Execution & AST Diff Patching",
+      "warmupIterations": 5,
+      "sampleIterations": 50,
+      "targetFile": "evals/benchmarks/lumi-pre-conversion-slice/fixtures/target-controller.ts",
+      "patchFile": "evals/benchmarks/lumi-pre-conversion-slice/fixtures/target-patch.diff",
+      "requiredOperations": [
+        "Search/replace fuzzy multi-hunk diff construction against target file",
+        "Idempotent action registration and concurrency reservation",
+        "Cryptographic verification of the patched output content"
+      ],
+      "successCriteria": {
+        "expectedPatchedSha256": "df96eb498477e39216e5fd3246271c0c7a860c35bc8d4d5ab764320791ccdf6f",
+        "correctnessThreshold": 1.0
+      }
+    },
+    {
+      "workloadId": "5_end_to_end_agent_cycle",
+      "name": "End-to-End Deterministic Agent Task Completion",
+      "warmupIterations": 3,
+      "sampleIterations": 20,
+      "requiredOperations": [
+        "Turn 1: Workspace discovery via list_files",
+        "Turn 2: Inspection via read_file",
+        "Turn 3: Atomic file modification via replace_in_file diff",
+        "Turn 4: Verification and task completion via attempt_completion",
+        "Clean destruction of isolated sandbox after task settles"
+      ],
+      "successCriteria": {
+        "expectedStepsCompleted": 4,
+        "fileVerificationRule": "Includes 'Hello, ' and '!'",
+        "correctnessThreshold": 1.0
+      }
+    }
+  ]
+}

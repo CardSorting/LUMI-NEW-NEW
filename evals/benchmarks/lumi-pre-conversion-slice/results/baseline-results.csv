@@ -1,0 +1,6 @@
+workload_id,description,repetitions,p50_ms,p90_ms,p99_ms,mean_ms,stddev_ms,ci95_margin_ms,throughput_val,throughput_unit,cpu_user_ms,cpu_sys_ms,heap_delta_mb,correctness_pct
+"1_harness_stream_dispatch","Core harness XML stream parsing, token chunking & ActionExecutor turn dispatch",50,2.903,7.5587,13.1605,3.9079,2.2729,0.63,1279.46,"turns/sec",287.08,5.99,2.6,100.0
+"2_project_search_context_prep","Workspace file enumeration, symbol scan & ContextManager truncation budgeting",30,0.6335,0.838,0.857,0.6698,0.0774,0.0277,37324.57,"files_scanned/sec",10.76,14.77,-0.99,100.0
+"3_state_persistence_cas","SQLite WAL session graph commits, warm CAS point seeks & state hydration",50,0.1219,0.1438,0.5091,0.13,0.0567,0.0157,230769.23,"ops/sec",4.65,3.07,0.75,100.0
+"4_tool_diff_patching","AST search/replace fuzzy diff application, verification & ActionExecutor reservation",50,0.0169,0.0247,0.115,0.0193,0.0144,0.004,2124352.33,"lines_patched/sec",1.41,0.06,0.18,100.0
+"5_end_to_end_agent_cycle","Deterministic 4-step task cycle: discover -> read -> diff -> verify -> complete",20,0.728,0.9278,1.1025,0.7506,0.11,0.0482,5329.07,"steps/sec",6.43,8.82,-0.46,100.0

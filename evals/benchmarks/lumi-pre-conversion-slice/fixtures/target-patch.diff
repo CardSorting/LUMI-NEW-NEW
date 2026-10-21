@@ -1,0 +1,21 @@
+<<<<<<< SEARCH
+  public getRouteCount(): number {
+    return this.routes.size;
+  }
+
+  public getTimeout(): number {
+    return this.config.timeoutMs;
+  }
+=======
+  public getRouteCount(): number {
+    return this.routes.size;
+  }
+
+  public getActiveRoutes(): string[] {
+    return Array.from(this.routes.keys());
+  }
+
+  public getTimeout(): number {
+    return Math.max(100, this.config.timeoutMs);
+  }
+>>>>>>> REPLACE

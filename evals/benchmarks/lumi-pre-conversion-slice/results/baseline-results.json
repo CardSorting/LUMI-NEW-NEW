@@ -1,0 +1,167 @@
+{
+  "commission": "LUMI PRE-CONVERSION BENCHMARK SLICE",
+  "timestamp": "2026-10-21T18:39:42.013Z",
+  "gitCommit": "e0a200fc38ee025c3928ba24b5c9bd3f368d870e",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "osRelease": "25.5.0",
+    "cpuModel": "Apple M1 Pro",
+    "cpuCores": 10,
+    "totalMemoryGb": 16,
+    "nodeVersion": "v26.8.1",
+    "v8Version": "14.6.202.34-node.28"
+  },
+  "workloads": {
+    "1_harness_stream_dispatch": {
+      "workloadId": "1_harness_stream_dispatch",
+      "description": "Core harness XML stream parsing, token chunking & ActionExecutor turn dispatch",
+      "repetitions": 50,
+      "durationMs": {
+        "count": 50,
+        "p50": 2.903,
+        "p90": 7.5587,
+        "p99": 13.1605,
+        "mean": 3.9079,
+        "stddev": 2.2729,
+        "ci95": 0.63,
+        "min": 2.7953,
+        "max": 13.1605,
+        "unit": "ms"
+      },
+      "throughput": {
+        "value": 1279.46,
+        "unit": "turns/sec"
+      },
+      "cpuUserMs": 287.08,
+      "cpuSystemMs": 5.99,
+      "heapUsedDeltaMb": 2.6,
+      "correctnessRate": 1,
+      "metadata": {
+        "totalToolCalls": 250,
+        "turnsPerRun": 5,
+        "chunkSize": 50
+      }
+    },
+    "2_project_search_context_prep": {
+      "workloadId": "2_project_search_context_prep",
+      "description": "Workspace file enumeration, symbol scan & ContextManager truncation budgeting",
+      "repetitions": 30,
+      "durationMs": {
+        "count": 30,
+        "p50": 0.6335,
+        "p90": 0.838,
+        "p99": 0.857,
+        "mean": 0.6698,
+        "stddev": 0.0774,
+        "ci95": 0.0277,
+        "min": 0.605,
+        "max": 0.857,
+        "unit": "ms"
+      },
+      "throughput": {
+        "value": 37324.57,
+        "unit": "files_scanned/sec"
+      },
+      "cpuUserMs": 10.76,
+      "cpuSystemMs": 14.77,
+      "heapUsedDeltaMb": -0.99,
+      "correctnessRate": 1,
+      "metadata": {
+        "totalFiles": 25,
+        "matchedControllers": 8
+      }
+    },
+    "3_state_persistence_cas": {
+      "workloadId": "3_state_persistence_cas",
+      "description": "SQLite WAL session graph commits, warm CAS point seeks & state hydration",
+      "repetitions": 50,
+      "durationMs": {
+        "count": 50,
+        "p50": 0.1219,
+        "p90": 0.1438,
+        "p99": 0.5091,
+        "mean": 0.13,
+        "stddev": 0.0567,
+        "ci95": 0.0157,
+        "min": 0.1064,
+        "max": 0.5091,
+        "unit": "ms"
+      },
+      "throughput": {
+        "value": 230769.23,
+        "unit": "ops/sec"
+      },
+      "cpuUserMs": 4.65,
+      "cpuSystemMs": 3.07,
+      "heapUsedDeltaMb": 0.75,
+      "correctnessRate": 1,
+      "metadata": {
+        "cacheHits": 1000,
+        "expectedHits": 1000,
+        "nodesPerSession": 10,
+        "casChunksChecked": 20
+      }
+    },
+    "4_tool_diff_patching": {
+      "workloadId": "4_tool_diff_patching",
+      "description": "AST search/replace fuzzy diff application, verification & ActionExecutor reservation",
+      "repetitions": 50,
+      "durationMs": {
+        "count": 50,
+        "p50": 0.0169,
+        "p90": 0.0247,
+        "p99": 0.115,
+        "mean": 0.0193,
+        "stddev": 0.0144,
+        "ci95": 0.004,
+        "min": 0.0133,
+        "max": 0.115,
+        "unit": "ms"
+      },
+      "throughput": {
+        "value": 2124352.33,
+        "unit": "lines_patched/sec"
+      },
+      "cpuUserMs": 1.41,
+      "cpuSystemMs": 0.06,
+      "heapUsedDeltaMb": 0.18,
+      "correctnessRate": 1,
+      "metadata": {
+        "patchVerifications": 50,
+        "expectedHash": "df96eb498477e39216e5fd3246271c0c7a860c35bc8d4d5ab764320791ccdf6f",
+        "linesInOriginal": 41
+      }
+    },
+    "5_end_to_end_agent_cycle": {
+      "workloadId": "5_end_to_end_agent_cycle",
+      "description": "Deterministic 4-step task cycle: discover -> read -> diff -> verify -> complete",
+      "repetitions": 20,
+      "durationMs": {
+        "count": 20,
+        "p50": 0.728,
+        "p90": 0.9278,
+        "p99": 1.1025,
+        "mean": 0.7506,
+        "stddev": 0.11,
+        "ci95": 0.0482,
+        "min": 0.6391,
+        "max": 1.1025,
+        "unit": "ms"
+      },
+      "throughput": {
+        "value": 5329.07,
+        "unit": "steps/sec"
+      },
+      "cpuUserMs": 6.43,
+      "cpuSystemMs": 8.82,
+      "heapUsedDeltaMb": -0.46,
+      "correctnessRate": 1,
+      "metadata": {
+        "successfulTasks": 20,
+        "totalTasks": 20,
+        "stepsPerTask": 4
+      }
+    }
+  }
+}
