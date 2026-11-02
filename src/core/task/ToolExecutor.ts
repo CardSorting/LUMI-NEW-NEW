@@ -167,6 +167,10 @@ export class ToolExecutor {
 			throw new Error("KnowledgeGraphService not initialized")
 		}
 
+		const { DEFAULT_AGENT_SWARM_CONFIG, getExplicitStateManagerSetting } = await import(
+			"@/infrastructure/ai/AgentSwarmConfig"
+		)
+
 		const config: TaskConfig = {
 			taskId: this.taskId,
 			ulid: this.ulid,
@@ -180,6 +184,56 @@ export class ToolExecutor {
 			auditAdvisoryEscalationEnabled: this.stateManager.getGlobalSettingsKey("auditAdvisoryEscalationEnabled"),
 			auditPlanRegressionGateEnabled: this.stateManager.getGlobalSettingsKey("auditPlanRegressionGateEnabled"),
 			auditToolOutputAdvisoryEnabled: this.stateManager.getGlobalSettingsKey("auditToolOutputAdvisoryEnabled"),
+			agentSwarmEnabled: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmEnabled",
+				DEFAULT_AGENT_SWARM_CONFIG.enabled,
+			),
+			agentSwarmCriticalCompletionReviewEnabled: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmCriticalCompletionReviewEnabled",
+				DEFAULT_AGENT_SWARM_CONFIG.criticalCompletionReviewEnabled,
+			),
+			agentSwarmHierarchicalDeferEnabled: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmHierarchicalDeferEnabled",
+				DEFAULT_AGENT_SWARM_CONFIG.hierarchicalDeferEnabled,
+			),
+			agentSwarmDefaultDeferBoundary: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmDefaultDeferBoundary",
+				DEFAULT_AGENT_SWARM_CONFIG.defaultDeferBoundary,
+			),
+			agentSwarmAutoDeferOnCompletionReview: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmAutoDeferOnCompletionReview",
+				DEFAULT_AGENT_SWARM_CONFIG.autoDeferOnCompletionReview,
+			),
+			agentSwarmMaxInitialCompletionReviews: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmMaxInitialCompletionReviews",
+				DEFAULT_AGENT_SWARM_CONFIG.maxInitialCompletionReviews,
+			),
+			agentSwarmMaxCorrectiveVerificationPasses: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmMaxCorrectiveVerificationPasses",
+				DEFAULT_AGENT_SWARM_CONFIG.maxCorrectiveVerificationPasses,
+			),
+			agentSwarmLegionEnabled: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmLegionEnabled",
+				DEFAULT_AGENT_SWARM_CONFIG.legionEnabled,
+			),
+			agentSwarmLegionStrategy: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmLegionStrategy",
+				DEFAULT_AGENT_SWARM_CONFIG.legionStrategy,
+			),
+			agentSwarmLegionMaxSpecialists: getExplicitStateManagerSetting(
+				this.stateManager,
+				"agentSwarmLegionMaxSpecialists",
+				DEFAULT_AGENT_SWARM_CONFIG.legionMaxSpecialists,
+			),
 			vscodeTerminalExecutionMode: this.vscodeTerminalExecutionMode,
 			enableParallelToolCalling: this.isParallelToolCallingEnabled(),
 			cwd: this.cwd,

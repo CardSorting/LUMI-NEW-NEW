@@ -40,3 +40,22 @@ export const updateSetting = (field: keyof UpdateSettingsRequest, value: any) =>
 		console.error(`Failed to update setting ${field}:`, error)
 	})
 }
+
+/**
+ * Updates multiple fields in the settings atomically in a single gRPC request.
+ *
+ * @param updates - Partial UpdateSettingsRequest map of field keys and values
+ */
+export const updateSettingsBatch = (updates: Partial<Record<keyof UpdateSettingsRequest, any>>) => {
+	const updateRequest: Partial<UpdateSettingsRequest> = {}
+
+	for (const [field, value] of Object.entries(updates) as Array<[keyof UpdateSettingsRequest, any]>) {
+		if (value !== undefined) {
+			updateRequest[field] = convertToProtoValue(field, value)
+		}
+	}
+
+	StateServiceClient.updateSettings(UpdateSettingsRequest.create(updateRequest)).catch((error) => {
+		console.error("Failed to batch update settings:", error)
+	})
+}

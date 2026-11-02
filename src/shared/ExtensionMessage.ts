@@ -115,6 +115,16 @@ export interface ExtensionState {
 	auditAdvisoryAutoScrollMode?: "never" | "critical" | "all"
 	auditPlanRegressionGateEnabled?: boolean
 	auditToolOutputAdvisoryEnabled?: boolean
+	agentSwarmEnabled?: boolean
+	agentSwarmCriticalCompletionReviewEnabled?: boolean
+	agentSwarmHierarchicalDeferEnabled?: boolean
+	agentSwarmDefaultDeferBoundary?: "before_turn" | "safe_boundary" | "immediate"
+	agentSwarmAutoDeferOnCompletionReview?: boolean
+	agentSwarmMaxInitialCompletionReviews?: number
+	agentSwarmMaxCorrectiveVerificationPasses?: number
+	agentSwarmLegionEnabled?: boolean
+	agentSwarmLegionStrategy?: "adaptive" | "tactical_strike" | "balanced_squad" | "full_legion" | "verification_heavy"
+	agentSwarmLegionMaxSpecialists?: number
 	banners?: BannerCardData[]
 	welcomeBanners?: BannerCardData[]
 	openAiCodexIsAuthenticated?: boolean

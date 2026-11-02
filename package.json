@@ -454,6 +454,74 @@
 					"default": false,
 					"description": "Retired. Unavailable roadmap diagnostics cannot block completion.",
 					"deprecationMessage": "Roadmap completion gates have been removed. This setting has no effect, including when true."
+				},
+				"lumi.agentSwarm.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable the auxiliary Agent Swarm capability suite (Critical Completion Review and Hierarchical Agent Defer/Resume). Disabled by default so normal single-agent flows run with zero overhead."
+				},
+				"lumi.agentSwarm.criticalCompletionReview.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable Critical Completion Review as an optional post-completion verification pass (bounded 1 initial review + 1 corrective pass). Disabled by default."
+				},
+				"lumi.agentSwarm.hierarchicalDefer.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable cooperative hierarchical agent defer/resume across parent and child streams. Disabled by default."
+				},
+				"lumi.agentSwarm.hierarchicalDefer.defaultBoundary": {
+					"type": "string",
+					"enum": [
+						"before_turn",
+						"safe_boundary",
+						"immediate"
+					],
+					"default": "safe_boundary",
+					"description": "Default execution boundary for cooperative agent defer requests."
+				},
+				"lumi.agentSwarm.autoDeferOnCompletionReview": {
+					"type": "boolean",
+					"default": true,
+					"description": "When both Critical Completion Review and Hierarchical Defer are enabled, automatically suspend the active pipeline while the review pass evaluates completed work."
+				},
+				"lumi.agentSwarm.criticalCompletionReview.maxInitialReviews": {
+					"type": "number",
+					"default": 1,
+					"minimum": 1,
+					"maximum": 5,
+					"description": "Maximum initial adversarial review passes per completion event (default: 1)."
+				},
+				"lumi.agentSwarm.criticalCompletionReview.maxCorrectivePasses": {
+					"type": "number",
+					"default": 1,
+					"minimum": 1,
+					"maximum": 5,
+					"description": "Maximum corrective verification passes after remediation before escalating or terminating with disclosed limitations (default: 1)."
+				},
+				"lumi.agentSwarm.legion.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable the Legion specialist agent classification, formation, and delegation engine. Disabled by default."
+				},
+				"lumi.agentSwarm.legion.strategy": {
+					"type": "string",
+					"enum": [
+						"adaptive",
+						"tactical_strike",
+						"balanced_squad",
+						"full_legion",
+						"verification_heavy"
+					],
+					"default": "adaptive",
+					"description": "Default formation strategy for the Legion when classifying and spawning specialist subagents."
+				},
+				"lumi.agentSwarm.legion.maxSpecialists": {
+					"type": "number",
+					"default": 4,
+					"minimum": 1,
+					"maximum": 8,
+					"description": "Maximum number of specialist agents spawned per Legion formation (default: 4)."
 				}
 			}
 		}

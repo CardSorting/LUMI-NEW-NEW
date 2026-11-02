@@ -41,6 +41,11 @@ export async function updateTaskSettings(controller: Controller, request: Update
 			actModeApiProvider,
 			// Fields requiring special logic
 			browserSettings,
+			agentSwarmDefaultDeferBoundary,
+			agentSwarmMaxInitialCompletionReviews,
+			agentSwarmMaxCorrectiveVerificationPasses,
+			agentSwarmLegionStrategy,
+			agentSwarmLegionMaxSpecialists,
 			...simpleSettings
 		} = request.settings
 
@@ -50,6 +55,48 @@ export async function updateTaskSettings(controller: Controller, request: Update
 		)
 
 		controller.stateManager.setTaskSettingsBatch(taskId, filteredSettings)
+
+		if (
+			agentSwarmDefaultDeferBoundary === "before_turn" ||
+			agentSwarmDefaultDeferBoundary === "safe_boundary" ||
+			agentSwarmDefaultDeferBoundary === "immediate"
+		) {
+			controller.stateManager.setTaskSettings(taskId, "agentSwarmDefaultDeferBoundary", agentSwarmDefaultDeferBoundary)
+		}
+
+		if (agentSwarmMaxInitialCompletionReviews !== undefined) {
+			const maxInitial = Math.max(1, Math.min(5, Math.round(Number(agentSwarmMaxInitialCompletionReviews))))
+			if (Number.isFinite(maxInitial)) {
+				controller.stateManager.setTaskSettings(taskId, "agentSwarmMaxInitialCompletionReviews", maxInitial)
+			}
+		}
+
+		if (agentSwarmMaxCorrectiveVerificationPasses !== undefined) {
+			const maxCorrective = Math.max(1, Math.min(5, Math.round(Number(agentSwarmMaxCorrectiveVerificationPasses))))
+			if (Number.isFinite(maxCorrective)) {
+				controller.stateManager.setTaskSettings(taskId, "agentSwarmMaxCorrectiveVerificationPasses", maxCorrective)
+			}
+		}
+
+		if (
+			agentSwarmLegionStrategy === "adaptive" ||
+			agentSwarmLegionStrategy === "tactical_strike" ||
+			agentSwarmLegionStrategy === "balanced_squad" ||
+			agentSwarmLegionStrategy === "full_legion" ||
+			agentSwarmLegionStrategy === "verification_heavy"
+		) {
+			controller.stateManager.setTaskSettings(taskId, "agentSwarmLegionStrategy", agentSwarmLegionStrategy)
+		}
+
+		if (agentSwarmLegionMaxSpecialists !== undefined) {
+			const maxSpecialists = Math.max(1, Math.min(8, Math.round(Number(agentSwarmLegionMaxSpecialists))))
+			if (Number.isFinite(maxSpecialists)) {
+				controller.stateManager.setTaskSettings(taskId, "agentSwarmLegionMaxSpecialists", maxSpecialists)
+			}
+		}
+
+		const { invalidateAgentSwarmConfigCache } = await import("@/infrastructure/ai/AgentSwarmConfig")
+		invalidateAgentSwarmConfigCache()
 
 		// Handle fields requiring type conversion from generated protobuf types to application types
 		if (autoApprovalSettings) {

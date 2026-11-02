@@ -302,6 +302,18 @@ const USER_SETTINGS_FIELDS = {
 	auditAdvisoryAutoScrollMode: { default: "critical" as "never" | "critical" | "all" },
 	auditPlanRegressionGateEnabled: { default: false as boolean },
 	auditToolOutputAdvisoryEnabled: { default: true as boolean },
+	agentSwarmEnabled: { default: false as boolean },
+	agentSwarmCriticalCompletionReviewEnabled: { default: false as boolean },
+	agentSwarmHierarchicalDeferEnabled: { default: false as boolean },
+	agentSwarmDefaultDeferBoundary: { default: "safe_boundary" as "before_turn" | "safe_boundary" | "immediate" },
+	agentSwarmAutoDeferOnCompletionReview: { default: true as boolean },
+	agentSwarmMaxInitialCompletionReviews: { default: 1 as number },
+	agentSwarmMaxCorrectiveVerificationPasses: { default: 1 as number },
+	agentSwarmLegionEnabled: { default: false as boolean },
+	agentSwarmLegionStrategy: {
+		default: "adaptive" as "adaptive" | "tactical_strike" | "balanced_squad" | "full_legion" | "verification_heavy",
+	},
+	agentSwarmLegionMaxSpecialists: { default: 4 as number },
 	masEnabled: { default: true as boolean },
 
 	// OpenTelemetry configuration

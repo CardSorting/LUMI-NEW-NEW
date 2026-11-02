@@ -1,0 +1,148 @@
+# How It Works — Inner Workings, and Why This Is Possible
+
+## 1. Why this is possible at all
+
+The hard-sounding parts ("freeze a whole agent hierarchy and resume it", "spawn the right specialist") are possible because the host already provides five primitives. The feature is a **protocol layered over them**, not a new runtime.
+
+| Existing primitive | What it gives us | Used for |
+|---|---|---|
+| **Streams** (`agent_streams`, `parentId`) | Independent execution identities with tree structure | Parent/child separation; hierarchy walks |
+| **Durable key/value memory** (`agent_memory`, PK `(streamId, key)`) | A per-stream durable scratchpad | Checkpoints, control inboxes, roadmaps, manifests, reservations |
+| **`BufferedDbPool`** | Batched, ordered, SQLite-backed writes with per-agent overlays | Persistence with no new infra; FK-safe flush |
+| **Cooperative turn/tool structure** | Natural pause points between turns and tool calls | `before_turn` / `safe_boundary` yield |
+| **Task rows** (`agent_tasks`) with JSON `metadata` | Status + free-form annotations | Marking tasks "deferred" *without* changing status; Legion specialist metadata |
+
+Three facts make suspension safe:
+
+1. **Suspension is observable state, not a process signal.** A stream "being deferred" is a durable record (`defer_agent_status`) plus a checkpoint. Nothing is killed.
+2. **Completed work is receipted.** `completedToolReceipts` in the checkpoint record operation ids that already finished, so resume never replays side-effecting tools.
+3. **The barrier is computed from durable state.** Parents don't wait on callbacks; they re-derive "is every descendant deferred?" from the stored statuses whenever any child reports.
+
+And one fact makes the Legion cheap: **classification is deterministic scoring over text and file paths**, so choosing specialists needs no extra model call — spawning is just inserting rows.
+
+## 2. Component map
+
+```mermaid
+flowchart TD
+  UI[Webview Settings] -->|gRPC UpdateSettingsRequest| CTRL[updateSettings / updateTaskSettings]
+  CTRL --> SM[StateManager]
+  SM --> CFG[AgentSwarmConfig.getAgentSwarmConfig]
+  ENV[env LUMI_AGENT_SWARM_*] --> CFG
+  VSC[VS Code settings lumi.agentSwarm.*] --> CFG
+  CFG --> EFF[resolveEffectiveAgentSwarmState]
+  EFF --> ORCH[AgentOrchestrator]
+  ORCH --> DEFER[HierarchicalDeferCoordinator]
+  ORCH --> REVIEW[CriticalCompletionReviewService]
+  ORCH --> LEGION[LegionCoordinator]
+  REVIEW -->|auto-defer / resume| DEFER
+  REVIEW -->|recommend specialists| LEGION
+  LEGION -->|acceptingNewWork check| DEFER
+  ORCH -->|completeStream / failStream| LEGION
+  DEFER & REVIEW & LEGION --> DB[(BufferedDbPool → SQLite)]
+```
+
+## 3. Hierarchical Defer & Resume
+
+### 3.1 Per-stream state machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> running
+  running --> suspending: DEFER_REQUEST while operation in flight
+  running --> deferred: DEFER_REQUEST at a safe point
+  suspending --> deferred: completeInFlightAndYield
+  running --> waiting_for_children: parent with pending descendants
+  waiting_for_children --> deferred: all descendants acked
+  deferred --> running: RESUME_REQUEST / RESUME_ACK
+```
+
+`acceptingNewWork` is `false` in `suspending`, `waiting_for_children` and `deferred`. `Orchestrator.createTask`, `spawnChildStream`, `spawnTeammateTask` and `LegionCoordinator.formAndSpawnLegion` reject new work in those states.
+
+### 3.2 `deferAgent(streamId)` step by step
+
+1. Resolve effective feature state; if Defer is off and not `forceEnable`, return `deferred:false` ("disabled").
+2. Idempotency: already `deferred` at an equal-or-newer sequence → return the existing checkpoint and last `DEFER_ACK`.
+3. Append `DEFER_REQUEST` (de-duplicated by `messageId`; inbox bounded to 200 messages).
+4. If an in-flight operation is `running` and we are **not** (`immediate` ∧ interruptible ∧ idempotent) → write status `suspending`, return `deferred:false` with the reason. **Nothing is aborted.**
+5. Otherwise finalize: mark active tasks deferred (metadata `deferred_state`, `deferred_checkpoint_id`; status unchanged; lease record `task_deferred_lease:<taskId>` so stalled-task detection ignores them), snapshot reservations, write `defer_checkpoint:<id>` + `defer_latest_checkpoint`, append `DEFER_ACK` to own and parent inbox, write status `deferred`.
+
+### 3.3 `deferPipeline(rootStreamId)` and the barrier
+
+1. Collect the hierarchy (BFS over `parentId`).
+2. Root → `waiting_for_children` (or `suspending` if no descendants), `acceptingNewWork=false`.
+3. Defer descendants **bottom-up**: a node whose own children are still pending becomes `waiting_for_children`; others call `deferAgent`.
+4. `evaluateAndPersistPipelineState`: if nothing is pending, defer the root with the rolling roadmap → phase `suspended`; else phase `waiting_for_children`. The parent is **never** reported suspended while a descendant is still executing.
+
+When a slow child later finishes its tool, `completeInFlightAndYield` finalizes it (recording the receipt) and calls `reconcilePipelineBarrier(parent, pipelineId)`:
+
+- Takes a **per-pipeline lock** so concurrent siblings don't clobber each other.
+- **Walks the whole `parentId` chain** to the stream whose `deferred_pipeline_status` matches the `pipelineId` (multi-level trees: the immediate parent often doesn't own it — PM-006).
+- Re-evaluates bottom-up so intermediate nodes waiting on grandchildren can now defer, then re-evaluates the root.
+
+`failStream`/`completeStream` also call `reconcileAfterStreamFailure` so a crashed or finished child can't deadlock a waiting parent.
+
+### 3.4 Resume
+
+`resumePipeline` resumes root and every active descendant **independently** (`resumeAgent`): restores deferred tasks to their `priorStatus`, refreshes heartbeats, emits `RESUME_REQUEST`/`RESUME_ACK`, sets `running` + `acceptingNewWork=true`; then restores the roadmap (`synchronizationStatus: "resumed"`). Resume of an already-running stream is an idempotent no-op ACK.
+
+## 4. Critical Completion Review
+
+Flow of `runReview(input)`:
+
+1. Resolve state (precedence includes per-agent, per-task, manual invocation). **Disabled → immediate `ACCEPT`, `executed:false`** (zero work).
+2. Bound check against persisted `critical_review_cycle:<completionEventId>`: no second initial review; at most 1 corrective pass.
+3. If `autoDeferOnCompletionReview ∧ hierarchicalDeferEnabled`: `deferPipeline` while reviewing.
+4. Classify findings (explicit findings, or derived from audit violations). Hypothetical/unverified "defects" are **downgraded** to `unverified_assumption`.
+5. Decide:
+
+| Condition | Decision |
+|---|---|
+| blocking capability unavailable ∧ (defects ∨ material risk) | `ESCALATE` |
+| confirmed defects, initial pass | `REMEDIATE` (+ prioritized corrective tasks) |
+| confirmed defects, already corrective | `ESCALATE` (stop looping) |
+| only risks/assumptions | `ACCEPT_WITH_DISCLOSED_LIMITATIONS` |
+| otherwise | `ACCEPT` |
+
+6. Merge corrective tasks into the **existing** roadmap (no unbounded task chains); annotate each with a recommended specialist from the Legion.
+7. If the pipeline was deferred for this review and the decision isn't `ESCALATE` → `resumePipeline`.
+8. Persist cycle state + `last_critical_completion_review`.
+
+**Integration:** `runCompletionGateFlow` and `AttemptCompletionHandler.execute` call `evaluateOptionalCriticalCompletionReview`; `REMEDIATE`/`ESCALATE` block completion and return the coordinator report.
+
+## 5. The Legion
+
+### 5.1 Classification (`classifyTaskForLegion`) — deterministic, no model call
+
+1. Combine parent focus + task text; extract referenced files (`src|webview-ui|proto|scripts|cli|packages/...`) plus explicit `targetFiles`.
+2. Infer primary intent by keyword counts (`CREATE`, `FIX`, `REFACTOR`, `INVESTIGATE`, `TEST`, `CONFIGURE`, `DELETE`, else `GENERAL`).
+3. Score each archetype: weighted keyword groups (diminishing returns for repeats: `weight × (1 + min(3, hits−1) × 0.35)`), **+3.5 per matching target file**, intent-alignment bonus (+2.0/+2.5), **+6.0** if the caller marked the role preferred. Excluded roles are skipped. Zero-signal prompts fall back to the Implementer.
+4. Complexity `= clamp(1 + activeDomains×1.3 + min(3, len/250) + min(3, files×0.6), 1, 10)`.
+5. Strategy (when `adaptive`): `<3.2` → `tactical_strike`; `≥7.2` → `full_legion`; intent `TEST`/`FIX` → `verification_heavy`; else `balanced_squad`. Roster size follows the strategy (1 / 2–3 / 2–4 / ≥3, capped by `maxSpecialists`, hard cap 8). Multi-specialist formations pull in a verifier.
+6. Partition target files across the roster so parallel workers never share a file.
+
+### 5.2 Formation (`formAndSpawnLegion`)
+
+Checks: Legion enabled (or `forceEnable`), parent exists, parent `acceptingNewWork`. For each roster member: insert child `agent_streams` row (**direct write**, ADR-0010), write `legion_specialist_profile`, insert a `pending` `agent_tasks` row with Legion metadata (`legion_formation_id`, `legion_specialist_role`, `legion_codename`, `legion_stage`, `assigned_files` …), reserve its files **only if no other *active* stream holds them**. Then persist the manifest and update the parent roadmap.
+
+### 5.3 Stage gating, failover, synthesis
+
+```mermaid
+flowchart LR
+  A[Lead & Recon] -->|all resolved| B[Parallel Execution] -->|all resolved| C[Verification & Hardening]
+  B -.failure.-> F{attempt < 2?}
+  F -->|yes| R[spawn replacement, original -> rerouted]
+  F -->|no| X[partial_failure + unresolved report]
+```
+
+- `evaluateStageProgression` computes per-stage status (`empty`, `blocked_by_prior_stage`, `ready`, `in_progress`, `completed`, `failed`) and the set of streams that may run now. `rerouted` counts as resolved; a failed, un-rerouted member **fails** its stage and blocks later ones.
+- When a lead stage completes, its summaries are written to each newly unblocked member as `legion_stage_handoff_context`.
+- `settleSpecialistStream` (called automatically from `completeStream`/`failStream`) = reconcile → bounded failover (only if Legion is enabled for the parent) → synthesize a report when the formation finishes or is stuck. All manifest read-modify-write cycles run under a **per-formation lock**; terminal member states are final (idempotent).
+- Synthesis writes `last_legion_synthesis_report` (completed deliverables, failover log, unresolved failures, outstanding streams) and updates the roadmap's completed/blockers/next-actions.
+
+## 6. What this design deliberately does *not* do
+
+- It does not execute specialist tasks. It creates streams/tasks and keeps the books; a host runner must execute them and call `completeStream`/`failStream`.
+- It does not interrupt a running tool to "look" suspended.
+- It does not share transcripts or inboxes between agents.
+- It does not make an LLM call to classify (determinism > cleverness here).
+

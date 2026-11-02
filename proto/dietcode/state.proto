@@ -293,6 +293,16 @@ message Settings {
   optional string plan_mode_opencode_model_id = 336;
   optional OpenRouterModelInfo act_mode_opencode_model_info = 337;
   optional string act_mode_opencode_model_id = 338;
+  optional bool agent_swarm_enabled = 339;
+  optional bool agent_swarm_critical_completion_review_enabled = 340;
+  optional bool agent_swarm_hierarchical_defer_enabled = 341;
+  optional string agent_swarm_default_defer_boundary = 342;
+  optional bool agent_swarm_auto_defer_on_completion_review = 343;
+  optional int32 agent_swarm_max_initial_completion_reviews = 344;
+  optional int32 agent_swarm_max_corrective_verification_passes = 345;
+  optional bool agent_swarm_legion_enabled = 346;
+  optional string agent_swarm_legion_strategy = 347;
+  optional int32 agent_swarm_legion_max_specialists = 348;
 }
 
 message State {
@@ -440,6 +450,16 @@ message UpdateSettingsRequest {
   optional string audit_advisory_auto_scroll_mode = 47;
   optional bool audit_plan_regression_gate_enabled = 48;
   optional bool audit_tool_output_advisory_enabled = 49;
+  optional bool agent_swarm_enabled = 55;
+  optional bool agent_swarm_critical_completion_review_enabled = 56;
+  optional bool agent_swarm_hierarchical_defer_enabled = 57;
+  optional string agent_swarm_default_defer_boundary = 58;
+  optional bool agent_swarm_auto_defer_on_completion_review = 59;
+  optional int32 agent_swarm_max_initial_completion_reviews = 60;
+  optional int32 agent_swarm_max_corrective_verification_passes = 61;
+  optional bool agent_swarm_legion_enabled = 62;
+  optional string agent_swarm_legion_strategy = 63;
+  optional int32 agent_swarm_legion_max_specialists = 64;
 }
 
 message UpdateTerminalConnectionTimeoutRequest {

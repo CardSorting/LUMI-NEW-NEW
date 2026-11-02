@@ -439,9 +439,25 @@ export class BufferedDbPool {
 					this.inFlightIndex = this.activeIndex
 					this.activeIndex = new Map()
 
+					const TABLE_FK_ORDER: Partial<Record<keyof Schema, number>> = {
+						users: 0,
+						workspaces: 1,
+						repositories: 2,
+						agents: 3,
+						knowledge: 4,
+						agent_streams: 5,
+						agent_tasks: 6,
+						agent_memory: 7,
+						agent_cognitive_snapshots: 8,
+						agent_knowledge: 9,
+						agent_knowledge_edges: 10,
+					}
 					opsToFlush = Array.from(dirtyBuffer.values())
 						.flat()
 						.sort((a, b) => {
+							const fkA = TABLE_FK_ORDER[a.table]
+							const fkB = TABLE_FK_ORDER[b.table]
+							if (fkA !== undefined && fkB !== undefined && fkA !== fkB) return fkA - fkB
 							const pA = LAYER_PRIORITY[a.layer ?? "plumbing"]
 							const pB = LAYER_PRIORITY[b.layer ?? "plumbing"]
 							if (pA !== pB) return pA - pB
@@ -715,6 +731,11 @@ export class BufferedDbPool {
 						const pkMatch = (r: unknown) => {
 							const row = r as Record<string, unknown>
 							if (opWhere.length > 0) return matches(row, opWhere)
+							if (op.conflictTarget) {
+								const targets = Array.isArray(op.conflictTarget) ? op.conflictTarget : [op.conflictTarget]
+								const vals = op.values as Record<string, unknown>
+								return targets.every((col) => row[col] !== undefined && row[col] === vals[col])
+							}
 							return (
 								row.id !== undefined &&
 								(op.values as Record<string, unknown>).id !== undefined &&

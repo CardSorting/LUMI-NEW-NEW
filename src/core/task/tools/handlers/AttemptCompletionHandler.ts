@@ -43,6 +43,7 @@ import {
 	emitCompletionGateBlockTelemetry,
 	evaluateCompletionAuditGate,
 	evaluateCompletionGateReadinessAsync,
+	evaluateOptionalCriticalCompletionReview,
 	runCompletionPreflightChecks,
 } from "../completionGatePipeline"
 import { buildCompletionReview } from "../completionReview"
@@ -276,6 +277,22 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			})
 
 			config.taskState.lastCompletionAudit = auditMetadata
+		}
+
+		// Optional Critical Completion Review auxiliary capability (disabled by default; zero overhead when off)
+		const criticalReviewReport = await evaluateOptionalCriticalCompletionReview(config, {
+			result,
+			taskDescription,
+			auditMetadata,
+		})
+		if (
+			criticalReviewReport?.executed &&
+			(criticalReviewReport.decision === "REMEDIATE" || criticalReviewReport.decision === "ESCALATE")
+		) {
+			config.taskState.consecutiveMistakeCount++
+			const blockCount = recordCompletionGateBlockEvent(config, "audit_gate", { result })
+			emitCompletionGateBlockTelemetry(config, "audit_gate", blockCount)
+			return formatCompletionToolError(criticalReviewReport.coordinatorFinalReportMarkdown, config, { result })
 		}
 
 		const auditScore =

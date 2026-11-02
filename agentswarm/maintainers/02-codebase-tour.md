@@ -1,0 +1,190 @@
+# 02 — Line-by-Line Codebase Tour & Ownership Map
+
+This document walks you through every file that makes up Agent Swarm & The Legion, the exact line ranges of its critical mechanisms, and **what will break if you alter those lines**.
+
+---
+
+## 1. `src/infrastructure/ai/AgentSwarmConfig.ts` (~704 lines)
+
+**Purpose:** Single source of truth for all Agent Swarm & Legion settings, defaults, clamping bounds, role normalization, and 5-tier configuration precedence.
+
+### Key Types & Constants
+- **`DEFAULT_AGENT_SWARM_CONFIG` (lines 118–137):**
+  - `enabled: false`, `criticalCompletionReviewEnabled: false`, `hierarchicalDeferEnabled: false`, `autoDeferBeforeCriticalReview: false`, `allowManualTriggerWhenDisabled: true`, `maxFollowUpReviewPasses: 1`, `maxRemediationPasses: 1`, `defaultDeferBoundary: "safe_boundary"`, `legionEnabled: false`, `legionClassificationStrategy: "adaptive"`, `legionMaxConcurrency: 4`, `legionAutoFailoverEnabled: true`, `legionRequireSynthesisGate: true`.
+- **`LEGION_ROLE_IDS` & `normalizeLegionRoleId` (lines 28–75):**
+  - Defines the 10 canonical specialist role IDs (`legion_systems_architect`, `legion_codebase_researcher`, `legion_implementation_engineer`, `legion_resilience_hardener`, `legion_ux_ergonomics`, `legion_verification_qa`, `legion_security_auditor`, `legion_performance_profiler`, `legion_data_migration_specialist`, `legion_documentation_synthesizer`).
+  - Maps the legacy mixed-case alias `"legion_Trends_ux"` → `"legion_ux_ergonomics"` ([ADR-0011](../adr/ADR-0011-legacy-role-alias.md)).
+
+### Critical Functions & Why They Exist
+- **`getExplicitStateManagerSetting<K>` (lines 268–317):**
+  - **What it does:** Checks `StateManager.getGlobalStateKey` and `StateManager.getTaskSettingsKey` **only after** verifying via `hasExplicitValueInRecord` (`taskSettings` / `globalStateCache` inspection) or VS Code's `workspace.getConfiguration("lumi").inspect(...)` that the user or task actually persisted a value.
+  - **What breaks if you remove it:** `StateManager.initialize()` pre-fills its in-memory cache with `DEFAULT_SETTINGS` (`false`) before reading disk. If `loadStateManagerConfig()` blindly calls `stateManager.getGlobalSettingsKey("agentSwarmEnabled")`, it gets `false` and **clobbers** a user's `true` in `settings.json`! (See [ADR-0006](../adr/ADR-0006-config-precedence-and-explicit-detection.md), [PM-004](../postmortems/PM-004-statemanager-defaults-clobber-settings.md).)
+- **`loadAgentSwarmConfig()` (lines 422–474):**
+  - Evaluates the 5-tier precedence chain (cached for 30s unless `invalidateAgentSwarmConfigCache()` is called):
+    1. `DEFAULT_AGENT_SWARM_CONFIG` (lowest)
+    2. VS Code `workspace.getConfiguration("lumi.agentSwarm")`
+    3. Explicit `StateManager` global/task settings
+    4. Environment variables (`LUMI_AGENT_SWARM_*`)
+    5. Runtime overrides (`setRuntimeAgentSwarmConfigOverride`, highest)
+- **`resolveEffectiveAgentSwarmState(options)` (lines 541–676):**
+  - Computes the effective boolean flags for a given `agentId`, `taskId`, `manualInvocation`, and `forceEnable` flag, and returns human-readable `reasons: string[]` explaining why each feature is enabled or disabled.
+
+---
+
+## 2. `src/infrastructure/ai/HierarchicalDeferCoordinator.ts` (~1,334 lines)
+
+**Purpose:** Cooperative suspension, multi-level hierarchy barrier synchronization, control message inbox, durable checkpoints, and idempotent resume.
+
+### Storage Keys Owned (`HIERARCHICAL_DEFER_STORAGE_KEYS`, lines 18–26)
+| Key in `agent_memory` | Stream ID Owner | Contents |
+|---|---|---|
+| `stream_suspension_state` | Target `streamId` | `StreamSuspensionRecord` (`state`, `acceptingNewWork`, `pendingChildStreamIds`, `acknowledgedChildStreamIds`, `pipelineId`, etc.) |
+| `stream_execution_checkpoint` | Target `streamId` | `StreamExecutionCheckpoint` (`currentStepIndex`, `completedStepReceipts`, `pendingTaskIds`, `SafeBoundaryType`, etc.) |
+| `stream_control_inbox` | Target `streamId` | `StreamControlMessage[]` (`suspend`, `resume`, `prepare_review`, `release_barrier`) |
+| `stream_step_receipts` | Target `streamId` | `Record<string, StepReceipt>` (prevents re-executing completed steps on resume) |
+| `pipeline_defer_state:<pipelineId>` | Root `streamId` | `PipelineSuspensionState` (`phase`, `childStreamIds`, `pendingAckStreamIds`, `acknowledgedStreamIds`) |
+| `active_pipeline_id` | Root or child `streamId` | String pointer to the active `pipelineId` |
+
+### Critical Methods & Invariants
+- **`withPipelineLock(pipelineId, fn)` (lines 222–239):**
+  - Per-pipeline in-process Promise mutex (`this.pipelineLocks`). Serializes concurrent calls to `acknowledgeChildSuspension` and `reconcileAfterStreamFailure` so two children finishing in the same millisecond never clobber each other's acknowledgement in `pipeline_defer_state:<pipelineId>` ([ADR-0004](../adr/ADR-0004-suspension-barrier-and-ancestor-walk.md)).
+- **`collectHierarchyStreams(rootStreamId)` (lines 1185–1225):**
+  - Performs a BFS traversal across `agent_streams` (`SELECT * FROM agent_streams WHERE parentId = ?`) with a `visited` set (`maxDepth = 16`) so multi-level hierarchies (root → child → grandchild) are all included in the suspension barrier ([PM-006](../postmortems/PM-006-multi-level-barrier-deadlock.md)).
+- **`deferHierarchy(request)` (lines 382–560):**
+  - Sets `acceptingNewWork: false` on the root stream, discovers all active descendants via `collectHierarchyStreams`, sends `suspend` control messages, marks pending tasks with `deferred: true` (never cancelling them!), and sets `phase: "waiting_for_children"` (or `"suspended"` immediately if there are no active children).
+- **`reconcilePipelineBarrier(rootStreamId, pipelineId)` (lines 760–866):**
+  - Re-checks `pendingAckStreamIds` against both `acknowledgedStreamIds` and `agent_streams.status` (`completed` / `failed`).
+  - **CRITICAL GUARD (lines 768–775, [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)):**
+    ```ts
+    if (
+      !pipeline ||
+      (pipeline.phase !== "waiting_for_children" && pipeline.phase !== "suspending")
+    ) {
+      return null;
+    }
+    ```
+    *What breaks if you weaken this guard:* If a pipeline is deferred and then resumed (`phase: "resumed"`), and a child later completes (`completeStream` → `reconcileAfterStreamFailure`), `reconcilePipelineBarrier` will think the pipeline just finished waiting for children and will **re-suspend the already-resumed parent stream**!
+- **`reconcileAfterStreamFailure(streamId, reason)` (lines 702–758):**
+  - Called automatically by `Orchestrator.completeStream` and `Orchestrator.failStream`. Walks up `parentId` ancestors and reconciles any waiting barrier so a crashed or completed child never deadlocks its parent.
+
+---
+
+## 3. `src/infrastructure/ai/CriticalCompletionReview.ts` (~744 lines)
+
+**Purpose:** Bounded 1+1 adversarial review at task completion, strict separation of verified defects vs. unverified concerns, corrective task dispatch, and final coordinator report formatting.
+
+### Critical Methods & Invariants
+- **`classifyFindings(candidates)` (lines 204–264):**
+  - Splits `ReviewFindingInput[]` into `verifiedDefects` and `unverifiedConcerns`.
+  - A finding is a `verified_defect` **if and only if** `category === "verified_defect"` (or `blocking === true`) **and** it supplies non-empty `evidenceRefs` (or a concrete `recommendedFix`/`description` backed by audit evidence). Speculative items without evidence are downgraded to `unverified_concern`.
+- **`determineDecision(verifiedDefects, unverifiedConcerns, cycleState, maxFollowUpPasses, maxRemediationPasses)` (lines 266–310):**
+  - Implements the 4-way state machine (`ACCEPT`, `ACCEPT_WITH_NOTE`, `REMEDIATE`, `ESCALATE`).
+  - Enforces the **1+1 bound** ([ADR-0005](../adr/ADR-0005-bounded-review-with-category-separation.md)): if `cycleState.remediationPassCount >= maxRemediationPasses` or `cycleState.followUpReviewCount >= maxFollowUpPasses` and verified defects still remain, it returns `ESCALATE` rather than looping forever.
+- **`runReview(request)` (lines 312–530):**
+  - Auto-defers the hierarchy before review if `effective.autoDeferBeforeReview` is true and the stream has active children or a pipeline.
+  - **CRITICAL `finally` BLOCK (lines 510–525, [PM-007](../postmortems/PM-007-review-left-pipeline-suspended-and-unwired.md)):** Always calls `deferCoordinator.resumeHierarchy` if `autoDeferredByReview` was true and the decision is not `ESCALATE`, so a completed review never strands the parent stream in `suspended`.
+
+---
+
+## 4. `src/infrastructure/ai/LegionCoordinator.ts` (~1,896 lines)
+
+**Purpose:** Specialist role registry, deterministic task classification, stage-ordered formation, file-reservation conflict avoidance, automatic stage progression on stream completion, bounded failover on stream failure, and synthesis reporting.
+
+### Key Constants & Registry
+- **`LEGION_SPECIALIST_REGISTRY` (lines 195–498):**
+  - Declarative profiles for all 10 specialists: `id`, `title`, `stage`, `defaultPriority`, `keywords` (weighted `1`–`5`), `filePatterns` (regex strings), `capabilities`, `deliverables`, `fallbackRoleIds`, and `minComplexityScore`.
+- **`LEGION_STAGE_ORDER` (lines 32–38):**
+  1. `"discovery_architecture"`
+  2. `"implementation"`
+  3. `"hardening_security"`
+  4. `"verification_qa"`
+  5. `"synthesis_docs"`
+- **`LEGION_MAX_ATTEMPTS_PER_SLOT = 2` (line 47):**
+  - Initial specialist spawn (`attemptCount = 1`) + at most 1 failover reroute (`attemptCount = 2`).
+
+### Critical Methods & Invariants
+- **`withFormationLock(formationId, fn)` (lines 529–546):**
+  - Per-formation in-process Promise mutex (`this.formationLocks`). Prevents parallel specialists finishing/failing simultaneously from racing on `legion_formation_state:<formationId>`.
+- **`classifyTask(request)` (lines 580–825):**
+  - Evaluates `objective`, `targetFiles`, `constraints`, `preferredRoles`, `excludeRoles`, and `strategy` (`"adaptive" | "thorough" | "balanced" | "lean"`).
+  - Always ensures at least one primary execution role is selected, respects `maxSpecialists` / `maxConcurrency`, and builds the 5-stage `stagePlan`.
+- **`formLegion(request)` (lines 827–1115):**
+  - Creates child rows in `agent_streams` via **direct writes** (`dbPool.push({ type: "insert", table: "agent_streams", ... })` with **NO** `agentId` — [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md)).
+  - Checks active file reservations via `dbPool.selectWhere("agent_memory", ...)` and filters by `agent_streams.status === "active"` so stale reservations from completed/failed streams never block new formations ([PM-008](../postmortems/PM-008-stale-reservation-false-positives.md)).
+  - Dispatches Stage 1 (`discovery_architecture`) tasks immediately (`status: "active"`) while queueing Stage 2–5 members (`status: "queued"`).
+- **`reconcileSpecialistStreamLifecycleUnlocked` (lines 1255–1470):**
+  - **CRITICAL TERMINAL-STATE GUARD (lines 1280–1294, [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)):**
+    ```ts
+    if (
+      member.status === "completed" ||
+      member.status === "failed" ||
+      member.status === "rerouted"
+    ) {
+      return { ... }; // Terminal states are final and absorbing!
+    }
+    ```
+    *What breaks if you change this to `if (member.status === event)`:* Calling `failStream` twice on the same failed stream will see `member.status === "rerouted"` on the second call (`"rerouted" !== "failed"`), overwrite `"rerouted"` to `"failed"`, and increment `failedStreams` even though a fallback specialist was already spawned! (Proven by Mutation M1 in [04-failure-modes-and-drills.md](04-failure-modes-and-drills.md).)
+
+---
+
+## 5. `src/infrastructure/ai/Orchestrator.ts` (~890 lines)
+
+**Purpose:** The public façade (`AgentOrchestrator`) consumed by the rest of LUMI. Connects stream/task lifecycle events to the 3 Agent Swarm engines.
+
+### Critical Hooks & Invariants
+- **`ensureStreamAcceptingWork(streamId, operationName)` (lines 81–99):**
+  - Called at the top of `dispatchTask`, `spawnSubAgent`, and `delegateWork`. Throws `Stream <id> is currently suspended (<state>) and cannot accept new work (<op>)` if `acceptingNewWork === false` (unless `bypassSuspensionCheck: true` is passed for corrective review tasks).
+- **`completeStream(streamId, summary)` (lines 287–362):**
+  1. Calls `await this.releaseAllReservations(streamId)`.
+  2. Calls `await dbPool.commitWork(streamId)` to drain any uncommitted shadow overlay writes for that stream.
+  3. Calls `await dbPool.pushBatch([...])` **WITHOUT a second `streamId` argument** ([PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md)) so `agent_streams.status = 'completed'` and `agent_memory.stream_summary` go directly into `activeBuffer` and flush to SQLite.
+  4. Calls `await this.reconcileAfterStreamFailure(streamId, "Stream completed")` so any parent suspension barrier waiting on this child releases immediately.
+  5. Calls `await this.settleLegionSpecialist(streamId, "completed", summary)` so any Legion formation advances its stage or synthesizes its final report.
+- **`failStream(streamId, reason)` (lines 364–425):**
+  1. Rolls back any uncommitted shadow overlay (`dbPool.rollbackWork(streamId)`).
+  2. Releases all file reservations (`releaseAllReservations(streamId)`).
+  3. Marks `agent_streams.status = 'failed'` and active tasks `'failed'` via direct `pushBatch`.
+  4. Calls `reconcileAfterStreamFailure(streamId, reason)` and `settleLegionSpecialist(streamId, "failed", reason)`.
+- **`releaseFiles` & `releaseAllReservations` (lines 714–770):**
+  - **CRITICAL FLUSH BEFORE DELETE ([PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)):** Calls `await dbPool.flush()` before pushing the `delete` operations on `agent_memory` so that if `reserveFiles` (`upsert`) was called in the same 1-second window, `BufferedDbPool.flush()` does not sort `delete` before `upsert` and resurrect the deleted reservation row!
+
+---
+
+## 6. `src/infrastructure/db/BufferedDbPool.ts` (~515 lines)
+
+**Purpose:** Write-behind batching pool and per-agent shadow overlay manager over `better-sqlite3`.
+
+### Critical Invariants ([ADR-0003](../adr/ADR-0003-durable-state-in-agent-memory.md), [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md))
+- **`TABLE_FK_ORDER` (lines 34–43):**
+  ```ts
+  const TABLE_FK_ORDER: Record<string, number> = {
+    users: 0,
+    projects: 1,
+    tasks: 2,
+    task_steps: 3,
+    logs: 4,
+    agent_streams: 5,
+    agent_tasks: 6,
+    agent_memory: 7,
+  };
+  ```
+  `flush()` sorts by `TABLE_FK_ORDER` **before** `LAYER_PRIORITY` so parent rows in `agent_streams` (`5`) are always inserted before child rows in `agent_tasks` (`6`) and `agent_memory` (`7`), preventing `SqliteError: FOREIGN KEY constraint failed` ([PM-003](../postmortems/PM-003-flush-order-layer-priority.md)).
+- **Composite-Key Upserts on `agent_memory`:**
+  `agent_memory` has a composite primary key `PRIMARY KEY (streamId, key)`. Every `upsert` on `agent_memory` **must** specify `conflictTarget: ["streamId", "key"]` and `where: [{ column: "streamId", value: ... }, { column: "key", value: ... }]` ([PM-002](../postmortems/PM-002-upsert-without-conflict-target.md)).
+
+---
+
+## 7. Completion Gate & Settings Surface
+
+- **`src/core/task/tools/completionGatePipeline.ts` & `src/core/task/tools/handlers/AttemptCompletionHandler.ts`:**
+  - `AttemptCompletionHandler` invokes `runCompletionGateFlow` (`completionGatePipeline.ts`). When the standard build/audit gate passes, `AttemptCompletionHandler` calls `evaluateOptionalCriticalCompletionReview`. If `blocked === true` (`REMEDIATE` or `ESCALATE`), `AttemptCompletionHandler` returns the formatted review blockage message as a tool result instead of completing the task.
+- **The 7 Settings Plumbing Layers ([PB-02](../playbooks/PB-02-add-a-setting-end-to-end.md)):**
+  1. `package.json` (`contributes.configuration` → `lumi.agentSwarm.*`)
+  2. `proto/dietcode/state.proto` (`Settings` fields `339–348`, `UpdateSettingsRequest` fields `55–64`)
+  3. `src/shared/storage/state-keys.ts` & `src/shared/ExtensionMessage.ts`
+  4. `src/core/controller/state/updateSettings.ts` & `updateTaskSettings.ts` (clamps numeric ranges and calls `invalidateAgentSwarmConfigCache()`)
+  5. `src/core/controller/index.ts` (resolves effective state via `loadAgentSwarmConfig()` and posts it to the webview)
+  6. `src/core/task/ToolExecutor.ts`, `TaskConfig.ts`, `ToolConstants.ts` (`TASK_CONFIG_KEYS` — enforced by unit test so no key is ever dropped, [PM-005](../postmortems/PM-005-task-config-keys-drift.md))
+  7. `webview-ui/src/components/settings/sections/FeatureSettingsSection.tsx` & `SettingsView.tsx` (Quick Filter bar, section jump pills, 1-click Workflow Presets `Off`/`Conservative`/`Balanced`/`Full Swarm`, progressive disclosure, and Legion roster & 5-stage pipeline visualization).
+
+Next: Read **[03 — Day-2 Operating & SQLite Inspection Handbook](03-operating-handbook.md)** to learn how to inspect a live database, grep logs, and diagnose production state in under 60 seconds.

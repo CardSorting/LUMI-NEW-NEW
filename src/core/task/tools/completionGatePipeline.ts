@@ -346,8 +346,125 @@ export async function evaluateCompletionAuditGate(
 }
 
 export type CompletionGateFlowResult =
-	| { status: "passed"; audit: CompletionAuditGateResult }
-	| { status: "blocked"; message: string }
+	| {
+			status: "passed"
+			audit: CompletionAuditGateResult
+			criticalReviewReport?: import("@/infrastructure/ai/CriticalCompletionReview").CriticalCompletionReviewReport
+	  }
+	| {
+			status: "blocked"
+			message: string
+			criticalReviewReport?: import("@/infrastructure/ai/CriticalCompletionReview").CriticalCompletionReviewReport
+	  }
+
+/**
+ * Evaluates the optional Critical Completion Review auxiliary capability (`agentswarm2.md`)
+ * when enabled via `AgentSwarmConfig` (global, per-agent, per-task, or manual invocation).
+ * When disabled (the default), returns `null` immediately with zero overhead or side effects.
+ */
+export async function evaluateOptionalCriticalCompletionReview(
+	config: TaskConfig,
+	params: {
+		result: string
+		taskDescription?: string
+		auditMetadata?: TaskAuditMetadata
+		findings?: Array<
+			Partial<import("@/infrastructure/ai/CriticalCompletionReview").CriticalReviewFinding> & {
+				category: import("@/infrastructure/ai/CriticalCompletionReview").CriticalReviewFindingCategory
+			}
+		>
+		manualInvocation?: boolean
+	},
+): Promise<import("@/infrastructure/ai/CriticalCompletionReview").CriticalCompletionReviewReport | null> {
+	const { DEFAULT_AGENT_SWARM_CONFIG, getExplicitStateManagerSetting, resolveEffectiveAgentSwarmState } = await import(
+		"@/infrastructure/ai/AgentSwarmConfig"
+	)
+	const sm = config.services?.stateManager
+	const safeGetSetting = <K extends keyof import("@shared/storage/state-keys").Settings>(
+		key: K,
+		defaultValue: import("@shared/storage/state-keys").Settings[K],
+	): import("@shared/storage/state-keys").Settings[K] | undefined => {
+		if (!sm) return undefined
+		try {
+			return getExplicitStateManagerSetting(sm, key, defaultValue)
+		} catch {
+			return undefined
+		}
+	}
+
+	const cfgEnabled = config.agentSwarmEnabled ?? safeGetSetting("agentSwarmEnabled", DEFAULT_AGENT_SWARM_CONFIG.enabled)
+	const cfgReviewEnabled =
+		config.agentSwarmCriticalCompletionReviewEnabled ??
+		safeGetSetting("agentSwarmCriticalCompletionReviewEnabled", DEFAULT_AGENT_SWARM_CONFIG.criticalCompletionReviewEnabled)
+	const cfgDeferEnabled =
+		config.agentSwarmHierarchicalDeferEnabled ??
+		safeGetSetting("agentSwarmHierarchicalDeferEnabled", DEFAULT_AGENT_SWARM_CONFIG.hierarchicalDeferEnabled)
+	const cfgBoundary =
+		config.agentSwarmDefaultDeferBoundary ??
+		safeGetSetting("agentSwarmDefaultDeferBoundary", DEFAULT_AGENT_SWARM_CONFIG.defaultDeferBoundary)
+	const cfgAutoDefer =
+		config.agentSwarmAutoDeferOnCompletionReview ??
+		safeGetSetting("agentSwarmAutoDeferOnCompletionReview", DEFAULT_AGENT_SWARM_CONFIG.autoDeferOnCompletionReview)
+	const cfgMaxInitial =
+		config.agentSwarmMaxInitialCompletionReviews ??
+		safeGetSetting("agentSwarmMaxInitialCompletionReviews", DEFAULT_AGENT_SWARM_CONFIG.maxInitialCompletionReviews)
+	const cfgMaxCorrective =
+		config.agentSwarmMaxCorrectiveVerificationPasses ??
+		safeGetSetting("agentSwarmMaxCorrectiveVerificationPasses", DEFAULT_AGENT_SWARM_CONFIG.maxCorrectiveVerificationPasses)
+	const cfgLegionEnabled =
+		config.agentSwarmLegionEnabled ?? safeGetSetting("agentSwarmLegionEnabled", DEFAULT_AGENT_SWARM_CONFIG.legionEnabled)
+	const cfgLegionStrategy =
+		config.agentSwarmLegionStrategy ?? safeGetSetting("agentSwarmLegionStrategy", DEFAULT_AGENT_SWARM_CONFIG.legionStrategy)
+	const cfgLegionMaxSpecialists =
+		config.agentSwarmLegionMaxSpecialists ??
+		safeGetSetting("agentSwarmLegionMaxSpecialists", DEFAULT_AGENT_SWARM_CONFIG.legionMaxSpecialists)
+
+	const effective = resolveEffectiveAgentSwarmState({
+		agentId: config.executionOwner,
+		streamId: config.taskId,
+		taskId: config.taskId,
+		manualInvocation: params.manualInvocation,
+		settingsPatch: {
+			...(cfgEnabled !== undefined ? { enabled: cfgEnabled } : {}),
+			...(cfgReviewEnabled !== undefined ? { criticalCompletionReviewEnabled: cfgReviewEnabled } : {}),
+			...(cfgDeferEnabled !== undefined ? { hierarchicalDeferEnabled: cfgDeferEnabled } : {}),
+			...(cfgBoundary !== undefined ? { defaultDeferBoundary: cfgBoundary } : {}),
+			...(cfgAutoDefer !== undefined ? { autoDeferOnCompletionReview: cfgAutoDefer } : {}),
+			...(cfgMaxInitial !== undefined ? { maxInitialCompletionReviews: cfgMaxInitial } : {}),
+			...(cfgMaxCorrective !== undefined ? { maxCorrectiveVerificationPasses: cfgMaxCorrective } : {}),
+			...(cfgLegionEnabled !== undefined ? { legionEnabled: cfgLegionEnabled } : {}),
+			...(cfgLegionStrategy !== undefined ? { legionStrategy: cfgLegionStrategy } : {}),
+			...(cfgLegionMaxSpecialists !== undefined ? { legionMaxSpecialists: cfgLegionMaxSpecialists } : {}),
+		},
+	})
+	if (!effective.criticalCompletionReviewEnabled) {
+		return null
+	}
+
+	const { criticalCompletionReviewService } = await import("@/infrastructure/ai/CriticalCompletionReview")
+	const { runAdvisoryAudit } = await import("@shared/audit/completionAudit")
+
+	const resolvedAudit =
+		params.auditMetadata ??
+		(await runAdvisoryAudit(
+			config.taskId || "default-task",
+			params.taskDescription ?? params.result,
+			params.result,
+			params.taskDescription ?? "",
+		).catch(() => undefined))
+
+	return criticalCompletionReviewService.runReview({
+		streamId: config.taskId || "default-stream",
+		taskId: config.taskId,
+		agentId: config.executionOwner,
+		taskDescription: params.taskDescription ?? params.result,
+		taskResult: params.result,
+		auditMetadata: resolvedAudit,
+		findings: params.findings,
+		manualInvocation: params.manualInvocation,
+		resolvedFeatureState: effective,
+	})
+}
 
 /** Unified preflight + audit gate flow for main agent and subagents (excludes double-check). */
 export async function runCompletionGateFlow(
@@ -378,5 +495,29 @@ export async function runCompletionGateFlow(
 		return { status: "blocked", message: auditResult.message }
 	}
 
-	return { status: "passed", audit: auditResult }
+	const criticalReviewReport = await evaluateOptionalCriticalCompletionReview(config, {
+		result: params.result,
+		taskDescription: params.taskDescription ?? params.result,
+		auditMetadata: auditResult.status === "passed" ? auditResult.auditMetadata : undefined,
+	})
+
+	if (
+		criticalReviewReport?.executed &&
+		(criticalReviewReport.decision === "REMEDIATE" || criticalReviewReport.decision === "ESCALATE")
+	) {
+		const blockMessage = buildCompletionAgentErrorMessage(criticalReviewReport.coordinatorFinalReportMarkdown, config, {
+			result: params.result,
+		})
+		return {
+			status: "blocked",
+			message: blockMessage,
+			criticalReviewReport,
+		}
+	}
+
+	return {
+		status: "passed",
+		audit: auditResult,
+		...(criticalReviewReport ? { criticalReviewReport } : {}),
+	}
 }

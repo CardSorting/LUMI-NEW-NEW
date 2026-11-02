@@ -356,6 +356,93 @@ export async function updateSettings(controller: Controller, request: UpdateSett
 			controller.stateManager.setGlobalState("auditToolOutputAdvisoryEnabled", request.auditToolOutputAdvisoryEnabled)
 		}
 
+		let agentSwarmSettingUpdated = false
+
+		if (request.agentSwarmEnabled !== undefined) {
+			controller.stateManager.setGlobalState("agentSwarmEnabled", !!request.agentSwarmEnabled)
+			agentSwarmSettingUpdated = true
+		}
+
+		if (request.agentSwarmCriticalCompletionReviewEnabled !== undefined) {
+			controller.stateManager.setGlobalState(
+				"agentSwarmCriticalCompletionReviewEnabled",
+				!!request.agentSwarmCriticalCompletionReviewEnabled,
+			)
+			agentSwarmSettingUpdated = true
+		}
+
+		if (request.agentSwarmHierarchicalDeferEnabled !== undefined) {
+			controller.stateManager.setGlobalState(
+				"agentSwarmHierarchicalDeferEnabled",
+				!!request.agentSwarmHierarchicalDeferEnabled,
+			)
+			agentSwarmSettingUpdated = true
+		}
+
+		if (request.agentSwarmDefaultDeferBoundary !== undefined) {
+			const boundary = request.agentSwarmDefaultDeferBoundary
+			if (boundary === "before_turn" || boundary === "safe_boundary" || boundary === "immediate") {
+				controller.stateManager.setGlobalState("agentSwarmDefaultDeferBoundary", boundary)
+				agentSwarmSettingUpdated = true
+			}
+		}
+
+		if (request.agentSwarmAutoDeferOnCompletionReview !== undefined) {
+			controller.stateManager.setGlobalState(
+				"agentSwarmAutoDeferOnCompletionReview",
+				!!request.agentSwarmAutoDeferOnCompletionReview,
+			)
+			agentSwarmSettingUpdated = true
+		}
+
+		if (request.agentSwarmMaxInitialCompletionReviews !== undefined) {
+			const maxInitial = Math.max(1, Math.min(5, Math.round(Number(request.agentSwarmMaxInitialCompletionReviews))))
+			if (Number.isFinite(maxInitial)) {
+				controller.stateManager.setGlobalState("agentSwarmMaxInitialCompletionReviews", maxInitial)
+				agentSwarmSettingUpdated = true
+			}
+		}
+
+		if (request.agentSwarmMaxCorrectiveVerificationPasses !== undefined) {
+			const maxCorrective = Math.max(1, Math.min(5, Math.round(Number(request.agentSwarmMaxCorrectiveVerificationPasses))))
+			if (Number.isFinite(maxCorrective)) {
+				controller.stateManager.setGlobalState("agentSwarmMaxCorrectiveVerificationPasses", maxCorrective)
+				agentSwarmSettingUpdated = true
+			}
+		}
+
+		if (request.agentSwarmLegionEnabled !== undefined) {
+			controller.stateManager.setGlobalState("agentSwarmLegionEnabled", !!request.agentSwarmLegionEnabled)
+			agentSwarmSettingUpdated = true
+		}
+
+		if (request.agentSwarmLegionStrategy !== undefined) {
+			const strategy = request.agentSwarmLegionStrategy
+			if (
+				strategy === "adaptive" ||
+				strategy === "tactical_strike" ||
+				strategy === "balanced_squad" ||
+				strategy === "full_legion" ||
+				strategy === "verification_heavy"
+			) {
+				controller.stateManager.setGlobalState("agentSwarmLegionStrategy", strategy)
+				agentSwarmSettingUpdated = true
+			}
+		}
+
+		if (request.agentSwarmLegionMaxSpecialists !== undefined) {
+			const maxSpecialists = Math.max(1, Math.min(8, Math.round(Number(request.agentSwarmLegionMaxSpecialists))))
+			if (Number.isFinite(maxSpecialists)) {
+				controller.stateManager.setGlobalState("agentSwarmLegionMaxSpecialists", maxSpecialists)
+				agentSwarmSettingUpdated = true
+			}
+		}
+
+		if (agentSwarmSettingUpdated) {
+			const { invalidateAgentSwarmConfigCache } = await import("@/infrastructure/ai/AgentSwarmConfig")
+			invalidateAgentSwarmConfigCache()
+		}
+
 		// Post updated state to webview
 		await controller.postStateToWebview()
 

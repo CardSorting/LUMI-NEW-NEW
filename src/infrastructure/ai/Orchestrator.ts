@@ -6,6 +6,103 @@ import * as path from "path"
 import { v4 as uuidv4 } from "uuid"
 import { Logger } from "@/shared/services/Logger"
 import { dbPool } from "../db/BufferedDbPool"
+import {
+	type AgentSwarmConfig,
+	type DeferExecutionBoundary,
+	type EffectiveAgentSwarmFeatureState,
+	getAgentSwarmConfig,
+	isValidLegionStrategy,
+	type LegionFormationStrategy,
+	type LegionSpecialistRole,
+	resolveEffectiveAgentSwarmState,
+	setAgentSwarmAgentOverride,
+	setAgentSwarmConfigOverride,
+	setAgentSwarmTaskOverride,
+	toggleAgentSwarmFeature,
+} from "./AgentSwarmConfig"
+import {
+	type CriticalCompletionDecision,
+	type CriticalCompletionReviewInput,
+	type CriticalCompletionReviewReport,
+	type CriticalReviewFinding,
+	type CriticalReviewFindingCategory,
+	criticalCompletionReviewService,
+} from "./CriticalCompletionReview"
+import {
+	type AgentDeferCheckpoint,
+	type AgentDeferState,
+	type DeferAgentOptions,
+	type DeferPipelineOptions,
+	type DeferredAgentStatus,
+	type DeferredPipelineStatus,
+	hierarchicalDeferCoordinator,
+	type InFlightOperationDescriptor,
+	type PipelineSuspensionPhase,
+	type ResumeAgentResult,
+	type ResumePipelineResult,
+	type RollingRoadmapSnapshot,
+	type SwarmControlMessage,
+	type SwarmControlMessageType,
+} from "./HierarchicalDeferCoordinator"
+import {
+	type FormLegionOptions,
+	LEGION_SPECIALIST_REGISTRY,
+	type LegionClassificationInput,
+	type LegionClassificationResult,
+	LegionCoordinator,
+	type LegionFormationManifest,
+	type LegionSpecialistAssignment,
+	type LegionSpecialistDescriptor,
+	legionCoordinator,
+	type SpawnedLegionMember,
+} from "./LegionCoordinator"
+
+export type {
+	AgentDeferCheckpoint,
+	AgentDeferState,
+	AgentSwarmConfig,
+	CriticalCompletionDecision,
+	CriticalCompletionReviewInput,
+	CriticalCompletionReviewReport,
+	CriticalReviewFinding,
+	CriticalReviewFindingCategory,
+	DeferAgentOptions,
+	DeferExecutionBoundary,
+	DeferPipelineOptions,
+	DeferredAgentStatus,
+	DeferredPipelineStatus,
+	EffectiveAgentSwarmFeatureState,
+	FormLegionOptions,
+	InFlightOperationDescriptor,
+	LegionClassificationInput,
+	LegionClassificationResult,
+	LegionFormationManifest,
+	LegionFormationStrategy,
+	LegionSpecialistAssignment,
+	LegionSpecialistDescriptor,
+	LegionSpecialistRole,
+	PipelineSuspensionPhase,
+	ResumeAgentResult,
+	ResumePipelineResult,
+	RollingRoadmapSnapshot,
+	SpawnedLegionMember,
+	SwarmControlMessage,
+	SwarmControlMessageType,
+}
+export {
+	criticalCompletionReviewService,
+	getAgentSwarmConfig,
+	hierarchicalDeferCoordinator,
+	isValidLegionStrategy,
+	LEGION_SPECIALIST_REGISTRY,
+	LegionCoordinator,
+	legionCoordinator,
+	resolveEffectiveAgentSwarmState,
+	setAgentSwarmAgentOverride,
+	setAgentSwarmConfigOverride,
+	setAgentSwarmTaskOverride,
+	toggleAgentSwarmFeature,
+}
 
 type IntentName = IntentClassification
 type IntentScore = { intent: IntentName; score: number }
@@ -358,6 +455,11 @@ export class AgentOrchestrator {
 		description: string,
 		subagent_type: AgentTask["subagent_type"] = "worker",
 	): Promise<AgentTask> {
+		const deferStatus = await hierarchicalDeferCoordinator.getAgentDeferStatus(streamId)
+		if (!deferStatus.acceptingNewWork) {
+			throw new Error(`Stream ${streamId} is currently ${deferStatus.state} and not accepting new work until resumed.`)
+		}
+
 		const now = Date.now()
 		const task: AgentTask = {
 			id: uuidv4(),
@@ -372,7 +474,17 @@ export class AgentOrchestrator {
 		await dbPool.push({
 			type: "insert",
 			table: "agent_tasks",
-			values: { ...task, metadata: null },
+			values: {
+				id: task.id,
+				streamId: task.streamId,
+				description: task.description,
+				status: task.status,
+				result: task.result,
+				complexity: 1.0,
+				linkedKnowledgeIds: null,
+				metadata: JSON.stringify({ subagent_type }),
+				createdAt: task.createdAt,
+			},
 			layer: "infrastructure",
 		})
 
@@ -563,13 +675,36 @@ export class AgentOrchestrator {
 		const stalledTasks: AgentTask[] = []
 
 		for (const t of runningTasks) {
+			const parsedMeta = t.metadata ? (typeof t.metadata === "string" ? JSON.parse(t.metadata) : t.metadata) : undefined
+			if (parsedMeta?.deferred_state === "deferred") {
+				continue
+			}
+			const deferredLease = await this.recallMemory(t.streamId, `task_deferred_lease:${t.id}`)
+			if (deferredLease) {
+				const agentStatusRaw = await this.recallMemory(t.streamId, "defer_agent_status")
+				if (agentStatusRaw) {
+					try {
+						const agentStatus = JSON.parse(agentStatusRaw) as DeferredAgentStatus
+						if (
+							agentStatus.state === "deferred" ||
+							agentStatus.state === "suspending" ||
+							agentStatus.state === "waiting_for_children"
+						) {
+							continue
+						}
+					} catch {
+						// Ignore malformed status
+					}
+				}
+			}
+
 			const heartbeatVal = await this.recallMemory(t.streamId, `task_heartbeat:${t.id}`)
 			const lastUpdated = heartbeatVal ? Number(heartbeatVal) : t.createdAt
 			if (Date.now() - lastUpdated > timeoutMs) {
 				stalledTasks.push({
 					...t,
 					linkedKnowledgeIds: t.linkedKnowledgeIds ? JSON.parse(t.linkedKnowledgeIds) : [],
-					metadata: t.metadata ? JSON.parse(t.metadata) : undefined,
+					metadata: parsedMeta,
 				} as AgentTask)
 			}
 		}
@@ -655,39 +790,47 @@ export class AgentOrchestrator {
 	}
 
 	public async releaseFiles(streamId: string, files: string[]): Promise<void> {
+		if (files.length > 0) {
+			// See releaseAllReservations: drain buffered reservation upserts so the delete cannot be reordered ahead of them.
+			await dbPool.flush()
+		}
 		for (const file of files) {
 			const normalizedPath = path.resolve(file)
-			await dbPool.push(
-				{
-					type: "delete",
-					table: "agent_memory",
-					where: [
-						{ column: "streamId", value: streamId },
-						{ column: "key", value: `file_res:${normalizedPath}` },
-					],
-					layer: "domain",
-				},
-				streamId,
-			)
+			// Direct delete: the reservation row was written directly by `storeMemory`, so a shadow-scoped delete
+			// would never reach SQLite (it would sit in the stream's overlay until the idle overlay expires).
+			await dbPool.push({
+				type: "delete",
+				table: "agent_memory",
+				where: [
+					{ column: "streamId", value: streamId },
+					{ column: "key", value: `file_res:${normalizedPath}` },
+				],
+				layer: "domain",
+			})
 		}
 	}
 
 	private async releaseAllReservations(streamId: string): Promise<void> {
 		const items = await dbPool.selectWhere("agent_memory", { column: "streamId", value: streamId })
+		// `BufferedDbPool.flush()` orders same-table, same-layer ops by *type* (delete < insert < update < upsert), not by
+		// arrival. A delete buffered in the same batch as the reservation upsert would therefore run first and the
+		// reservation row would be re-created afterwards. Draining buffered reservation writes first makes the delete
+		// strictly later than the upsert.
+		if (items.some((item: { key: string }) => item.key.startsWith("file_res:"))) {
+			await dbPool.flush()
+		}
 		for (const item of items) {
 			if (item.key.startsWith("file_res:")) {
-				await dbPool.push(
-					{
-						type: "delete",
-						table: "agent_memory",
-						where: [
-							{ column: "streamId", value: streamId },
-							{ column: "key", value: item.key },
-						],
-						layer: "domain",
-					},
-					streamId,
-				)
+				// Direct delete (see releaseFiles): shadow-scoped deletes never reach SQLite.
+				await dbPool.push({
+					type: "delete",
+					table: "agent_memory",
+					where: [
+						{ column: "streamId", value: streamId },
+						{ column: "key", value: item.key },
+					],
+					layer: "domain",
+				})
 			}
 		}
 	}
@@ -809,16 +952,17 @@ export class AgentOrchestrator {
 	}
 
 	public async storeMemory(streamId: string, key: string, value: string): Promise<void> {
-		await dbPool.push(
-			{
-				type: "upsert",
-				table: "agent_memory",
-				values: { streamId, key, value, updatedAt: Date.now() },
-				layer: "domain",
-			},
-			streamId,
-			`agent_memory:${streamId}:${key}`,
-		)
+		await dbPool.push({
+			type: "upsert",
+			table: "agent_memory",
+			conflictTarget: ["streamId", "key"],
+			where: [
+				{ column: "streamId", value: streamId },
+				{ column: "key", value: key },
+			],
+			values: { streamId, key, value, updatedAt: Date.now() },
+			layer: "domain",
+		})
 	}
 
 	public async recallMemory(streamId: string, key: string): Promise<string | null> {
@@ -854,6 +998,12 @@ export class AgentOrchestrator {
 	 * is recorded to reconstruct the execution tree later.
 	 */
 	public async spawnChildStream(parentStreamId: string, focus: string): Promise<AgentStream> {
+		const parentDeferStatus = await hierarchicalDeferCoordinator.getAgentDeferStatus(parentStreamId)
+		if (!parentDeferStatus.acceptingNewWork) {
+			throw new Error(
+				`Parent stream ${parentStreamId} is currently ${parentDeferStatus.state} and not accepting new child delegations until resumed.`,
+			)
+		}
 		return this.createStream(focus, parentStreamId)
 	}
 
@@ -885,26 +1035,51 @@ export class AgentOrchestrator {
 <result>${escapedSummary}</result>
 </task-notification>`.trim()
 
-		await dbPool.pushBatch(
-			[
-				{
-					type: "update",
-					table: "agent_streams",
-					values: { status: "completed" },
-					where: { column: "id", value: streamId },
-					layer: "infrastructure",
-				},
-				{
-					type: "upsert",
-					table: "agent_memory",
-					values: { streamId, key: "stream_summary", value: summary, updatedAt: Date.now() },
-					layer: "domain",
-				},
-			],
-			streamId,
-		)
+		// Final completion state is written directly (no agent id): `commitWork` above already drained this stream's
+		// shadow overlay, so pushing these ops *into* the overlay would strand them there — never flushed to SQLite,
+		// invisible to non-overlay readers (e.g. hierarchy walks), and dropped when the idle shadow expires.
+		await dbPool.pushBatch([
+			{
+				type: "update",
+				table: "agent_streams",
+				values: { status: "completed" },
+				where: { column: "id", value: streamId },
+				layer: "infrastructure",
+			},
+			{
+				type: "upsert",
+				table: "agent_memory",
+				conflictTarget: ["streamId", "key"],
+				where: [
+					{ column: "streamId", value: streamId },
+					{ column: "key", value: "stream_summary" },
+				],
+				values: { streamId, key: "stream_summary", value: summary, updatedAt: Date.now() },
+				layer: "domain",
+			},
+		])
+
+		await hierarchicalDeferCoordinator.reconcileAfterStreamFailure(streamId).catch(() => null)
+		await this.settleLegionSpecialist(streamId, { status: "completed", summary })
 
 		return taskNotification
+	}
+
+	/**
+	 * Notifies the Legion lifecycle that a specialist stream settled. No-op (one profile lookup) for non-Legion streams;
+	 * never allows Legion bookkeeping to fail the underlying stream transition.
+	 */
+	private async settleLegionSpecialist(
+		streamId: string,
+		outcome: { status: "completed" | "failed"; summary?: string; failureReason?: string },
+	): Promise<void> {
+		try {
+			await legionCoordinator.settleSpecialistStream(streamId, outcome)
+		} catch (err) {
+			Logger.warn(
+				`[Orchestrator] Legion lifecycle reconciliation skipped for ${streamId.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
+			)
+		}
 	}
 
 	/**
@@ -922,6 +1097,9 @@ export class AgentOrchestrator {
 
 		// Auto-release all file reservations for this stream
 		await this.releaseAllReservations(streamId)
+
+		await hierarchicalDeferCoordinator.reconcileAfterStreamFailure(streamId).catch(() => null)
+		await this.settleLegionSpecialist(streamId, { status: "failed", failureReason: reason })
 	}
 
 	// ── Context-Window Compression ──────────────────────────────────
@@ -1125,6 +1303,13 @@ export class AgentOrchestrator {
 		const parentStream = (await dbPool.selectAllFrom("agent_streams")).find((s) => s.id === parentStreamId)
 		if (!parentStream) throw new Error(`Parent stream ${parentStreamId} not found.`)
 
+		const parentDeferStatus = await hierarchicalDeferCoordinator.getAgentDeferStatus(parentStreamId)
+		if (!parentDeferStatus.acceptingNewWork) {
+			throw new Error(
+				`Parent stream ${parentStreamId} is currently ${parentDeferStatus.state} and not accepting new teammate delegations until resumed.`,
+			)
+		}
+
 		Logger.info(`[Orchestrator] Spawning Sovereign Teammate ${agentId} for task: ${prompt.slice(0, 50)}...`)
 
 		// Initialize Warm Teammate Stream
@@ -1238,6 +1423,215 @@ export class AgentOrchestrator {
 	public getLayerForPath(filePath: string): string {
 		const { getLayer } = require("@/utils/joy-zoning")
 		return getLayer(filePath)
+	}
+
+	// ── Auxiliary Agent Swarm Capabilities: Hierarchical Defer & Critical Completion Review ──
+
+	public isAuxiliaryFeatureEnabled(context?: {
+		agentId?: string
+		streamId?: string
+		taskId?: string
+		manualInvocation?: boolean
+	}): EffectiveAgentSwarmFeatureState {
+		return resolveEffectiveAgentSwarmState(context)
+	}
+
+	public async deferAgent(
+		streamId: string,
+		options?: DeferAgentOptions,
+	): Promise<{
+		deferred: boolean
+		status: DeferredAgentStatus
+		checkpoint?: AgentDeferCheckpoint
+		ackMessage?: SwarmControlMessage
+		reason?: string
+	}> {
+		return hierarchicalDeferCoordinator.deferAgent(streamId, options)
+	}
+
+	public async registerInFlightOperation(
+		streamId: string,
+		operation: InFlightOperationDescriptor,
+	): Promise<DeferredAgentStatus> {
+		return hierarchicalDeferCoordinator.registerInFlightOperation(streamId, operation)
+	}
+
+	public async completeInFlightAndYield(
+		streamId: string,
+		completedReceipt: {
+			operationId: string
+			toolName: string
+			resultSummary: string
+		},
+		continuationMetadata?: Record<string, unknown>,
+	): Promise<{
+		deferred: boolean
+		status: DeferredAgentStatus
+		checkpoint: AgentDeferCheckpoint
+		ackMessage: SwarmControlMessage
+		parentPipelineStatus?: DeferredPipelineStatus
+	}> {
+		return hierarchicalDeferCoordinator.completeInFlightAndYield(streamId, completedReceipt, continuationMetadata)
+	}
+
+	public async deferPipeline(rootStreamId: string, options?: DeferPipelineOptions): Promise<DeferredPipelineStatus> {
+		return hierarchicalDeferCoordinator.deferPipeline(rootStreamId, options)
+	}
+
+	public async getDeferredPipelineStatus(rootStreamId: string): Promise<DeferredPipelineStatus | null> {
+		return hierarchicalDeferCoordinator.getDeferredPipelineStatus(rootStreamId)
+	}
+
+	public async getAgentDeferStatus(streamId: string): Promise<DeferredAgentStatus> {
+		return hierarchicalDeferCoordinator.getAgentDeferStatus(streamId)
+	}
+
+	public async resumeAgent(
+		streamId: string,
+		options?: {
+			pipelineId?: string
+			reason?: string
+			checkpointId?: string
+			forceEnable?: boolean
+		},
+	): Promise<ResumeAgentResult> {
+		return hierarchicalDeferCoordinator.resumeAgent(streamId, options)
+	}
+
+	public async resumePipeline(
+		rootStreamId: string,
+		options?: {
+			reason?: string
+			forceEnable?: boolean
+		},
+	): Promise<ResumePipelineResult> {
+		return hierarchicalDeferCoordinator.resumePipeline(rootStreamId, options)
+	}
+
+	public async runCriticalCompletionReview(input: CriticalCompletionReviewInput): Promise<CriticalCompletionReviewReport> {
+		return criticalCompletionReviewService.runReview(input)
+	}
+
+	public async recallLastCriticalCompletionReview(streamId: string): Promise<CriticalCompletionReviewReport | null> {
+		return criticalCompletionReviewService.recallLastReview(streamId)
+	}
+
+	// ── Legion Specialist Classification, Formation & Delegation ──
+
+	public classifyTaskForLegion(input: LegionClassificationInput): LegionClassificationResult {
+		return legionCoordinator.classifyTaskForLegion(input)
+	}
+
+	public async formLegion(
+		parentStreamId: string,
+		options: FormLegionOptions,
+	): Promise<{
+		formed: boolean
+		manifest?: LegionFormationManifest
+		classification: LegionClassificationResult
+		reason?: string
+	}> {
+		const res = await legionCoordinator.formAndSpawnLegion(parentStreamId, options)
+		if (res.formed && res.manifest) {
+			await this.emitSwarmSignal(parentStreamId, {
+				type: "vibe",
+				value: `Legion formed (${res.manifest.formationId}): ${res.manifest.members.map((m) => m.assignment.codename).join(", ")}`,
+			})
+		}
+		return res
+	}
+
+	public async getLegionStageProgression(parentStreamId: string, formationId?: string) {
+		const manifest = formationId
+			? await dbPool
+					.selectOne(
+						"agent_memory",
+						[
+							{ column: "streamId", value: parentStreamId },
+							{ column: "key", value: `legion_formation:${formationId}` },
+						],
+						parentStreamId,
+					)
+					.then((row) => (row?.value ? (JSON.parse(row.value) as LegionFormationManifest) : null))
+			: await legionCoordinator.recallLastLegionFormation(parentStreamId)
+		return manifest ? legionCoordinator.evaluateStageProgression(manifest) : null
+	}
+
+	public async synthesizeLegionExecutionReport(parentStreamId: string, formationId?: string) {
+		return legionCoordinator.synthesizeLegionExecutionReport(parentStreamId, formationId)
+	}
+
+	public async rerouteFailedLegionSpecialist(
+		parentStreamId: string,
+		failedStreamId: string,
+		options?: { replacementRole?: LegionSpecialistRole; additionalContext?: string },
+	) {
+		return legionCoordinator.rerouteFailedSpecialist(parentStreamId, failedStreamId, options)
+	}
+
+	public async recallLastLegionFormation(parentStreamId: string): Promise<LegionFormationManifest | null> {
+		return legionCoordinator.recallLastLegionFormation(parentStreamId)
+	}
+
+	public async getStreamSpecialistProfile(streamId: string): Promise<{
+		formationId: string
+		parentStreamId: string
+		assignment: LegionSpecialistAssignment
+		spawnedAt: number
+	} | null> {
+		return legionCoordinator.getSpecialistProfileForStream(streamId)
+	}
+
+	public async spawnRemediationLegionForReview(
+		parentStreamId: string,
+		reviewReport: CriticalCompletionReviewReport,
+		options?: { forceEnable?: boolean },
+	): Promise<{
+		formed: boolean
+		manifest?: LegionFormationManifest
+		classification: LegionClassificationResult
+		reason?: string
+	}> {
+		const correctiveTasks = reviewReport.prioritizedCorrectiveTasks
+		if (correctiveTasks.length === 0) {
+			const fallbackClassification = legionCoordinator.classifyTaskForLegion({
+				taskDescription: "No corrective tasks required",
+				strategy: "tactical_strike",
+				maxSpecialists: 1,
+			})
+			return {
+				formed: false,
+				classification: fallbackClassification,
+				reason: "Review report has zero prioritized corrective tasks requiring remediation.",
+			}
+		}
+
+		const parentDeferStatus = await hierarchicalDeferCoordinator.getAgentDeferStatus(parentStreamId)
+		if (!parentDeferStatus.acceptingNewWork) {
+			await hierarchicalDeferCoordinator.resumePipeline(parentStreamId, {
+				reason: `Resuming parent pipeline to spawn Remedial Legion for review ${reviewReport.completionEventId}`,
+				forceEnable: true,
+			})
+		}
+
+		const preferredRoles = [
+			...new Set(
+				correctiveTasks.map((t) => t.recommendedSpecialistRole).filter((r): r is LegionSpecialistRole => Boolean(r)),
+			),
+		]
+		const combinedDescription = correctiveTasks
+			.map((t) => `[P${t.priority}] ${t.affectedComponent}: ${t.recommendedAction}`)
+			.join("\n")
+		const targetFiles = correctiveTasks.map((t) => t.affectedComponent)
+
+		return this.formLegion(parentStreamId, {
+			taskDescription: `Remediate Critical Completion Review findings (${reviewReport.completionEventId}):\n${combinedDescription}`,
+			targetFiles,
+			preferredRoles,
+			strategy: correctiveTasks.length === 1 ? "tactical_strike" : "verification_heavy",
+			maxSpecialists: Math.min(4, Math.max(1, correctiveTasks.length + 1)),
+			forceEnable: options?.forceEnable,
+		})
 	}
 
 	private classifyIntent(userInput: string): IntentScore & { runnerUp?: IntentScore } {

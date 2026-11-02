@@ -168,34 +168,36 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 	const { version, environment, settingsInitialModelTab } = useExtensionState()
 	const { activeOrganization } = useDietCodeAuth()
 
-	const [activeTab, setActiveTab] = useState<string>(targetSection || SETTINGS_TABS[0].id)
+	const SECTION_ELEMENT_TO_TAB_MAP: Record<string, SettingsTabID> = useMemo(
+		() => ({
+			"agent-features": "features",
+			"agent-swarm-features": "features",
+			"optional-features": "features",
+			"experimental-features": "features",
+			"advanced-features": "features",
+			"terminal-settings-section": "terminal",
+		}),
+		[],
+	)
 
-	// Optimized message handler with early returns
-	const handleMessage = useCallback((event: MessageEvent) => {
-		const message: ExtensionMessage = event.data
-		if (message.type !== "grpc_response") {
-			return
-		}
+	const resolveTabForTarget = useCallback(
+		(target?: string): string => {
+			if (!target) {
+				return SETTINGS_TABS[0].id
+			}
+			if (SETTINGS_TABS.some((tab) => tab.id === target)) {
+				return target
+			}
+			return SECTION_ELEMENT_TO_TAB_MAP[target] || SETTINGS_TABS[0].id
+		},
+		[SECTION_ELEMENT_TO_TAB_MAP],
+	)
 
-		const grpcMessage = message.grpc_response?.message as KeyValuePair | undefined
-		if (grpcMessage?.key !== "scrollToSettings") {
-			return
-		}
+	const [activeTab, setActiveTab] = useState<string>(() => resolveTabForTarget(targetSection))
 
-		const tabId = grpcMessage.value
-		if (!tabId) {
-			return
-		}
-
-		// Check if valid tab ID
-		if (SETTINGS_TABS.some((tab) => tab.id === tabId)) {
-			setActiveTab(tabId)
-			return
-		}
-
-		// Fallback to element scrolling
+	const scrollAndHighlightElement = useCallback((elementId: string) => {
 		requestAnimationFrame(() => {
-			const element = document.getElementById(tabId)
+			const element = document.getElementById(elementId)
 			if (!element) {
 				return
 			}
@@ -210,6 +212,43 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 		})
 	}, [])
 
+	// Optimized message handler with early returns
+	const handleMessage = useCallback(
+		(event: MessageEvent) => {
+			const message: ExtensionMessage = event.data
+			if (message.type !== "grpc_response") {
+				return
+			}
+
+			const grpcMessage = message.grpc_response?.message as KeyValuePair | undefined
+			if (grpcMessage?.key !== "scrollToSettings") {
+				return
+			}
+
+			const tabId = grpcMessage.value
+			if (!tabId) {
+				return
+			}
+
+			// Check if valid tab ID
+			if (SETTINGS_TABS.some((tab) => tab.id === tabId)) {
+				setActiveTab(tabId)
+				return
+			}
+
+			const mappedTab = SECTION_ELEMENT_TO_TAB_MAP[tabId]
+			if (mappedTab) {
+				setActiveTab(mappedTab)
+			}
+
+			// Fallback to element scrolling (wait an animation frame so tab content mounts if switched)
+			setTimeout(() => {
+				scrollAndHighlightElement(tabId)
+			}, 30)
+		},
+		[SECTION_ELEMENT_TO_TAB_MAP, scrollAndHighlightElement],
+	)
+
 	useEvent("message", handleMessage)
 
 	// Memoized reset state handler
@@ -223,10 +262,16 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 
 	// Update active tab when targetSection changes
 	useEffect(() => {
-		if (targetSection) {
-			setActiveTab(targetSection)
+		if (!targetSection) {
+			return
 		}
-	}, [targetSection])
+		setActiveTab(resolveTabForTarget(targetSection))
+		if (!SETTINGS_TABS.some((tab) => tab.id === targetSection)) {
+			setTimeout(() => {
+				scrollAndHighlightElement(targetSection)
+			}, 30)
+		}
+	}, [targetSection, resolveTabForTarget, scrollAndHighlightElement])
 
 	// Memoized tab item renderer
 	const renderTabItem = useCallback(

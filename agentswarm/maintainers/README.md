@@ -1,0 +1,28 @@
+# Maintainers' Zero-to-Hero Handbook
+
+> **Audience:** Engineers, tech leads, on-call operators, and release owners taking ownership of LUMI's **Agent Swarm & The Legion** subsystem — written assuming **zero prior familiarity** with LUMI, `AgentOrchestrator`, `BufferedDbPool`, or the `agentswarm` specifications.
+
+---
+
+## How to Use This Handbook
+
+If you have just been handed `/Users/bozoegg/Downloads/LUMI/agentswarm` and told *"you own this now"*, follow these four documents in order:
+
+| Module | Time | What You Will Master |
+|---|---|---|
+| **[01 — The System from Scratch](01-system-from-scratch.md)** | ~20 min | What LUMI is, how a single task runs from the VS Code UI down to tool execution, what a "stream" is, how `BufferedDbPool` works, and how the 3 Agent Swarm engines (**Hierarchical Defer**, **Critical Completion Review**, **The Legion**) plug in while remaining **100% inert by default**. |
+| **[02 — Line-by-Line Codebase Tour](02-codebase-tour.md)** | ~30 min | Guided walkthrough of every file, class, method, state machine, and lock (`AgentSwarmConfig.ts`, `HierarchicalDeferCoordinator.ts`, `CriticalCompletionReview.ts`, `LegionCoordinator.ts`, `Orchestrator.ts`, `BufferedDbPool.ts`, `completionGatePipeline.ts`, `AttemptCompletionHandler.ts`, and the 7-layer settings plumbing) — plus **what breaks if you change each invariant**. |
+| **[03 — Day-2 Operating & SQLite Inspection Handbook](03-operating-handbook.md)** | ~20 min | Where `joyzoning.sqlite` lives on macOS/Linux/Windows, WAL & corruption recovery behavior, `BufferedDbPool` 1s flush + 5min shadow expiry + operation sort order, log prefixes to grep, and **8 empirically verified `sqlite3` diagnostic queries (`Q1`–`Q8`)** with real sample outputs. |
+| **[04 — Failure Modes, War Games & Recovery Drills](04-failure-modes-and-drills.md)** | ~25 min | Hands-on drills you can run locally to reproduce, diagnose, and recover from every historical failure mode (PM-001 through PM-012): stuck suspension barriers, crashed specialist failover & budget exhaustion, SQLite FK/conflict/reordering traps, config precedence surprises, and auditing interrupted AI worker output. |
+
+---
+
+## Quick Links for Daily Maintainer Tasks
+
+- **Checking what changed and why across phases?** → Read [CHANGELOG.md](../CHANGELOG.md).
+- **Reviewing a PR or AI agent work?** → Jump to [onboarding/for-maintainers.md](../onboarding/for-maintainers.md) for the copy-paste PR checklist and release gates.
+- **Adding or modifying a setting?** → Follow [PB-02 — Add a setting end-to-end](../playbooks/PB-02-add-a-setting-end-to-end.md).
+- **Adding a new Legion specialist role?** → Follow [PB-03 — Add a Legion specialist](../playbooks/PB-03-add-a-legion-specialist.md).
+- **Debugging a stuck parent stream?** → Follow [PB-04 — Diagnose a stuck pipeline](../playbooks/PB-04-diagnose-a-stuck-pipeline.md) and run `Q2` + `Q3` in [03-operating-handbook.md](03-operating-handbook.md).
+- **Debugging a specialist failure or reroute?** → Follow [PB-05 — Recover a failed Legion formation](../playbooks/PB-05-recover-a-failed-legion-formation.md) and run `Q6` + `Q7` in [03-operating-handbook.md](03-operating-handbook.md).
+- **Running pre-release verification?** → Follow [PB-07 — Release verification checklist](../playbooks/PB-07-release-verification.md).

@@ -965,6 +965,18 @@ export class Controller implements IController {
 		const auditAdvisoryAutoScrollMode = this.stateManager.getGlobalSettingsKey("auditAdvisoryAutoScrollMode")
 		const auditPlanRegressionGateEnabled = this.stateManager.getGlobalSettingsKey("auditPlanRegressionGateEnabled")
 		const auditToolOutputAdvisoryEnabled = this.stateManager.getGlobalSettingsKey("auditToolOutputAdvisoryEnabled")
+		const { getAgentSwarmConfig } = await import("@/infrastructure/ai/AgentSwarmConfig")
+		const effectiveSwarmCfg = getAgentSwarmConfig()
+		const agentSwarmEnabled = effectiveSwarmCfg.enabled
+		const agentSwarmCriticalCompletionReviewEnabled = effectiveSwarmCfg.criticalCompletionReviewEnabled
+		const agentSwarmHierarchicalDeferEnabled = effectiveSwarmCfg.hierarchicalDeferEnabled
+		const agentSwarmDefaultDeferBoundary = effectiveSwarmCfg.defaultDeferBoundary
+		const agentSwarmAutoDeferOnCompletionReview = effectiveSwarmCfg.autoDeferOnCompletionReview
+		const agentSwarmMaxInitialCompletionReviews = effectiveSwarmCfg.maxInitialCompletionReviews
+		const agentSwarmMaxCorrectiveVerificationPasses = effectiveSwarmCfg.maxCorrectiveVerificationPasses
+		const agentSwarmLegionEnabled = effectiveSwarmCfg.legionEnabled
+		const agentSwarmLegionStrategy = effectiveSwarmCfg.legionStrategy
+		const agentSwarmLegionMaxSpecialists = effectiveSwarmCfg.legionMaxSpecialists
 
 		const localDietCodeRulesToggles = this.stateManager.getWorkspaceStateKey("localDietCodeRulesToggles")
 		const localWindsurfRulesToggles = this.stateManager.getWorkspaceStateKey("localWindsurfRulesToggles")
@@ -1094,6 +1106,16 @@ export class Controller implements IController {
 			auditAdvisoryAutoScrollMode,
 			auditPlanRegressionGateEnabled,
 			auditToolOutputAdvisoryEnabled,
+			agentSwarmEnabled,
+			agentSwarmCriticalCompletionReviewEnabled,
+			agentSwarmHierarchicalDeferEnabled,
+			agentSwarmDefaultDeferBoundary,
+			agentSwarmAutoDeferOnCompletionReview,
+			agentSwarmMaxInitialCompletionReviews,
+			agentSwarmMaxCorrectiveVerificationPasses,
+			agentSwarmLegionEnabled,
+			agentSwarmLegionStrategy,
+			agentSwarmLegionMaxSpecialists,
 			banners,
 			welcomeBanners,
 			openAiCodexIsAuthenticated,
