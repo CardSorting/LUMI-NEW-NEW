@@ -110,28 +110,29 @@ flowchart TB
 ### Capability 3: The Legion (`LegionCoordinator.ts`)
 - **Problem it solves:** Complex engineering tasks span architecture, implementation, security, testing, UX, and documentation. A single generalist prompt struggles to maintain specialist rigor across all of them simultaneously.
 - **How it works:**
-  1. **10 Built-In Specialist Roles across 5 Dependency Stages:**
-     - **Stage 1 (`discovery_architecture`):** `legion_systems_architect`, `legion_codebase_researcher`
-     - **Stage 2 (`implementation`):** `legion_implementation_engineer`, `legion_data_migration_specialist`, `legion_ux_ergonomics` (also accepts legacy alias `legion_Trends_ux`)
-     - **Stage 3 (`hardening_security`):** `legion_resilience_hardener`, `legion_security_auditor`
-     - **Stage 4 (`verification_qa`):** `legion_verification_qa`, `legion_performance_profiler`
-     - **Stage 5 (`synthesis_docs`):** `legion_documentation_synthesizer`
-  2. **Deterministic Multi-Signal Classification (`classifyTask`):** Scores the objective, target files, and constraints against each specialist's keyword weights, file-pattern regexes, and complexity floor. Produces a `LegionClassificationResult` with confidence scores, explicit selection reasons, and a stage execution plan capped at `maxConcurrency` (default `4`, hard max `8`).
-  3. **Formation & File Reservation (`formLegion`):** Spawns child streams and tasks for each selected specialist, checks for active file reservation conflicts (`file_res:<path>`), and dispatches Stage 1 (`discovery_architecture`).
+  1. **7 Canonical Specialist Archetypes across 3 Dependency Stages:**
+     - **Stage 1 (`leadAndRecon`):** `legion_architect` (CENTURION-ARCH: interface contracts & decomposition), `legion_researcher` (ORACLE-RECON: forensics & analysis)
+     - **Stage 2 (`parallelExecution`):** `legion_implementer` (VANGUARD-IMPL: runtime execution), `legion_ux_ergonomics` (AESTHETE-UX: UI/accessibility, accepts legacy alias `legion_Trends_ux`), `legion_hardener` (AEGIS-HARDEN: security audits & race fixes), `legion_data_steward` (KEEPER-STATE: persistence & schemas)
+     - **Stage 3 (`verificationAndHardening`):** `legion_verifier` (SENTINEL-QA: test suites & validation)
+     - Followed by automated Stage 4 **Synthesis** into conductor handoff.
+  2. **Deterministic Multi-Signal Classification (`classifyTaskForLegion`):** Scores the objective, target files, and constraints against each specialist's keyword weights, file-pattern regexes, and intent bonuses. Selects the formation strategy (`adaptive`, `tactical_strike`, `balanced_squad`, `full_legion`, `verification_heavy`) and builds an ordered roster capped at `maxSpecialists` (1..8).
+  3. **Formation & File Reservation (`formLegion`):** Spawns child streams and tasks for each selected specialist, checks for active file reservation conflicts (`file_res:<path>`), and dispatches Stage 1 (`leadAndRecon`).
   4. **Stage-Gated Handoff & Automatic Lifecycle (`settleSpecialistStream`):** When `Orchestrator.completeStream(streamId, summary)` is called on a specialist stream, `LegionCoordinator` records its handoff artifact and, once all members in the current stage are settled, automatically promotes the next stage (`queued` → `active`) with upstream context summaries injected into their task payloads.
   5. **Bounded Failover (`reconcileSpecialistStreamLifecycle`):** When `Orchestrator.failStream(streamId, reason)` is called on a specialist stream, `LegionCoordinator` marks the slot `"rerouted"` and spawns a fallback specialist (up to `LEGION_MAX_ATTEMPTS_PER_SLOT = 2`). If the fallback also fails, the slot is permanently marked `"failed"` (terminal states `completed`, `failed`, and `rerouted` can never be overwritten — [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)).
   6. **Autonomous Host Execution (`LegionAgentHost`, `LegionToolAdapter`, `Task.ts`):** With [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), Legion executes automatically during act-mode tasks with native tool calls. `Task.ts` runs `maybeRunAutomaticLegion`, coordinating specialists via `LegionAgentHost` and sandboxed `LegionToolAdapter` instances with token/cost bounds, steering cancellation, and evidence-based `<specialist_handoff>` injection pinned to the user prompt.
+  7. **Orchestrator Conductor & Streaming Progress (`EngageSwarmHandler`, `joy_zoning.ts`, `LegionPipelineRunner`):** With [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), the parent model operates as the conductor. The conductor can explicitly dispatch specialist teams via `engage_swarm` (auto-approved in `autoApprove.ts`), stream real-time progress cards into the chat feed (`formatLegionProgressMessage`), map roles to milestones in Plan Mode, and coordinate stage execution in Act Mode. Gating heuristics allow tactical strikes and test projects to execute even below the standard 3.2 complexity floor.
 
 ---
 
 ## 4. Configuration Defaults & Invariants
 
-Per [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), **Legion is enabled by default** for eligible act-mode tasks, while **Critical Completion Review** and **Hierarchical Defer** remain disabled by default.
+Per [ADR-0012](../adr/ADR-0012-automatic-legion-default.md) and [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), **Legion is enabled by default** for eligible act-mode tasks, and the parent conductor has access to `engage_swarm`, while **Critical Completion Review** and **Hierarchical Defer** remain disabled by default.
 
 When an auxiliary capability is disabled or explicitly opted out:
 - `AttemptCompletionHandler` does not run `CriticalCompletionReviewService`.
 - `Orchestrator.completeStream` and `failStream` perform fast memory look-ups that no-op when no active pipeline exists.
 - `Task.ts` skips automatic Legion formation and proceeds directly with the standard single-agent loop.
+- `engage_swarm` is omitted from `DietCodeToolSet.getEnabledTools` and prompt conductor sections are withheld.
 
 Next: Read **[02 — Line-by-Line Codebase Tour](02-codebase-tour.md)** to see how every file is structured and where each invariant lives.
 

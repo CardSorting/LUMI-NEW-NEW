@@ -49,6 +49,33 @@ interface LegionFormationManifest {
   status: "active" | "deferred" | "completed" | "partial_failure"
   stageProgression?: LegionStageProgressionStatus
 }
+
+// Conductor Tool (`engage_swarm`) Inputs & Outputs
+interface EngageSwarmParams {
+  objective: string                  // Required
+  strategy?: LegionFormationStrategy // "adaptive" | "tactical_strike" | "balanced_squad" | "full_legion" | "verification_heavy"
+  preferred_roles?: string | string[]// Comma-separated or array of LegionSpecialistRole
+  max_specialists?: number           // Clamped 1..8
+}
+
+// Streaming Progress Event (`formatLegionProgressMessage`)
+interface LegionProgressEvent {
+  stage: string
+  member?: SpawnedLegionMember
+  status: "stage_started" | "member_started" | "member_completed" | "member_failed" | "member_rerouted" | "formation_completed" | "formation_failed"
+  detail?: string
+}
+
+// Specialist Execution Outcome with Categorized Failover
+type LegionExecutionResult =
+  | { status: "completed"; summary: string }
+  | { status: "failed"; reason: string; safeToRetry?: boolean }
+  | { status: "unresolved"; reason: string }
+
+// Fallback Specialist Completion Spec (`attempt_completion`)
+interface FallbackAttemptCompletionParams {
+  result: string // Required specialist result and handoff summary
+}
 ```
 
 `SpawnedLegionMember` carries `stage`, `attempt` (1-based), `reroutedToStreamId`, `resultSummary`, `failureReason`, `completedAt`.

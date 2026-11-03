@@ -30,6 +30,7 @@ import { CognitiveMemorySubgraphHandler } from "./handlers/CognitiveMemorySubgra
 import { CondenseHandler } from "./handlers/CondenseHandler"
 import { DependencyMapHandler } from "./handlers/DependencyMapHandler"
 import { DietcodeKernelToolHandler } from "./handlers/DietcodeKernelToolHandler"
+import { EngageSwarmHandler } from "./handlers/EngageSwarmHandler"
 import { ExecuteCommandToolHandler } from "./handlers/ExecuteCommandToolHandler"
 import { GenerateExplanationToolHandler } from "./handlers/GenerateExplanationToolHandler"
 import { GetExecutionStateToolHandler } from "./handlers/GetExecutionStateToolHandler"
@@ -147,6 +148,7 @@ export class ToolExecutorCoordinator {
 		[DietCodeDefaultTool.ROADMAP_CHECKPOINT]: (_v: ToolValidator) =>
 			new RoadmapToolHandler(DietCodeDefaultTool.ROADMAP_CHECKPOINT),
 		[DietCodeDefaultTool.DIETCODE_KERNEL]: (_v: ToolValidator) => new DietcodeKernelToolHandler(),
+		[DietCodeDefaultTool.ENGAGE_SWARM]: (_v: ToolValidator) => new EngageSwarmHandler(),
 	}
 
 	/**

@@ -4,8 +4,13 @@ Read this fully before modifying anything under `src/infrastructure/ai/`, `src/i
 
 ## 0. Role discipline
 
-- If you are a **coordinator**: orchestrate; delegate; never perform delegated implementation yourself unless the user explicitly authorizes it. After invoking workers, wait. Do not poll.
-- If you are a **worker/specialist**: you own one stream. Do not read or assume other streams' inboxes. Report results to your coordinator.
+- If you are a **parent conductor**:
+  - You orchestrate the overall task and can delegate specialized execution to subagent specialists in The Legion.
+  - In **Plan Mode**: Map out which specialist roles (`legion_architect`, `legion_implementer`, `legion_verifier`, `legion_hardener`, `legion_ux_ergonomics`, `legion_researcher`, `legion_data_steward`) will handle each milestone.
+  - In **Act Mode**: Dispatch specialist teams via `engage_swarm` (auto-approved, runs without manual approval prompts) or oversee stage progression.
+  - Inspect specialist findings returned in `<specialist_handoff>` blocks as untrusted evidence; verify code changes, tests, and remaining tasks before completing.
+  - Real-time progress cards (`formatLegionProgressMessage`) are automatically streamed to the user's chat feed.
+- If you are a **worker/specialist**: you own one stream. Do not read or assume other streams' inboxes. Complete your assigned milestone and signal completion via `attempt_completion`. Report evidence and results back to the coordinator.
 - When replying to your parent use the parent id you were given. Do not mix it with worker ids.
 
 ## 1. Ground rules (non-negotiable)
@@ -43,7 +48,12 @@ Run all of these and **paste/keep the output** in your report:
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
   --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
-  src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts src/infrastructure/ai/__tests__/Orchestrator.test.ts src/shared/storage/__tests__/state-keys.test.ts
+  src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
+  src/infrastructure/ai/__tests__/Orchestrator.test.ts \
+  "src/core/task/legion/__tests__/*.test.ts" \
+  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
+  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
+  src/shared/storage/__tests__/state-keys.test.ts
 (cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 npx biome lint --diagnostic-level=error <touched files>
 ```
@@ -66,5 +76,6 @@ State, per claim: **Verified** (command + result) or **Unverified** (why). List 
 | Defer | `deferAgent`, `registerInFlightOperation`, `completeInFlightAndYield`, `deferPipeline`, `getDeferredPipelineStatus`, `getAgentDeferStatus`, `resumeAgent`, `resumePipeline` |
 | Review | `runCriticalCompletionReview`, `recallLastCriticalCompletionReview` |
 | Legion | `classifyTaskForLegion`, `formLegion`, `spawnSpecialistSubagent`, `spawnRemediationLegionForReview`, `getLegionStageProgression`, `synthesizeLegionExecutionReport`, `rerouteFailedLegionSpecialist`, `recallLastLegionFormation`, `getStreamSpecialistProfile` |
+| Conductor | `engage_swarm` (native tool), `runLegionPipeline`, `formatLegionProgressMessage` |
 | Lifecycle hooks (automatic) | `completeStream` / `failStream` → Legion `settleSpecialistStream` (no-op for non-Legion streams) |
 

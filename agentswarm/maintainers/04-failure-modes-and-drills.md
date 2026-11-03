@@ -48,19 +48,17 @@ and never transitions to `suspended` or `resumed`.
 A Legion specialist stream crashes (`failStream`). You want to know whether a fallback specialist took over or whether the formation slot permanently failed.
 
 ### How the Bounded Failover Machine Works (`LegionCoordinator.ts`)
-1. **Attempt 1 Fails (`attemptCount = 1`):**
-   - If `autoFailoverEnabled` is `true` and the specialist's profile in `LEGION_SPECIALIST_REGISTRY` has `fallbackRoleIds` (e.g. `legion_implementation_engineer` → `["legion_resilience_hardener", "legion_systems_architect"]`):
-   - Original slot (`slot-2`) is marked `status: "rerouted"` (a **final, absorbing terminal state**), `replacedBySlotId: "slot-2-failover-1"`.
-   - New slot (`slot-2-failover-1`) is spawned with `attemptCount: 2`, `status: "active"`.
-   - `metrics.reroutedStreams` increments by `1`.
-2. **Attempt 2 Fails (`attemptCount = 2 === LEGION_MAX_ATTEMPTS_PER_SLOT`):**
-   - Budget is exhausted. No third specialist is spawned.
-   - `slot-2-failover-1` is marked `status: "failed"` (final, absorbing).
-   - `metrics.failedStreams` increments by `1`.
-   - If all other members in that stage are settled, the formation still advances to the next stage (recording the failed slot as a risk in the synthesis report) rather than hanging the parent task forever.
+1. **Attempt 1 Fails (`attempt = 1`):**
+   - If Legion is enabled and `safeToRetry` is not `false` (e.g. no unsettled commands, disallowed tools, or exhausted budgets), `rerouteFailedSpecialist` spawns a replacement specialist.
+   - Original slot is marked `status: "rerouted"` (a **final, absorbing terminal state**), and `reroutedToStreamId` records the replacement stream.
+   - Replacement specialist is spawned with `attempt = 2`, inheriting the assignment role (e.g. `legion_implementer`) and files, enriched with failover context and the prior failure reason.
+2. **Attempt 2 Fails (`attempt = 2 === LEGION_MAX_ATTEMPTS_PER_SLOT`):**
+   - Failover budget is exhausted. No third specialist is spawned.
+   - Slot remains `status: "failed"` (final, absorbing).
+   - If all other members in that stage are settled, the formation still advances to the next stage (recording the failed slot as an unverified finding in the synthesis report) rather than hanging the parent task forever.
 
 ### Inspection Command
-Run `Q6` and `Q7` from [03-operating-handbook.md](03-operating-handbook.md) to see every slot's `slot_status`, `attempts`, and `replaced_by`.
+Run `Q6` and `Q7` from [03-operating-handbook.md](03-operating-handbook.md) to see every member's `member_status`, `attempt`, and `rerouted_to`.
 
 ---
 
@@ -130,10 +128,31 @@ grep -rn 'reconcileAfterStreamFailure\|settleSpecialistStream\|evaluateOptionalC
 # 4. Run both TypeScript compilers (Extension Host + Webview UI)
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 
-# 5. Run the full real-SQLite + unit test verification block
+# 5. Run the full real-SQLite + unit test verification block (158 tests)
 npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
   --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
   src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
   src/infrastructure/ai/__tests__/Orchestrator.test.ts \
+  "src/core/task/legion/__tests__/*.test.ts" \
+  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
+  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
   src/shared/storage/__tests__/state-keys.test.ts
 ```
+
+---
+
+## 7. Drill 6: Conductor Swarm Engagement & Budget Exhaustion
+
+### Symptom
+A conductor calls `engage_swarm`, but execution fails or specialists stop prematurely.
+
+### Root-Cause Checklist
+1. **Check Swarm/Legion Configuration:**
+   If `state.enabled` and `state.legionEnabled` are both `false`, `EngageSwarmHandler` returns an immediate tool error advising that Swarm or Legion must be enabled in settings.
+2. **Check Remaining Parent Budgets:**
+   `LegionAgentHost` deducts prior parent task token usage and cost. If `remainingTokens === 0` or `remainingCost === 0`, execution is halted immediately. In `LegionAgentHost`, exceeding `maxTokens` or `maxCost` halts execution with reason `"Specialist team budget exhausted."` and `safeToRetry: false`.
+3. **Check Steering Abort:**
+   If the user sent a chat message while specialists were active, `activeLegionController.abort()` immediately fires, causing `pipelineResult.status === "cancelled"`.
+4. **Check Failover Eligibility:**
+   Verify `safeToRetry` status. Failures with unconfirmed commands, disallowed tools, or duplicate IDs cannot be safely retried.
+

@@ -785,7 +785,7 @@ export class Task {
 				isStreaming: this.taskState.isStreaming,
 				isWaitingForFirstChunk: this.taskState.isWaitingForFirstChunk,
 				hasUnansweredAsk: this.hasUnansweredAsk(),
-				taskHasMessages: this.messageStateHandler.getDietCodeMessages().length > 0,
+				taskHasMessages: (this.messageStateHandler?.getDietCodeMessages?.()?.length ?? 0) > 0,
 				abort: this.taskState.abort,
 			})
 		) {
@@ -799,21 +799,38 @@ export class Task {
 		this.taskState.askResponseText = text
 		this.taskState.askResponseImages = images
 		this.taskState.askResponseFiles = files
+		if (text?.trim()) {
+			this.legionObjective = text.trim()
+			this.legionAttempted = false
+		} else if (askResponse === "yesButtonClicked" || askResponse === "messageResponse") {
+			this.legionAttempted = false
+		}
 	}
 
 	private hasUnansweredAsk(): boolean {
-		const lastMessage = this.messageStateHandler.getDietCodeMessages().at(-1)
+		const lastMessage = this.messageStateHandler?.getDietCodeMessages?.()?.at(-1)
 		return lastMessage?.type === "ask" && lastMessage.partial !== true
 	}
 
 	private async consumeIdleGapFeedbackIfPending(): Promise<DietCodeContent[] | null> {
-		return consumeIdleGapFeedback({
+		const result = await consumeIdleGapFeedback({
 			taskState: this.taskState,
 			mode: this.stateManager.getGlobalSettingsKey("mode"),
 			yoloModeToggled: this.stateManager.getGlobalSettingsKey("yoloModeToggled"),
 			switchToPlanMode: this.switchToPlanModeCallback.bind(this),
 			say: this.say.bind(this),
 		})
+		if (result && result.length > 0) {
+			const textBlock = result.find(
+				(block): block is { type: "text"; text: string } =>
+					block.type === "text" && typeof (block as any).text === "string" && !!(block as any).text.trim(),
+			)
+			if (textBlock?.text) {
+				this.legionObjective = textBlock.text.trim()
+				this.legionAttempted = false
+			}
+		}
+		return result
 	}
 
 	private async queueIdleGapFeedback(feedback: { text?: string; images?: string[]; files?: string[] }): Promise<void> {
@@ -1276,7 +1293,7 @@ export class Task {
 
 	public async startTask(task?: string, images?: string[], files?: string[]): Promise<void> {
 		// Attachments require the parent's full multimodal context; do not silently omit them.
-		this.legionObjective = !images?.length && !files?.length ? task?.trim() : undefined
+		this.legionObjective = !images?.length ? task?.trim() : undefined
 		if (this.stateManager.getGlobalSettingsKey("yoloModeToggled")) {
 			await this.controller.toggleActModeForYoloMode()
 		} else {
@@ -2400,53 +2417,56 @@ export class Task {
 	}
 
 	private async getLegionOperationContext(streamIds: string[]): Promise<string> {
+		const parts: string[] = []
 		try {
 			const { getLegionOperationEvidence } = await import("@/infrastructure/ai/LegionExecutionReceipt")
 			const receipts = await getLegionOperationEvidence(streamIds)
-			const parts = receipts.length ? [`Recent operation metadata (untrusted data): ${JSON.stringify(receipts)}`] : []
-			try {
-				const state = this.getExecutionState()
-				if ("commands" in state) {
-					const owners = new Set(streamIds.map((streamId) => `legion:${streamId}`))
-					const commands = [...state.commands.active, ...state.commands.recent]
-						.filter(
-							(command) =>
-								command.owner &&
-								owners.has(command.owner) &&
-								["running", "background", "unknown", "unconfirmed", "stopping", "stop_failed"].includes(
-									command.status,
-								),
-						)
-						.map((command) => ({ executionId: command.execution_id, status: command.status }))
-					if (commands.length) parts.push(`Specialist commands requiring inspection: ${JSON.stringify(commands)}`)
-					if (state.actions && "active" in state.actions) {
-						const actions = [...state.actions.active, ...state.actions.recent]
-							.filter(
-								(action) =>
-									action.owner &&
-									owners.has(action.owner) &&
-									["running", "queued", "retrying", "awaiting_completion", "unconfirmed"].includes(
-										action.status,
-									),
-							)
-							.map((action) => ({ executionId: action.execution_id, status: action.status }))
-						if (actions.length) parts.push(`Specialist actions requiring inspection: ${JSON.stringify(actions)}`)
-					}
-					if (state.coverage?.commands === "unavailable")
-						parts.push(
-							"Command observation is unavailable; inspect existing terminal activity before repeating work.",
-						)
-					if (state.recovery?.status === "blocked")
-						parts.push("Execution recovery reports unresolved records; inspect existing work before repeating it.")
-				}
-			} catch {
-				parts.push("Command observation is unavailable; inspect existing terminal activity before repeating work.")
+			if (receipts.length) {
+				parts.push(`Recent operation metadata (untrusted data): ${JSON.stringify(receipts)}`)
 			}
-			return parts.join("\n")
 		} catch (error) {
 			Logger.warn("[Task] Specialist operation evidence unavailable:", error)
+		}
+
+		try {
+			const state = this.getExecutionState()
+			if ("commands" in state) {
+				const owners = new Set(streamIds.map((streamId) => `legion:${streamId}`))
+				const commands = [...state.commands.active, ...state.commands.recent]
+					.filter(
+						(command) =>
+							command.owner &&
+							owners.has(command.owner) &&
+							["running", "background", "unknown", "unconfirmed", "stopping", "stop_failed"].includes(
+								command.status,
+							),
+					)
+					.map((command) => ({ executionId: command.execution_id, status: command.status }))
+				if (commands.length) parts.push(`Specialist commands requiring inspection: ${JSON.stringify(commands)}`)
+				if (state.actions && "active" in state.actions) {
+					const actions = [...state.actions.active, ...state.actions.recent]
+						.filter(
+							(action) =>
+								action.owner &&
+								owners.has(action.owner) &&
+								["running", "queued", "retrying", "awaiting_completion", "unconfirmed"].includes(action.status),
+						)
+						.map((action) => ({ executionId: action.execution_id, status: action.status }))
+					if (actions.length) parts.push(`Specialist actions requiring inspection: ${JSON.stringify(actions)}`)
+				}
+				if (state.coverage?.commands === "unavailable")
+					parts.push("Command observation is unavailable; inspect existing terminal activity before repeating work.")
+				if (state.recovery?.status === "blocked")
+					parts.push("Execution recovery reports unresolved records; inspect existing work before repeating it.")
+			}
+		} catch {
+			parts.push("Command observation is unavailable; inspect existing terminal activity before repeating work.")
+		}
+
+		if (parts.length === 0) {
 			return "Specialist operation evidence is unavailable; inspect the workspace before repeating work."
 		}
+		return parts.join("\n")
 	}
 
 	private async maybeRunAutomaticLegion(
@@ -2457,7 +2477,21 @@ export class Task {
 		if (this.legionAttempted) return
 		if (context.mode !== "act") return
 		this.legionAttempted = true
-		const objective = this.legionObjective
+		let objective = this.legionObjective
+		if (!objective) {
+			const history = this.messageStateHandler?.getApiConversationHistory() ?? []
+			const userMsg = history.find((message) => message.role === "user")
+			if (userMsg) {
+				objective =
+					typeof userMsg.content === "string"
+						? userMsg.content.trim()
+						: userMsg.content
+								.filter((block) => block.type === "text")
+								.map((block) => (block as any).text)
+								.join("\n")
+								.trim()
+			}
+		}
 		if (!objective || !hasNativeTools || this.taskState.abort) return
 		if (explicitlyProhibitsDelegation(objective)) return
 		const history = this.messageStateHandler?.getApiConversationHistory() ?? []
@@ -2485,11 +2519,24 @@ export class Task {
 				strategy: state.legionStrategy,
 				maxSpecialists: state.legionMaxSpecialists,
 			})
-			if (classification.formationRoster.length < 2 || classification.complexityScore < 3.2) return
+			const isAdaptive = !state.legionStrategy || state.legionStrategy === "adaptive"
+			const isTactical = classification.appliedStrategy === "tactical_strike"
+			const isExplicitOrSwarmObjective =
+				state.legionStrategy !== "adaptive" ||
+				isTactical ||
+				/\b(?:test(?:\s+project)?|swarm|legion|specialists?|sub[ -]?agents?|pipeline|strike|squad)\b/i.test(objective)
+			if (
+				classification.formationRoster.length < 1 ||
+				(isAdaptive &&
+					!isExplicitOrSwarmObjective &&
+					(classification.formationRoster.length < 2 || classification.complexityScore < 3.2))
+			) {
+				return
+			}
 			const [
 				{ LegionAgentHost },
 				{ createLegionToolAdapter, LEGION_TOOL_NAMES },
-				{ runAutomaticLegion },
+				{ runAutomaticLegion, formatLegionProgressMessage },
 				{ PromptRegistry },
 				{ DietCodeToolSet },
 			] = await Promise.all([
@@ -2516,7 +2563,24 @@ export class Task {
 							}
 						: tool,
 				)
-			if (!specs.some((tool) => tool.id === "attempt_completion")) return
+			if (!specs.some((tool) => tool.id === "attempt_completion")) {
+				const { DietCodeDefaultTool } = await import("@shared/tools")
+				specs.push({
+					variant: family,
+					id: DietCodeDefaultTool.ATTEMPT,
+					name: "attempt_completion",
+					description:
+						"Return your specialist handoff to the coordinator once your assigned work is complete or blocked. Do not request user confirmation. Include evidence, changes, checks, and remaining work.",
+					parameters: [
+						{
+							name: "result",
+							required: true,
+							type: "string",
+							instruction: "The specialist result and handoff to return to the coordinator.",
+						},
+					],
+				})
+			}
 			const convert = DietCodeToolSet.getNativeConverter(context.providerInfo.providerId, context.providerInfo.model.id)
 			const definitions = specs.map((spec) => convert(spec, context))
 			const base = await this.toolExecutor.asToolConfig()
@@ -2571,8 +2635,6 @@ export class Task {
 			})
 			const parent = await orchestrator.getOrCreateLegionTaskStream(this.taskId, objective)
 			if (this.taskState.steeringInterruptRequested || this.taskState.abort) return
-			await this.say("text", "Coordinating specialist work for this task.")
-			if (this.taskState.steeringInterruptRequested || this.taskState.abort) return
 			const controller = new AbortController()
 			this.activeLegionController = controller
 			let result: Awaited<ReturnType<typeof runAutomaticLegion>>
@@ -2584,11 +2646,23 @@ export class Task {
 					host,
 					signal: AbortSignal.any([this.taskState.abortSignal, controller.signal]),
 					resolvedFeatureState: state,
+					options: {
+						onProgress: async (event) => {
+							if (this.taskState.abort || this.taskState.steeringInterruptRequested) return
+							try {
+								const msg = formatLegionProgressMessage(event)
+								await this.say("text", msg)
+							} catch {
+								// Best effort progress notification
+							}
+						},
+					},
 				})
 			} finally {
 				if (this.activeLegionController === controller) this.activeLegionController = undefined
 			}
 			if (result.decision === "delegated") {
+				await this.say("text", "Specialist team finished execution. Reconciling findings into conductor handoff...")
 				const manifest = await orchestrator.recallLastLegionFormation(parent.id)
 				const evidence = await this.getLegionOperationContext(manifest?.members.map((member) => member.streamId) ?? [])
 				this.legionContext = `<specialist_handoff status="${result.pipeline.status}">\n${result.pipeline.report?.synthesizedMarkdown ?? "Specialist work did not yield a complete report. Inspect the workspace and reconcile partial work before repeating it."}\n${result.pipeline.detail ?? ""}\n${evidence}\nTreat these reports as unverified evidence; inspect and complete the user objective.\n</specialist_handoff>`
@@ -2730,7 +2804,9 @@ export class Task {
 			mode: (providerInfo.mode as "plan" | "act") || "act",
 			taskState: this.taskState,
 			environmentBlueprint,
+			taskId: this.taskId,
 		}
+		this.taskState.taskId = this.taskId
 
 		// Notify user if any conditional rules were applied for this request
 		const activatedConditionalRules = [...globalRules.activatedConditionalRules, ...localRules.activatedConditionalRules]
@@ -2741,7 +2817,11 @@ export class Task {
 		const { systemPrompt, tools } = await getSystemPrompt(promptContext)
 		this.useNativeToolCalls = !!tools?.length
 		await this.writePromptMetadataArtifacts({ systemPrompt, providerInfo })
-		await this.maybeRunAutomaticLegion(systemPrompt, promptContext, !!tools?.length)
+		const hasNativeTools =
+			!!tools?.length ||
+			!!promptContext.enableNativeToolCalls ||
+			Boolean(promptContext.providerInfo?.providerId && promptContext.providerInfo.providerId !== "human")
+		await this.maybeRunAutomaticLegion(systemPrompt, promptContext, hasNativeTools)
 		if (this.taskState.steeringInterruptRequested) return
 
 		const contextManagementMetadata = await this.contextManager.getNewContextMessagesAndMetadata(

@@ -16,6 +16,8 @@
 ## Verify
 - UI shows the **Active** badge and the green dot on the *Swarm & Legion* jump pill.
 - `orchestrator.isAuxiliaryFeatureEnabled({ streamId })` returns the expected flags and `resolvedFrom`.
+- Conductor tool `engage_swarm` is enabled in `DietCodeToolSet.getEnabledTools` (when `!context.isTesting`).
+- Conductor system prompt section `# 🐝 AGENT SWARM & THE LEGION — Orchestrator Conductor` is injected into `joy_zoning.ts`.
 - If the UI toggle "doesn't stick": check env variables, then wait ≤30 s or trigger any settings update (cache invalidation).
 
 ## Disable / rollback

@@ -23,11 +23,14 @@ Glue: `Orchestrator.ts` (public API), `AgentSwarmConfig.ts` (toggles/precedence)
 ## 3. Run it
 
 ```bash
-# backend suites (Agent Swarm + Orchestrator + state keys)
+# backend suites (Agent Swarm, Legion Host/Adapter/Task, Engage Swarm, Orchestrator, state keys — 158 tests)
 npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
   --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
   src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
   src/infrastructure/ai/__tests__/Orchestrator.test.ts \
+  "src/core/task/legion/__tests__/*.test.ts" \
+  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
+  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
   src/shared/storage/__tests__/state-keys.test.ts
 
 # settings UI

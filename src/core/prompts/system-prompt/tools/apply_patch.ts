@@ -82,7 +82,10 @@ const NATIVE_GPT_5: DietCodeToolSpec = {
 	name: "apply_patch",
 	description: APPLY_PATCH_TOOL_DESC,
 	contextRequirements: (context) =>
-		isGPT5ModelFamily(context.providerInfo.model.id) || isGptOssModelFamily(context.providerInfo.model.id),
+		Boolean(
+			context.providerInfo?.model?.id &&
+				(isGPT5ModelFamily(context.providerInfo.model.id) || isGptOssModelFamily(context.providerInfo.model.id)),
+		),
 	parameters: [
 		{
 			name: "input",

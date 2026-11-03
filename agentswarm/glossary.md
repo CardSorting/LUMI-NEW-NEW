@@ -27,6 +27,12 @@
 | **Terminal member state** | `completed`, `failed`, `rerouted`. Final — never flipped by a later event. |
 | **Shadow buffer** | Per-agent uncommitted write overlay in `BufferedDbPool` (`push(op, agentId)`). Invisible to other readers until `commitWork`; idle overlays are discarded after 5 minutes. A recurring source of bugs — see PM-001, PM-011. |
 | **Layer priority / `TABLE_FK_ORDER`** | Flush ordering in `BufferedDbPool` so parent rows (`agent_streams`) land before dependents. |
+| **Orchestrator Conductor** | The parent agent's operational posture when leading The Legion: maps roles to milestones in Plan Mode and commands/supervises execution via `engage_swarm` in Act Mode. |
+| **`engage_swarm`** | Native conductor tool allowing the parent agent to explicitly spawn and operate a specialist team for an objective, test suite, or milestone. Auto-approved by default. |
+| **Streaming Progress Cards** | Real-time markdown UI cards formatted by `formatLegionProgressMessage` and streamed to chat (stages, active specialists, completions, failures, failovers). |
+| **Safe-to-Retry Failover** | Property on `LegionExecutionResult` (`safeToRetry?: boolean`) allowing ADR-0009 failover only for recoverable errors, halting on dirty commands or budget exhaustion. |
+| **Fallback Completion Spec** | Isolated `attempt_completion` spec injected into specialist contexts with a single `result: string` parameter. |
+| **Tactical Strike Strategy** | Targeted single-specialist formation strategy (`tactical_strike`) that bypasses the 3.2 complexity floor and multi-specialist minimums. |
 
 ## Specialist codenames
 

@@ -10,6 +10,7 @@ import { browser_action_variants } from "./browser_action"
 import { cognitive_memory_variants } from "./cognitive_memory"
 import { decompose_module_variants } from "./decompose_module"
 import { diagnose_stability_variants } from "./diagnose_stability"
+import { engage_swarm_variants } from "./engage_swarm"
 import { execute_command_variants } from "./execute_command"
 import { focus_chain_variants } from "./focus_chain"
 import { generate_dependency_map_variants } from "./generate_dependency_map"
@@ -79,6 +80,7 @@ export function registerDietCodeToolSets(): void {
 		...web_fetch_variants,
 		...web_search_variants,
 		...write_to_file_variants,
+		...engage_swarm_variants,
 	]
 
 	// Register each variant

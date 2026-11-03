@@ -14,5 +14,18 @@ Keep planning proportional to the task. Resolve routine choices yourself and sto
 export async function getActVsPlanModeSection(variant: PromptVariant, context: SystemPromptContext): Promise<string> {
 	const template = variant.componentOverrides?.[SystemPromptSection.ACT_VS_PLAN]?.template || getActVsPlanModeTemplateText
 
-	return new TemplateEngine().resolve(template, context, {})
+	let content = new TemplateEngine().resolve(template, context, {})
+	if (!context.isTesting) {
+		try {
+			const { resolveEffectiveAgentSwarmState } = require("@/infrastructure/ai/AgentSwarmConfig")
+			const taskId = context.taskId || context.taskState?.taskId
+			const state = resolveEffectiveAgentSwarmState(taskId ? { taskId } : undefined)
+			if (state.legionEnabled || state.enabled) {
+				content += `\n- AGENT SWARM & THE LEGION: In PLAN MODE, map out which specialist roles (architect, implementer, verifier, hardener) will handle each milestone. After finalizing your plan with plan_mode_respond, you transition to ACT MODE where you can engage the specialist swarm via engage_swarm or oversee stage progression.`
+			}
+		} catch {
+			// Ignore if unavailable
+		}
+	}
+	return content
 }

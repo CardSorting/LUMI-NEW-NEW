@@ -63,6 +63,9 @@ When viewing the **LUMI** output channel or Extension Host console logs, filter 
 | `[HierarchicalDefer]` | `HierarchicalDeferCoordinator.ts` | Hierarchy suspension requests, child acknowledgements, barrier releases, failure reconciliations, and resume completions |
 | `[CriticalCompletionReview]` | `CriticalCompletionReview.ts` | Review cycle start, finding classification counts, 4-way decision (`ACCEPT`, `ACCEPT_WITH_NOTE`, `REMEDIATE`, `ESCALATE`), corrective task IDs |
 | `[LegionCoordinator]` | `LegionCoordinator.ts` | Task classification scores, formation creation, stage promotions, file reservation conflicts, specialist failover reroutes, and synthesis reports |
+| `[EngageSwarm]` | `EngageSwarmHandler.ts` | Conductor tool invocations, parameter extraction, pipeline completion, and handoff synthesis |
+| `[LegionPipelineRunner]` | `LegionPipelineRunner.ts` | Stage transitions, ready specialist claims, durable barriers, and failover dispatches |
+| `[Task]` | `src/core/task/index.ts` | Automatic Legion gating decisions, specialist operation evidence, and usage accounting |
 | `[Orchestrator]` | `Orchestrator.ts` | Stream creation/completion/failure, task dispatch blocks on suspended streams, reservation releases |
 | `[DbPool]` | `BufferedDbPool.ts` | Shadow commit/rollback, expired shadow cleanup, and any SQLite transaction error on `flush()` |
 | `[Config]` | `src/infrastructure/db/Config.ts` | SQLite initialization path, WAL mode confirmation, or `.corrupt.<timestamp>` recovery |
@@ -109,12 +112,12 @@ SELECT
   streamId,
   json_extract(value, '$.state') AS suspend_state,
   json_extract(value, '$.acceptingNewWork') AS accepting_work,
-  json_extract(value, '$.safeBoundary') AS boundary,
-  json_array_length(COALESCE(json_extract(value, '$.pendingChildStreamIds'), '[]')) AS pending_children,
-  json_array_length(COALESCE(json_extract(value, '$.acknowledgedChildStreamIds'), '[]')) AS acked_children,
+  json_extract(value, '$.boundary') AS boundary,
+  json_array_length(COALESCE(json_extract(value, '$.pendingChildAckIds'), '[]')) AS pending_children,
+  json_array_length(COALESCE(json_extract(value, '$.acknowledgedChildIds'), '[]')) AS acked_children,
   json_extract(value, '$.pipelineId') AS pipeline_id
 FROM agent_memory
-WHERE key = 'stream_suspension_state';
+WHERE key = 'defer_agent_status';
 "
 ```
 **Sample Output:**
@@ -122,46 +125,46 @@ WHERE key = 'stream_suspension_state';
 streamId    suspend_state  accepting_work  boundary        pending_children  acked_children  pipeline_id
 ----------  -------------  --------------  --------------  ----------------  --------------  -----------
 root-1      resumed        1               safe_boundary   0                 1               pipe-1
-child-1     resumed        1               tool_completed  0                 0               pipe-1
+child-1     resumed        1               safe_boundary   0                 0               pipe-1
 ```
 - **Interpretation:** `accepting_work = 0` (`false`) means `ensureStreamAcceptingWork` will block new tasks. If `suspend_state = 'waiting_for_children'` and `pending_children > 0`, run `Q3` to see which child stream ID has not acknowledged.
 
 ---
 
-### `Q3` — Inspect pipeline suspension barriers (`pipeline_defer_state:*`)
+### `Q3` — Inspect pipeline suspension barriers (`deferred_pipeline_status`)
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
   streamId AS root_stream,
-  key,
+  json_extract(value, '$.pipelineId') AS pipeline_id,
   json_extract(value, '$.phase') AS phase,
-  json_extract(value, '$.pendingAckStreamIds') AS pending_ack_ids,
-  json_extract(value, '$.acknowledgedStreamIds') AS acked_ids,
-  json_extract(value, '$.barrierSatisfiedAt') AS barrier_satisfied_at
+  json_extract(value, '$.pendingChildStreamIds') AS pending_child_ids,
+  json_extract(value, '$.suspendedStreamIds') AS suspended_ids,
+  json_extract(value, '$.suspendedAt') AS suspended_at
 FROM agent_memory
-WHERE key LIKE 'pipeline_defer_state:%';
+WHERE key = 'deferred_pipeline_status';
 "
 ```
 **Sample Output:**
 ```text
-root_stream  key                           phase    pending_ack_ids  acked_ids    barrier_satisfied_at
------------  ----------------------------  -------  ---------------  -----------  --------------------
-root-1       pipeline_defer_state:pipe-1   resumed  []               ["child-1"]  1793661490512
+root_stream  pipeline_id  phase    pending_child_ids  suspended_ids  suspended_at
+-----------  -----------  -------  -----------------  -------------  -------------
+root-1       pipe-1       resumed  []                 ["child-1"]    1793661490512
 ```
 
 ---
 
 ### `Q4` — Inspect deferred vs. active tasks across streams
-Confirms that deferred tasks remain `status = 'pending'` with `deferred = 1` (`true`) rather than being aborted or cancelled.
+Confirms that deferred tasks remain `status = 'pending'` with `deferred_state = 'deferred'` rather than being aborted or cancelled.
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
   id AS task_id,
   streamId,
   status,
-  json_extract(payload, '$.__hierarchicalDefer.deferred') AS is_deferred,
-  json_extract(payload, '$.__legion.roleId') AS legion_role,
-  substr(json_extract(payload, '$.description'), 1, 50) AS description
+  json_extract(metadata, '$.deferred_state') AS is_deferred,
+  json_extract(metadata, '$.legion_specialist_role') AS legion_role,
+  substr(description, 1, 50) AS description
 FROM agent_tasks
 ORDER BY createdAt ASC;
 "
@@ -188,27 +191,26 @@ WHERE m.key LIKE 'file_res:%';
 
 ---
 
-### `Q6` — Inspect Legion formations and stage progress (`legion_formation_state:*`)
+### `Q6` — Inspect Legion formations and stage progress (`legion_formation:*`)
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
   streamId AS parent_stream,
   json_extract(value, '$.formationId') AS formation_id,
-  json_extract(value, '$.phase') AS phase,
-  json_extract(value, '$.currentStage') AS current_stage,
+  json_extract(value, '$.status') AS status,
   json_array_length(json_extract(value, '$.members')) AS member_count,
-  json_extract(value, '$.metrics.completedStreams') AS completed,
-  json_extract(value, '$.metrics.failedStreams') AS failed,
-  json_extract(value, '$.metrics.reroutedStreams') AS rerouted
+  json_extract(value, '$.stageProgression.stages.leadAndRecon.status') AS lead_recon_status,
+  json_extract(value, '$.stageProgression.stages.parallelExecution.status') AS parallel_status,
+  json_extract(value, '$.stageProgression.stages.verificationAndHardening.status') AS verification_status
 FROM agent_memory
-WHERE key LIKE 'legion_formation_state:%';
+WHERE key LIKE 'legion_formation:%';
 "
 ```
 **Sample Output:**
 ```text
-parent_stream  formation_id  phase      current_stage   member_count  completed  failed  rerouted
--------------  ------------  ---------  --------------  ------------  ---------  ------  --------
-root-1         legion-1      completed  synthesis_docs  3             2          0       1
+parent_stream  formation_id  status     member_count  lead_recon_status  parallel_status  verification_status
+-------------  ------------  ---------  ------------  -----------------  ---------------  -------------------
+root-1         form-1        completed  3             completed          completed        completed
 ```
 
 ---
@@ -218,25 +220,26 @@ root-1         legion-1      completed  synthesis_docs  3             2         
 sqlite3 -header -column "$DB" "
 SELECT
   m.streamId AS parent_stream,
-  json_extract(j.value, '$.slotId') AS slot_id,
-  json_extract(j.value, '$.roleId') AS role_id,
+  json_extract(j.value, '$.assignment.assignmentId') AS assignment_id,
+  json_extract(j.value, '$.assignment.role') AS role,
+  json_extract(j.value, '$.assignment.codename') AS codename,
   json_extract(j.value, '$.stage') AS stage,
-  json_extract(j.value, '$.status') AS slot_status,
+  json_extract(j.value, '$.status') AS member_status,
   json_extract(j.value, '$.streamId') AS child_stream,
-  json_extract(j.value, '$.attemptCount') AS attempts,
-  json_extract(j.value, '$.replacedBySlotId') AS replaced_by
+  json_extract(j.value, '$.attempt') AS attempt,
+  json_extract(j.value, '$.reroutedToStreamId') AS rerouted_to
 FROM agent_memory m,
      json_each(json_extract(m.value, '$.members')) j
-WHERE m.key LIKE 'legion_formation_state:%';
+WHERE m.key LIKE 'legion_formation:%';
 "
 ```
 **Sample Output:**
 ```text
-parent_stream  slot_id     role_id                         stage                   slot_status  child_stream  attempts  replaced_by
--------------  ----------  ------------------------------  ----------------------  -----------  ------------  --------  ----------------
-root-1         slot-1      legion_systems_architect        discovery_architecture  completed    stream-s1     1         
-root-1         slot-2      legion_implementation_engineer  implementation          rerouted     stream-s2     1         slot-2-failover-1
-root-1         slot-2-f1   legion_resilience_hardener      implementation          completed    stream-s3     2         
+parent_stream  assignment_id       role                codename        stage              member_status  child_stream  attempt  rerouted_to
+-------------  ------------------  ------------------  --------------  -----------------  -------------  ------------  -------  -----------
+root-1         assign-arch-1       legion_architect    CENTURION-ARCH  leadAndRecon       completed      stream-s1     1        
+root-1         assign-impl-1       legion_implementer  VANGUARD-IMPL   parallelExecution  rerouted       stream-s2     1        stream-s3
+root-1         assign-impl-1-f1    legion_implementer  VANGUARD-IMPL   parallelExecution  completed      stream-s3     2        
 ```
 
 ---
@@ -246,14 +249,14 @@ root-1         slot-2-f1   legion_resilience_hardener      implementation       
 sqlite3 -header -column "$DB" "
 SELECT
   streamId,
-  json_extract(value, '$.reviewPassCount') AS review_passes,
-  json_extract(value, '$.followUpReviewCount') AS followup_passes,
-  json_extract(value, '$.remediationPassCount') AS remediation_passes,
+  json_extract(value, '$.completionEventId') AS completion_event_id,
+  json_extract(value, '$.initialReviewsUsed') AS initial_reviews,
+  json_extract(value, '$.correctivePassesUsed') AS corrective_passes,
+  json_extract(value, '$.remediationAuthorized') AS remediation_authorized,
   json_extract(value, '$.lastDecision') AS last_decision,
-  json_extract(value, '$.terminated') AS terminated,
-  json_extract(value, '$.terminationReason') AS termination_reason
+  datetime(json_extract(value, '$.updatedAt') / 1000, 'unixepoch') AS updated_utc
 FROM agent_memory
-WHERE key = 'critical_review_cycle_state';
+WHERE key LIKE 'critical_review_cycle:%';
 "
 ```
 

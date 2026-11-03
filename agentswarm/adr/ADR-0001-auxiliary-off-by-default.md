@@ -1,6 +1,6 @@
 # ADR-0001 — Auxiliary, off by default, zero overhead when off
 
-**Status:** Accepted
+**Status:** Superseded for Legion by [ADR-0012](ADR-0012-automatic-legion-default.md) (Legion defaults to on; Review and Defer remain off by default)
 
 ## Context
 `agentswarm2.md` §1 requires Critical Completion Review to default to *Disabled* and to leave "normal completion and reporting behaviour" untouched when off. LUMI's single-agent path is the product's core; a new capability must not tax or destabilise it.

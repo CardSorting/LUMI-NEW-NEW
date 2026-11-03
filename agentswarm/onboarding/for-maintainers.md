@@ -23,6 +23,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 | **Hierarchical Defer** | `src/infrastructure/ai/HierarchicalDeferCoordinator.ts` | **Defer ≠ cancel**; multi-level BFS barrier; dead-child reconciliation; no post-resume re-suspension; no blind step replay ([ADR-0002](../adr/ADR-0002-defer-is-not-cancel.md), [ADR-0004](../adr/ADR-0004-suspension-barrier-and-ancestor-walk.md), [PM-006](../postmortems/PM-006-multi-level-barrier-deadlock.md), [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)) |
 | **Critical Review** | `src/infrastructure/ai/CriticalCompletionReview.ts`, `src/core/task/tools/completionGatePipeline.ts`, `src/core/task/tools/handlers/AttemptCompletionHandler.ts` | **Bounded 1+1** (1 follow-up + 1 remediation max); strict `verified_defect` vs. `unverified_concern` separation; `finally` auto-resume ([ADR-0005](../adr/ADR-0005-bounded-review-with-category-separation.md), [PM-007](../postmortems/PM-007-review-left-pipeline-suspended-and-unwired.md)) |
 | **The Legion** | `src/infrastructure/ai/LegionCoordinator.ts`, `src/infrastructure/ai/Orchestrator.ts` | Deterministic multi-signal classification; 5-stage gated handoff; active-only file reservation checks; **terminal states (`completed`/`failed`/`rerouted`) are final**; max 2 attempts per slot ([ADR-0008](../adr/ADR-0008-deterministic-legion-classification.md), [ADR-0009](../adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), [PM-008](../postmortems/PM-008-stale-reservation-false-positives.md), [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)) |
+| **Conductor & Tools** | `src/core/task/tools/handlers/EngageSwarmHandler.ts`, `src/core/prompts/system-prompt/tools/engage_swarm.ts`, `src/core/task/tools/autoApprove.ts`, `src/core/prompts/system-prompt/components/joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`, `LegionPipelineRunner.ts` | Conductor tool `engage_swarm` is auto-approved, respects budgets (`maxTokens`/`maxCost`), streams progress cards, and categorizes `safeToRetry` failovers ([ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md)) |
 | **Persistence** | `src/infrastructure/db/BufferedDbPool.ts`, `src/infrastructure/ai/Orchestrator.ts` | `TABLE_FK_ORDER` flush order; composite `conflictTarget: ["streamId", "key"]` on `agent_memory`; **no shadow writes after `commitWork` or on shared rows**; flush before same-batch reservation deletes ([ADR-0003](../adr/ADR-0003-durable-state-in-agent-memory.md), [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md), [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md), [PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md), [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)) |
 | **Settings Surface** | `proto/dietcode/state.proto`, `state-keys.ts`, `ExtensionMessage.ts`, `updateSettings.ts`, `updateTaskSettings.ts`, `ToolExecutor.ts`, `TaskConfig.ts`, `ToolConstants.ts`, `Controller`, `webview-ui/**` | All 7 layers move together ([ADR-0007](../adr/ADR-0007-settings-through-proto-with-boundary-clamping.md), [PB-02](../playbooks/PB-02-add-a-setting-end-to-end.md), [PM-005](../postmortems/PM-005-task-config-keys-drift.md)) |
 
@@ -32,6 +33,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 
 **Behavioural & Safety**
 - [ ] Legion defaults on, Review and Defer default off, and an explicit Legion opt-out prevents formation.
+- [ ] Conductor tool `engage_swarm` auto-approves, isolates test environments (`!context.isTesting`), and validates strategy and specialist limits.
 - [ ] No unbounded loop introduced; every retry/review/failover has a numeric cap and a unit test proving termination.
 - [ ] Terminal member/stream states (`completed`, `failed`, `rerouted`) cannot be overwritten by later events, and `reconcilePipelineBarrier` only runs when `pipeline.phase` is `"waiting_for_children"` or `"suspending"`.
 
@@ -54,10 +56,10 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 
 ## 3. Release Gates
 
-1. Full automated verification block from [PB-07](../playbooks/PB-07-release-verification.md) passes (**34 tests** in `AgentSwarmAuxiliary.test.ts`, **46 tests** across `Orchestrator.test.ts` + `state-keys.test.ts`, **7 tests** in `FeatureSettingsSection.test.tsx`).
+1. Full automated verification block from [PB-07](../playbooks/PB-07-release-verification.md) passes (**158 backend tests** across Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, Orchestrator, and State Keys; **7 webview tests** in `webview-ui`).
 2. Real-SQLite persistence tests (Section 5 and Section 8 of `AgentSwarmAuxiliary.test.ts`) pass.
 3. Manual smoke in a live VS Code Extension Development Host window (**not yet performed at wiki authoring time — see [findings](../implementation/findings.md#known-limits-and-open-questions)**).
-4. Confirm defaults in `state-keys.ts` and `package.json` remain `false` / `safe_boundary` / `adaptive` / `1` / `1` / `4`.
+4. Confirm defaults in `state-keys.ts` and `package.json` remain `false` / `safe_boundary` / `adaptive` / `1` / `1` / `4` (with `agentSwarmLegionEnabled: true`).
 
 ---
 
@@ -76,7 +78,7 @@ Treat AI agent completion reports as **unverified claims** until proven on disk.
 2. **30-second config cache:** `updateSettings` and `updateTaskSettings` call `invalidateAgentSwarmConfigCache()`; direct `StateManager` writes do not.
 3. **Shadow overlays vs. `activeBuffer`:** Any write issued with an `agentId` after `commitWork(agentId)` never reaches SQLite and is garbage-collected after 5 minutes by `cleanupShadows` ([PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md)).
 4. **Same-batch `delete` vs. `upsert` sorting:** `BufferedDbPool.flush()` sorts operations on the same table and layer alphabetically by `op.type` (`delete` < `insert` < `update` < `upsert`). Deleting a row that was upserted in the same un-flushed batch requires calling `await dbPool.flush()` before queueing the delete ([PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)).
-5. **Legion coordinates; host runners execute:** `LegionCoordinator` creates child streams and `pending` tasks and manages stage gates, failover, and synthesis when `completeStream`/`failStream` are called. Ensure your host task runner polls child stream tasks and invokes `completeStream`/`failStream`.
+5. **Legion coordinates; host runners execute:** `LegionCoordinator` creates child streams and manages stage gates, failover, and synthesis. `LegionAgentHost` and `LegionPipelineRunner` automatically execute specialists via native-tool provider conversations and sandboxed `LegionToolAdapter` instances with token/cost bounds, while `EngageSwarmHandler` enables explicit conductor dispatch.
 
 ---
 
@@ -88,9 +90,9 @@ Treat AI agent completion reports as **unverified claims** until proven on disk.
 
 ## 7. Navigating the Rest of the Wiki
 
-- **[Feature Changelog (`CHANGELOG.md`)](../CHANGELOG.md)** — Chronological history of Phases 1–5, architectural milestones, and bug fixes
+- **[Feature Changelog (`CHANGELOG.md`)](../CHANGELOG.md)** — Chronological history of Phases 1–7, architectural milestones, and bug fixes
 - **[Maintainers' Handbook (`maintainers/`)](../maintainers/README.md)** — Zero-to-hero system guide, codebase tour, SQLite operating cookbook (`Q1`–`Q8`), and failure drills (`M1`–`M4`)
-- **[ADRs (`adr/`)](../adr/README.md)** — Why every architectural decision was made (ADR-0001 through ADR-0011)
-- **[Post-Mortems (`postmortems/`)](../postmortems/README.md)** — Every bug discovered and fixed during implementation and verification (PM-001 through PM-012)
+- **[ADRs (`adr/`)](../adr/README.md)** — Why every architectural decision was made (ADR-0001 through ADR-0013)
+- **[Post-Mortems (`postmortems/`)](../postmortems/README.md)** — Every bug discovered and fixed during implementation and verification (PM-001 through PM-014)
 - **[Playbooks (`playbooks/`)](../playbooks/README.md)** — Step-by-step operational recipes (PB-01 through PB-08)
 - **[Papers (`papers/`)](../papers/01-philosophy.md)** — [Philosophy](../papers/01-philosophy.md) · [Stakeholder Handoff](../papers/02-stakeholder-handoff.md) · [Technical Whitepaper](../papers/03-technical-whitepaper.md)

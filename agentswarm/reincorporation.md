@@ -4,7 +4,7 @@ Use this when you need to (a) re-apply the feature after a rebase/merge conflict
 
 ## 0. Preconditions
 - Know where the code lives: [implementation/file-map.md](implementation/file-map.md). At authoring time it was **uncommitted** — first make it durable: `git add agentswarm src/infrastructure/ai src/... && git commit` (or `git stash -u`), otherwise nothing below is recoverable.
-- Capture a patch: `git diff > agentswarm.patch` plus copy the **untracked** files (`AgentSwarmConfig.ts`, `CriticalCompletionReview.ts`, `HierarchicalDeferCoordinator.ts`, `LegionCoordinator.ts`, `AgentSwarmAuxiliary.test.ts`).
+- Capture a patch: `git diff > agentswarm.patch` plus copy the untracked/new feature files (`AgentSwarmConfig.ts`, `CriticalCompletionReview.ts`, `HierarchicalDeferCoordinator.ts`, `LegionCoordinator.ts`, `LegionExecutionReceipt.ts`, `LegionPipelineRunner.ts`, `LegionAgentHost.ts`, `LegionToolAdapter.ts`, `delegationPolicy.ts`, `EngageSwarmHandler.ts`, `engage_swarm.ts`, and all test suites).
 
 ## 1. Re-apply / port — in this order
 Order matters because each layer compiles against the previous.
@@ -12,12 +12,13 @@ Order matters because each layer compiles against the previous.
 | Step | Do | Check |
 |---|---|---|
 | 1 | **Persistence first:** `BufferedDbPool.ts` (`TABLE_FK_ORDER`, `conflictTarget` matching) | `tsc`; existing DB tests |
-| 2 | **Engines:** add `AgentSwarmConfig.ts`, `HierarchicalDeferCoordinator.ts`, `CriticalCompletionReview.ts`, `LegionCoordinator.ts` | `tsc` |
-| 3 | **Façade:** merge the `Orchestrator.ts` changes (imports/exports, `acceptingNewWork` guards in `createTask`/`spawnChildStream`/`spawnTeammateTask`, delegation methods, `completeStream`/`failStream` hooks, `createTask` insert columns) | `Orchestrator.test.ts` |
-| 4 | **Completion flow:** `completionGatePipeline.ts`, `AttemptCompletionHandler.ts` | review tests |
-| 5 | **Settings surface (all layers, PB-02):** `package.json`, `state.proto` → `npm run protos`, `state-keys.ts`, `ExtensionMessage.ts`, `Controller`, `updateSettings.ts`, `updateTaskSettings.ts`, `ToolExecutor.ts`, `TaskConfig.ts`, `ToolConstants.ts` | `tsc`; proto/clamp test |
-| 6 | **Webview:** `ExtensionStateContext.tsx`, `settingsHandlers.ts`, `FeatureSettingsSection.tsx`, `SettingsView.tsx` | `tsc -b webview-ui`; vitest |
-| 7 | **Tests:** `AgentSwarmAuxiliary.test.ts`, `state-keys.test.ts` updates | Full PB-07 |
+| 2 | **Engines & Execution Host:** add `AgentSwarmConfig.ts`, `HierarchicalDeferCoordinator.ts`, `CriticalCompletionReview.ts`, `LegionCoordinator.ts`, `LegionExecutionReceipt.ts`, `LegionPipelineRunner.ts`, `LegionAgentHost.ts`, `LegionToolAdapter.ts`, `delegationPolicy.ts` | `tsc` |
+| 3 | **Conductor Tool & Task Integration:** add `engage_swarm.ts`, `EngageSwarmHandler.ts`, `autoApprove.ts`, wire into `Task.ts` (`maybeRunAutomaticLegion`, `withLegionContext`, `activeLegionController`), `DietCodeToolSet.ts`, `ToolExecutorCoordinator.ts`, `tools.ts` | `tsc` |
+| 4 | **System Prompt Integration:** update `joy_zoning.ts` (conductor section), `capabilities.ts` (`{{SWARM_CAPABILITIES}}`), `act_vs_plan_mode.ts` | `tsc` |
+| 5 | **Façade & Completion flow:** merge `Orchestrator.ts` changes, `completionGatePipeline.ts`, `AttemptCompletionHandler.ts` | `Orchestrator.test.ts`, review tests |
+| 6 | **Settings surface (all layers, PB-02):** `package.json`, `state.proto` → `npm run protos`, `state-keys.ts`, `ExtensionMessage.ts`, `Controller`, `updateSettings.ts`, `updateTaskSettings.ts`, `ToolExecutor.ts`, `TaskConfig.ts`, `ToolConstants.ts` | `tsc`; proto/clamp test |
+| 7 | **Webview:** `ExtensionStateContext.tsx`, `settingsHandlers.ts`, `FeatureSettingsSection.tsx`, `SettingsView.tsx` | `tsc -b webview-ui`; vitest (7 tests) |
+| 8 | **Tests:** `AgentSwarmAuxiliary.test.ts`, `Orchestrator.test.ts`, `TaskLegion.test.ts`, `LegionAgentHost.test.ts`, `LegionToolAdapter.test.ts`, `EngageSwarmHandler.test.ts`, `DietCodeToolSetSwarm.test.ts`, `state-keys.test.ts` | Full PB-07 (158 passing) |
 
 ### Conflict hot-spots
 - `state.proto`: field numbers. Take the next free numbers in *your* branch; **do not reuse numbers** and keep the same names. Regenerate; fix `state-keys.ts`/`updateSettings.ts` if names differ.

@@ -138,6 +138,7 @@ export interface VersionMetadata {
  * Enhanced system prompt context with better typing
  */
 export interface SystemPromptContext {
+	readonly taskId?: string
 	readonly providerInfo: ApiProviderInfo
 	readonly cwd?: string
 	readonly ide: string

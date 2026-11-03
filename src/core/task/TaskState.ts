@@ -7,6 +7,7 @@ import { ToolProgressTracker } from "./ToolProgressTracker"
 import type { HookExecution } from "./types/HookExecution"
 
 export class TaskState {
+	public taskId?: string
 	public recovery?: ExecutionRecoveryStore
 	public recursionDepth = 0
 	public maxTokens?: number

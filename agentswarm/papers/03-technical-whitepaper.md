@@ -77,6 +77,9 @@ Roster = top-*k* positive scores (k by strategy, ≤ `maxSpecialists` ≤ 8), wi
 | I10 | A file isn't reserved by Legion for a stream if another *active* stream holds it | formation test (**concurrent-form race untested**, see §7) |
 | I11 | Flush never violates FK order | real-SQLite tests (section 5 + Legion lifecycle) |
 | I12 | No lost update under concurrent sibling completion | concurrency test; 4-level concurrent test |
+| I13 | Conductor `engage_swarm` auto-approves and formats structured handoffs | `EngageSwarmHandler.test.ts` |
+| I14 | Specialist runs respect token/cost budgets and categorize `safeToRetry` failover | `LegionAgentHost.test.ts`, `LegionPipelineRunner` |
+| I15 | Streaming progress cards deliver real-time markdown notifications | `formatLegionProgressMessage`, `TaskLegion.test.ts` |
 
 ## 5. Correctness arguments (sketch)
 - **I2:** phase `suspended` is assigned only in `evaluateAndPersistPipelineState` when `pending = ∅` after deferring all descendants; `pending` is recomputed from durable statuses, so a late-finishing child cannot be missed (re-triggered by its own completion/failure).
@@ -85,12 +88,12 @@ Roster = top-*k* positive scores (k by strategy, ≤ `maxSpecialists` ≤ 8), wi
 - **Progress:** each loop is bounded (I5, I7, inbox cap) ⇒ termination or explicit escalation.
 
 ## 6. Evaluation
-Automated: 34 swarm tests (8 sections), 14 orchestrator tests, state-key tests (80 total backend assertions), 7 component tests; four tests flush to a real SQLite file with foreign keys on. Defects found by evaluation are in [post-mortems](../postmortems/README.md); six were persistence/phase-semantic and invisible to the in-memory test double. **Not evaluated:** performance under load, live-host behaviour, real model-driven execution of specialists.
+Automated: 158 backend unit tests passing (49 auxiliary, 52 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys / stream metrics); 7 component tests; multiple tests flush to a real SQLite file with foreign keys on. Defects found by evaluation are in [post-mortems](../postmortems/README.md); six were persistence/phase-semantic and invisible to the in-memory test double. **Not evaluated:** performance under extreme concurrency, live-host extension host network drops.
 
 **Overhead when off:** one config resolution per entry point (30 s cache) and one profile lookup in `settleLegionSpecialist`.
 
 ## 7. Limitations
-1. In-process locks only (single extension host). 2. No mid-turn restoration. 3. Heuristic classification. 4. Review engine consumes findings; it does not generate them with a model. 5. File reservation is check-then-act (L11). 6. Other modules were not audited for stranded shadow-overlay writes (L12; the in-scope instances are fixed — PM-011). 7. Specialist execution depends on a host runner (L2). Full list: [findings](../implementation/findings.md#known-limits-and-open-questions).
+1. In-process locks only (single extension host). 2. No mid-turn restoration. 3. Heuristic classification. 4. Review engine consumes findings; it does not generate them with a model. 5. File reservation is check-then-act (L11). 6. Other modules were not audited for stranded shadow-overlay writes (L12; the in-scope instances are fixed — PM-011). 7. Specialist execution host runner (L2) is implemented via `LegionAgentHost` / `LegionToolAdapter` in Phase 6/7. Full list: [findings](../implementation/findings.md#known-limits-and-open-questions).
 
 ## 8. Related decisions and further reading
-[ADR-0001 … 0011](../adr/README.md) · [Data model](../architecture/data-model.md) · [Configuration](../architecture/configuration.md) · [Philosophy](01-philosophy.md) · [Stakeholder hand-off](02-stakeholder-handoff.md)
+[ADR-0001 … 0013](../adr/README.md) · [Data model](../architecture/data-model.md) · [Configuration](../architecture/configuration.md) · [Philosophy](01-philosophy.md) · [Stakeholder hand-off](02-stakeholder-handoff.md)

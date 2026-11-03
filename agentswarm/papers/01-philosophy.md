@@ -17,7 +17,7 @@ A pause that destroys in-flight work is just a crash with better branding. We su
 Skepticism that never terminates is a bug. A review earns its keep by ending in a **decision**: accept, remediate, escalate, or accept with disclosed limits. It distinguishes what is *demonstrably broken* from what is *merely possible* or *merely preferred*, and it is allowed — expected — to conclude "this is correct." *Challenge assumptions. Demand evidence. Correct actual defects. Make a decision. Stop.* (*agentswarm2.md*)
 
 ### 4. Optional means optional
-Power that taxes everyone is a tax. Every capability is **off by default** and costs nothing when off. Opt-in is a feature of the design, not a deployment detail.
+Power that taxes everyone is a tax. Review and Defer are **off by default** and cost nothing when off; per [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), Legion defaults to on for eligible tasks to provide immediate specialist assistance, while remaining fully opt-outable via settings. When off or bypassed, execution remains strictly single-agent with zero tax. Opt-in/opt-out control is a feature of the design, not a deployment detail.
 
 ### 5. Right specialist, explained
 Delegation quality depends on routing. The Legion routes with **deterministic, inspectable rules**: same input, same roster, with a stated rationale. We prefer a transparent heuristic you can steer over an opaque router you must trust.

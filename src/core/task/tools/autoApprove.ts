@@ -136,6 +136,8 @@ export class AutoApprove {
 			case DietCodeDefaultTool.MEM_HEAL:
 			case DietCodeDefaultTool.MEM_FORECAST:
 				return autoApprovalSettings.actions.editFiles || autoApprovalSettings.actions.readFiles
+			case DietCodeDefaultTool.ENGAGE_SWARM:
+				return true
 		}
 		return false
 	}
@@ -162,6 +164,10 @@ export class AutoApprove {
 			if (trustedMcpServers.includes(mcpServerName)) {
 				return true
 			}
+		}
+
+		if (blockname === DietCodeDefaultTool.ENGAGE_SWARM) {
+			return true
 		}
 
 		if (this.stateManager.getGlobalSettingsKey("yoloModeToggled")) {

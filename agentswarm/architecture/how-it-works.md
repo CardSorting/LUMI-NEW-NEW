@@ -153,9 +153,44 @@ With [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), Legion executes au
 4. **Context Handoff Injection (`withLegionContext`):** When specialist pipelines complete, an evidence-rich `<specialist_handoff status="...">` block is injected into a copy of the root user objective turn in `apiConversationHistory`, allowing the parent task to review and build upon specialist findings without losing track of user follow-up turns.
 5. **Steering Cancellation (`shouldAcceptSteeringInterrupt`):** Evaluates `this.activeLegionController` so that user chat messages during in-flight specialist runs abort the specialist pipeline immediately.
 
+### 5.5 Orchestrator Conductor, Explicit Tool Dispatch & Streaming Cards (`engage_swarm`, `joy_zoning.ts`, `LegionPipelineRunner.ts`)
+
+With [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), the parent model operates as the **Orchestrator Conductor**:
+
+1. **System Prompt Role & Mode Integration (`joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`):**
+   - Whenever Swarm or Legion is enabled, `# 🐝 AGENT SWARM & THE LEGION — Orchestrator Conductor` is injected into `joy_zoning.ts`.
+   - In **Plan Mode**: The conductor maps milestone steps to specialist archetypes (`legion_architect`, `legion_implementer`, `legion_verifier`, `legion_hardener`, `legion_ux_ergonomics`, `legion_researcher`, `legion_data_steward`).
+   - In **Act Mode**: The conductor delegates sub-goals and test passes explicitly via `engage_swarm` or oversees stage progression.
+2. **Explicit Conductor Tool (`engage_swarm`):**
+   - Added to `DietCodeDefaultTool` and registered dynamically in `DietCodeToolSet.getEnabledTools` (omitted when `context.isTesting = true`).
+   - Parameters:
+     - `objective` (string, required): Specific task/test/investigation goal.
+     - `strategy` (string, optional): One of `'adaptive' | 'tactical_strike' | 'balanced_squad' | 'full_legion' | 'verification_heavy'`.
+     - `preferred_roles` (string or string[], optional): Specialist roles to prioritize.
+     - `max_specialists` (integer, optional): Maximum specialists to spawn (clamped between 1 and 8).
+   - Handled by `EngageSwarmHandler.ts`, which forms the Legion cohort, acquires necessary tokens, constructs isolated tool adapters, converts schemas to native provider formats, runs the pipeline with progress callbacks, and returns a `<specialist_handoff status="...">` block containing synthesized findings and untrusted receipt evidence.
+3. **Autonomous Execution via Auto-Approval (`autoApprove.ts`):**
+   - `DietCodeDefaultTool.ENGAGE_SWARM` is marked as auto-approved in `AutoApprove.shouldAutoApproveToolWithPath`, ensuring the parent conductor can dispatch teams autonomously without interrupting the user.
+4. **Human-Centered Multi-Agent Streaming Cards (`formatLegionProgressMessage`):**
+   - Real-time progress events are emitted by `LegionPipelineRunner` to `onProgress`:
+     - `stage_started`: `### 🐝 The Legion — Stage X: <Name>\n> Commencing execution stage...`
+     - `member_started`: `⚡ Specialist Active: **<Codename>** [<RoleTitle>]\n> *Objective: ...*`
+     - `member_completed`: `✅ Specialist Complete: **<Codename>** (\`<role>\`) finished assigned work.`
+     - `member_failed`: `⚠️ Specialist Alert: **<Codename>** (\`<role>\`) encountered an issue: ...`
+     - `member_rerouted`: `🔄 Specialist Failover: **<Codename>** (\`<role>\`) failed; initiating ADR-0009 automatic failover replacement.`
+     - `formation_completed`: `🎉 The Legion — Mission Accomplished\n> All specialist stages completed successfully...`
+     - `formation_failed`: `⚠️ The Legion — Partial Completion\n> Specialist squad finished with partial findings...`
+5. **Hardened Gating & Fallback Resilience:**
+   - **Tactical Strikes & Test Projects:** If `appliedStrategy === "tactical_strike"` or the objective mentions test projects, swarm, or legion keywords, the strict `complexityScore >= 3.2` and minimum 2-member roster constraints are bypassed.
+   - **Conversation History Fallback:** If `this.legionObjective` is not set on task entry, `maybeRunAutomaticLegion` extracts the user's initial objective from conversation history.
+   - **File Attachment Preservation:** `Task.startTask` preserves `legionObjective` when files are attached (only multimodal images bypass automatic delegation).
+   - **Fallback Completion Spec:** When specialist tool definitions are assembled, a fallback `attempt_completion` tool specification with a single `result: string` parameter is injected if absent.
+   - **Budget Bounds & Categorized Failovers:** `LegionAgentHost` enforces `maxTokens` and `maxCost`. When a specialist fails, `safeToRetry` indicates whether failover rerouting (`orchestrator.failoverLegionSpecialist`) can proceed safely.
+
 ## 6. What this design deliberately does *not* do
 
 - It does not interrupt running child tools mid-operation to pretend to be suspended (all defer/cancellation points are cooperative or cleanly cancelled via process group signals).
 - It does not share transcripts or conversational memory directly between agents (context is passed via structured summaries and receipts).
 - It does not make an LLM call to classify tasks (deterministic scoring ensures instant and predictable roster selection).
+
 

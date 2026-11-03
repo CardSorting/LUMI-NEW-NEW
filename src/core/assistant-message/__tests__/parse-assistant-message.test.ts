@@ -3,8 +3,8 @@ import { describe, it } from "mocha"
 import { parseAssistantMessageV2, type ToolUse } from ".."
 
 describe("streamed XML tool identity", () => {
-	const assignment = "<use_subagents><prompt_1>Implement pure Minesweeper engine"
-	const complete = `${assignment} and tests only.</prompt_1></use_subagents>`
+	const assignment = "<engage_swarm><objective>Implement pure Minesweeper engine"
+	const complete = `${assignment} and tests only.</objective></engage_swarm>`
 	const tools = (text: string, previous?: ReturnType<typeof parseAssistantMessageV2>) =>
 		parseAssistantMessageV2(text, previous).filter((block): block is ToolUse => block.type === "tool_use")
 
@@ -14,7 +14,7 @@ describe("streamed XML tool identity", () => {
 		assert.ok(partial[0].call_id)
 		assert.equal(final[0].call_id, partial[0].call_id)
 		assert.equal(final[0].partial, false)
-		assert.equal(final[0].params.prompt_1, "Implement pure Minesweeper engine and tests only.")
+		assert.equal(final[0].params.objective, "Implement pure Minesweeper engine and tests only.")
 	})
 
 	it("preserves IDs through every appended chunk and separates identical calls", () => {

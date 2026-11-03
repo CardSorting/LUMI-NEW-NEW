@@ -4,14 +4,17 @@
 # 1. Types
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 
-# 2. Backend suites (expect all passing; AgentSwarmAuxiliary has 34 tests, 80 total across the 3 files)
+# 2. Backend suites (expect 158 passing tests across Auxiliary, Orchestrator, Legion Host/Adapter/Task, Engage Swarm, ToolSet Discovery, and State Keys)
 npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
   --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
   src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
   src/infrastructure/ai/__tests__/Orchestrator.test.ts \
+  "src/core/task/legion/__tests__/*.test.ts" \
+  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
+  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
   src/shared/storage/__tests__/state-keys.test.ts
 
-# 3. Settings UI
+# 3. Settings UI (expect 7 passing tests)
 (cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 
 # 4. Lint (error level) on touched files

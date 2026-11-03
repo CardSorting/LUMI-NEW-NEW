@@ -85,7 +85,10 @@ export class DietCodeToolSet {
 
 	public static getEnabledTools(variant: PromptVariant, context: SystemPromptContext): DietCodeToolSet[] {
 		const resolved: DietCodeToolSet[] = []
-		const requestedIds = withExecutionObservation(variant.tools ?? [])
+		const observedIds = withExecutionObservation(variant.tools ?? [])
+		const requestedIds = observedIds.includes(DietCodeDefaultTool.ENGAGE_SWARM)
+			? observedIds
+			: [...observedIds, DietCodeDefaultTool.ENGAGE_SWARM]
 		for (const id of requestedIds) {
 			const tool = DietCodeToolSet.getToolByNameWithFallback(id, variant.family)
 			if (tool) {

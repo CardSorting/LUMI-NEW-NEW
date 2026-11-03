@@ -190,4 +190,245 @@ describe("Task Legion integration", () => {
 		expect(context).to.include("Specialist actions requiring inspection")
 		expect(context).to.include("act-1")
 	})
+
+	it("allows test project objectives and tactical strikes to trigger legion even with low complexity", async () => {
+		setAgentSwarmConfigOverride({ enabled: true, legionEnabled: true, legionStrategy: "adaptive" })
+		const classify = sinon.stub(orchestrator, "classifyTaskForLegion").returns({
+			appliedStrategy: "tactical_strike",
+			recommendedStrategy: "tactical_strike",
+			complexityScore: 2.1,
+			formationRoster: [
+				{
+					assignmentId: "assign-1",
+					role: "legion_verifier",
+					title: "Verification Specialist",
+					codename: "VERIFIER",
+					subagentType: "verifier" as any,
+					confidence: 0.9,
+					score: 0.9,
+					rationale: "Verify code",
+					focusObjective: "Run test project",
+					assignedFiles: [],
+					executionOrder: "parallel",
+					recommendedDeferBoundary: "safe_boundary",
+				},
+			],
+			primaryIntent: "TEST" as any,
+		} as any)
+		const task = Object.assign(Object.create(Task.prototype), {
+			taskState: new TaskState(),
+			legionObjective: "run test project",
+			legionAttempted: false,
+			taskId: "task-test-proj",
+		})
+		// With low complexity (2.1) and roster length 1, a generic objective would return early,
+		// but "run test project" is recognized as an explicit test/swarm objective.
+		await task.maybeRunAutomaticLegion("", { mode: "act" }, true)
+		sinon.assert.calledOnce(classify)
+		expect(task.legionAttempted).to.equal(true)
+	})
+
+	it("falls back to user prompt in conversation history when legionObjective is undefined", async () => {
+		setAgentSwarmConfigOverride({ enabled: true, legionEnabled: true, legionStrategy: "adaptive" })
+		const classify = sinon.stub(orchestrator, "classifyTaskForLegion").returns({
+			appliedStrategy: "tactical_strike",
+			recommendedStrategy: "tactical_strike",
+			complexityScore: 4.0,
+			formationRoster: [
+				{
+					assignmentId: "assign-1",
+					role: "legion_implementer",
+					title: "Implementer",
+					codename: "DEV",
+					subagentType: "implementer" as any,
+					confidence: 0.9,
+					score: 0.9,
+					rationale: "Implement feature",
+					focusObjective: "Run test suite",
+					assignedFiles: [],
+					executionOrder: "parallel",
+					recommendedDeferBoundary: "safe_boundary",
+				},
+			],
+			primaryIntent: "FEATURE" as any,
+		} as any)
+		const task = Object.assign(Object.create(Task.prototype), {
+			taskState: new TaskState(),
+			legionObjective: undefined,
+			legionAttempted: false,
+			taskId: "task-history-fallback",
+			messageStateHandler: {
+				getApiConversationHistory: () => [
+					{
+						role: "user",
+						content: "Execute test project suite and verify output",
+					},
+				],
+			},
+		})
+		await task.maybeRunAutomaticLegion("", { mode: "act" }, true)
+		sinon.assert.calledOnce(classify)
+		expect(task.legionAttempted).to.equal(true)
+	})
+
+	it("formats multi-agent progress cards with readable stages and specialist badges", async () => {
+		const { formatLegionProgressMessage } = await import("@/infrastructure/ai/LegionPipelineRunner")
+		const stageMsg = formatLegionProgressMessage({
+			stage: "leadAndRecon",
+			status: "stage_started",
+		})
+		expect(stageMsg).to.include("Stage 1: Lead & Reconnaissance")
+		expect(stageMsg).to.include("The Legion")
+
+		const memberStartMsg = formatLegionProgressMessage({
+			stage: "parallelExecution",
+			status: "member_started",
+			member: {
+				streamId: "stream-test-1",
+				assignment: {
+					role: "legion_implementer",
+					codename: "DEV-ONE",
+					title: "Implementer",
+					focusObjective: "Implement reactive feature component",
+				},
+			} as any,
+		})
+		expect(memberStartMsg).to.include("DEV-ONE")
+		expect(memberStartMsg).to.include("Implementer (Feature Implementation)")
+		expect(memberStartMsg).to.include("Implement reactive feature component")
+
+		const completedMsg = formatLegionProgressMessage({
+			stage: "verificationAndHardening",
+			status: "member_completed",
+			member: {
+				streamId: "stream-test-2",
+				assignment: { role: "legion_verifier", codename: "ADA" },
+			} as any,
+		})
+		expect(completedMsg).to.include("Specialist Complete")
+		expect(completedMsg).to.include("ADA")
+
+		const failoverMsg = formatLegionProgressMessage({
+			stage: "parallelExecution",
+			status: "member_rerouted",
+			member: {
+				streamId: "stream-test-3",
+				assignment: { role: "legion_hardener", codename: "AEGIS" },
+			} as any,
+		})
+		expect(failoverMsg).to.include("Specialist Failover")
+		expect(failoverMsg).to.include("AEGIS")
+
+		const finishedMsg = formatLegionProgressMessage({
+			stage: "synthesis",
+			status: "formation_completed",
+		})
+		expect(finishedMsg).to.include("Mission Accomplished")
+	})
+
+	it("resets legionAttempted when user confirms resume without new text", async () => {
+		const task = Object.assign(Object.create(Task.prototype), {
+			taskState: new TaskState(),
+			legionAttempted: true,
+			legionObjective: "Existing test task",
+		})
+		await task.handleWebviewAskResponse("yesButtonClicked")
+		expect(task.legionAttempted).to.equal(false)
+	})
+
+	it("allows tactical strike specialist execution when complexity is below 3.2", async () => {
+		setAgentSwarmConfigOverride({ legionEnabled: true, enabled: false, legionStrategy: "adaptive" })
+		const classify = sinon.stub(orchestrator, "classifyTaskForLegion").returns({
+			complexityScore: 2.4,
+			appliedStrategy: "tactical_strike",
+			formationRoster: [
+				{
+					role: "legion_implementer",
+					title: "Tactical Specialist",
+					codename: "TACTICAL",
+					subagentType: "worker",
+					assignedFiles: ["src/index.ts"],
+					focusObjective: "Quick targeted patch",
+					executionOrder: "parallel",
+					recommendedDeferBoundary: "safe_boundary",
+				},
+			],
+			primaryIntent: "FEATURE" as any,
+		} as any)
+		const task = Object.assign(Object.create(Task.prototype), {
+			taskState: new TaskState(),
+			legionObjective: "Quick targeted patch",
+			legionAttempted: false,
+			taskId: "task-tactical",
+			messageStateHandler: {
+				getApiConversationHistory: () => [],
+				getDietCodeMessages: () => [],
+			},
+			toolExecutor: {
+				asToolConfig: sinon.stub().resolves({}),
+			},
+		})
+		await task.maybeRunAutomaticLegion("", { mode: "act" }, true)
+		sinon.assert.calledOnce(classify)
+		expect(task.legionAttempted).to.equal(true)
+	})
+
+	it("safely handles absent messageStateHandler in hasUnansweredAsk without throwing", () => {
+		const task = Object.assign(Object.create(Task.prototype), {
+			messageStateHandler: undefined,
+		})
+		expect((task as any).hasUnansweredAsk()).to.equal(false)
+	})
+
+	it("auto-approves engage_swarm tool via AutoApprove shouldAutoApproveToolWithPath", async () => {
+		const { AutoApprove } = await import("@/core/task/tools/autoApprove")
+		const { DietCodeDefaultTool } = await import("@shared/tools")
+		const mockStateManager = {
+			getTrustedTools: () => [],
+			getGlobalSettingsKey: () => false,
+			getTrustedCommands: () => [],
+			getTrustedMcpServers: () => [],
+		}
+		const autoApprove = new AutoApprove(mockStateManager as any)
+		const approved = await autoApprove.shouldAutoApproveToolWithPath(DietCodeDefaultTool.ENGAGE_SWARM, undefined)
+		expect(approved).to.equal(true)
+	})
+
+	it("bypasses automatic legion formation when task complexity is below 3.2 and not explicit or tactical", async () => {
+		setAgentSwarmConfigOverride({ legionEnabled: true, enabled: false, legionStrategy: "adaptive" })
+		const classify = sinon.stub(orchestrator, "classifyTaskForLegion").returns({
+			complexityScore: 2.1,
+			appliedStrategy: "balanced_squad",
+			formationRoster: [
+				{
+					role: "legion_implementer",
+					title: "Implementer",
+					codename: "DEV",
+					subagentType: "worker",
+					assignedFiles: [],
+					focusObjective: "Simple question",
+					executionOrder: "parallel",
+					recommendedDeferBoundary: "safe_boundary",
+				},
+			],
+			primaryIntent: "GENERAL" as any,
+		} as any)
+		const task = Object.assign(Object.create(Task.prototype), {
+			taskState: new TaskState(),
+			legionObjective: "How do I print a hello world in python?",
+			legionAttempted: false,
+			taskId: "task-simple",
+			messageStateHandler: {
+				getApiConversationHistory: () => [],
+				getDietCodeMessages: () => [],
+			},
+			toolExecutor: {
+				asToolConfig: sinon.stub().resolves({}),
+			},
+		})
+		await task.maybeRunAutomaticLegion("", { mode: "act" }, true)
+		sinon.assert.calledOnce(classify)
+		// Should not form a team and should not set legionContext
+		expect(task.legionContext).to.equal(undefined)
+	})
 })

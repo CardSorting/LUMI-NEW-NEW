@@ -67,6 +67,10 @@ export const toolParamNames = [
 	"weight",
 	"sourceId",
 	"targetId",
+	"objective",
+	"strategy",
+	"preferred_roles",
+	"max_specialists",
 ] as const
 
 export type ToolParamName = (typeof toolParamNames)[number]

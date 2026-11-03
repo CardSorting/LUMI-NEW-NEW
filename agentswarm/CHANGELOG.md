@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 | Phase / Milestone | Date | Focus | Key Post-Mortems / ADRs | Test Count (`AgentSwarmAuxiliary.test.ts` + Legion) |
 |---|---|---|---|---|
+| **[Phase 7 — Orchestrator Conductor Tool, Progress Streaming & Hardened Gating](#phase-7--orchestrator-conductor-tool-progress-streaming--hardened-gating-2026-11-03)** | 2026-11-03 | Conductor tool `engage_swarm`, auto-approval (`autoApprove.ts`), streaming progress cards (`formatLegionProgressMessage`), prompt conductor injection (`joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`), relaxed gating heuristics (tactical strikes, test projects), conversation history fallback, file attachment preservation, fallback `attempt_completion`, token/cost budget enforcement, categorized `safeToRetry` failover | [ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | **158 passing** (49 auxiliary + 52 legion + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys) |
 | **[Phase 6 — Automatic Legion Execution, Sandboxed Tool Host & Steering Hardening](#phase-6--automatic-legion-execution-sandboxed-tool-host--steering-hardening-2026-11-03)** | 2026-11-03 | Automatic Legion default ([ADR-0012](adr/ADR-0012-automatic-legion-default.md)), `LegionAgentHost` native tool loop, `LegionToolAdapter` sandboxing, `activeLegionController` steering abort, objective handoff pinning, SQLite flush barriers, path reservation boundaries | [PM-013](postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md), [PM-014](postmortems/PM-014-composite-command-settlement-and-reservation-boundary.md), [ADR-0012](adr/ADR-0012-automatic-legion-default.md) | **104 passing** (49 auxiliary + 44 legion + 7 stream + 4 metrics) |
 | **[Phase 5 — Maintainer Hand-off, SQLite Cookbook & Persistence Hardening](#phase-5--maintainer-hand-off-sqlite-cookbook--persistence-hardening-2026-11-02)** | 2026-11-02 | Zero-to-hero Maintainers' Handbook, real-SQLite `Q1`–`Q8` probe, post-commit shadow stranding fix, post-resume barrier guard, same-batch `delete`/`upsert` ordering fix | [PM-011](postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md), [PM-012](postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md), [ADR-0010](adr/ADR-0010-direct-writes-for-shared-rows.md) | **34** (80 total backend + 7 webview) |
 | **[Phase 4 — Zenith Tier: Legion Lifecycle, DAG Stage Gating, Bounded Failover & Wiki](#phase-4--zenith-tier-legion-lifecycle-dag-stage-gating-bounded-failover--wiki-2026-11-02)** | 2026-11-02 | Automatic stage progression on `completeStream`/`failStream`, bounded 1-retry specialist failover (`LEGION_MAX_ATTEMPTS_PER_SLOT = 2`), absorbing terminal states, per-formation mutex, Interrupted-Worker Audit, full Knowledge Base Wiki | [PM-008](postmortems/PM-008-stale-reservation-false-positives.md), [PM-009](postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md), [PM-010](postmortems/PM-010-interrupted-worker-partial-work.md), [ADR-0009](adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), [ADR-0011](adr/ADR-0011-legacy-role-alias.md) | **31** |
@@ -24,6 +25,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased / Active Working Tree]
 
 > **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–5 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/infrastructure/ai/` and `agentswarm/`). Verify `git log` when cutting a tagged release.
+
+---
+
+## Phase 7 — Orchestrator Conductor Tool, Progress Streaming & Hardened Gating (2026-11-03)
+
+### Added
+- **Explicit Orchestrator Conductor Tool (`engage_swarm`) ([ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md)):**
+  - Added `engage_swarm` to `DietCodeDefaultTool` in `src/shared/tools.ts`.
+  - Registered tool variants in `src/core/prompts/system-prompt/tools/engage_swarm.ts` and enabled dynamic discovery in `DietCodeToolSet.getEnabledTools` when Swarm or Legion is enabled. Gated by `!context.isTesting` to ensure snapshot stability in test suites.
+  - Implemented `EngageSwarmHandler.ts` with parameter extraction and clamping: `objective` (required), `strategy` (validated against `isValidLegionStrategy`), `preferred_roles` (comma-separated or array), and `max_specialists` (clamped 1..8).
+  - Wired provider native tool schema translation via `DietCodeToolSet.getNativeConverter`, resolving `providerId` and `modelId` from `StateManager` configuration.
+  - Formatted handoff returns in structured `<specialist_handoff status="...">` blocks with synthesized markdown and execution evidence receipts.
+- **Auto-Approval of Swarm Engagement:**
+  - Added `DietCodeDefaultTool.ENGAGE_SWARM` to `AutoApprove.shouldAutoApproveToolWithPath` in `src/core/task/tools/autoApprove.ts` and `ToolExecutorCoordinator.ts`, ensuring conductor dispatches run autonomously without blocking on interactive confirmation.
+- **Orchestrator Conductor System Prompt Injections:**
+  - Injected `# 🐝 AGENT SWARM & THE LEGION — Orchestrator Conductor` section into `src/core/prompts/system-prompt/components/joy_zoning.ts`. Defines the parent agent's conductor role, the 7 specialist archetypes, and explicit rules for Plan Mode (role-to-milestone mapping) and Act Mode (dispatch via `engage_swarm` or stage supervision).
+  - Added dynamic `{{SWARM_CAPABILITIES}}` injection in `src/core/prompts/system-prompt/components/capabilities.ts`.
+  - Updated `src/core/prompts/system-prompt/components/act_vs_plan_mode.ts` with actionable guidance on transitioning from architectural planning to specialist dispatch.
+- **Streaming Multi-Agent Progress Cards (`formatLegionProgressMessage`):**
+  - Added `LegionPipelineOptions` with structured `onProgress` callbacks in `src/infrastructure/ai/LegionPipelineRunner.ts`.
+  - Implemented `formatLegionProgressMessage` converting progress events (`stage_started`, `member_started`, `member_completed`, `member_failed`, `member_rerouted`, `formation_completed`, `formation_failed`) into rich, human-centered markdown status cards streamed directly to the user chat feed via `config.callbacks.say("text", msg)`.
+- **Specialist Fallback Completion Tool Spec:**
+  - Injected fallback `attempt_completion` tool specification into specialist host contexts (`LegionAgentHost` and `maybeRunAutomaticLegion`), ensuring specialists have an isolated, single-parameter (`result`) completion tool even if the provider does not register the standard completion tool.
+- **Token & Cost Budget Enforcement & Categorized Failover:**
+  - Injected remaining parent task `maxTokens` and `maxCost` into `LegionAgentHost`, checking limits before and during multi-turn loops.
+  - Added `safeToRetry?: boolean` discrimination to `LegionExecutionResult`: only safe failures (e.g. clean turn limits, empty summaries without dirty tool calls) trigger bounded failover rerouting (`orchestrator.failoverLegionSpecialist`); dirty failures (unsettled commands, disallowed tools, budget exhaustion) halt cleanly.
+
+### Fixed
+- **Premature Objective Stripping on File Attachments:**
+  - `Task.startTask` previously set `this.legionObjective = undefined` whenever either images or files were attached. Updated to preserve `this.legionObjective` when files are attached, only deferring to multimodal parent when images are present.
+- **Missing `legionObjective` in Multi-Turn Resumptions:**
+  - Added fallback in `maybeRunAutomaticLegion` to extract the user prompt from conversation history if `this.legionObjective` is unset.
+- **Overly Restrictive Complexity Gating:**
+  - Relaxed complexity floor (`< 3.2`) in `Task.maybeRunAutomaticLegion` and `LegionPipelineRunner.decideAndRunLegion`: allows execution when the applied strategy is `tactical_strike`, when the task is a test project, or when explicit swarm/legion keywords appear in the objective.
+- **Unanswered Ask State Handler Guard:**
+  - Added defensive optional chaining in `Task.hasUnansweredAsk` and `Task.setResponseValues` to safely handle absent `messageStateHandler` without throwing.
 
 ---
 

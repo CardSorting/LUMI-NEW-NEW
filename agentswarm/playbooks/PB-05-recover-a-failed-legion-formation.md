@@ -12,6 +12,7 @@ const report   = await orchestrator.synthesizeLegionExecutionReport(parentId) //
 |---|---|---|
 | Member `rerouted`, replacement `pending`/`running` | Automatic failover (attempt 2) | Nothing — let it run |
 | Member `failed`, no replacement, Legion enabled | Failover budget exhausted (2 attempts per slot) — `rerouteFailedLegionSpecialist` will now refuse | Escalate to the coordinator: read `failureReason`, fix the underlying cause, then start a **new** formation with `formLegion` using narrowed `targetFiles` |
+| Member `failed`, `safeToRetry: false` | Unrecoverable failure (unsettled command, disallowed tool, or budget exhausted) | Automatic failover intentionally skipped to prevent cascading faults; inspect receipts and execute locally |
 | Member `failed`, Legion **disabled** for parent | Automatic failover skipped by design | Call `rerouteFailedLegionSpecialist(parentId, failedStreamId)` once |
 | Reroute threw "not accepting new work" | Parent is deferred/suspending | `resumePipeline(parentId)` then reroute (remedial formation does this automatically) |
 | Formation `partial_failure`, later stages never start | A failed slot blocks downstream stages (intentional) | Resolve the failed slot (above) |

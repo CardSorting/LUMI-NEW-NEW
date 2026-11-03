@@ -831,13 +831,14 @@ export class LegionCoordinator {
 		)
 
 		// Determine recommended strategy vs applied strategy
+		const hasTestKeywords = /\b(?:test(?:\s+project)?|verify|verification|validate)\b/i.test(combinedText)
 		const recommendedStrategy: LegionFormationStrategy =
-			complexityScore < 3.2
-				? "tactical_strike"
-				: complexityScore >= 7.2
-					? "full_legion"
-					: primaryIntent === "TEST" || primaryIntent === "FIX"
-						? "verification_heavy"
+			primaryIntent === "TEST" || primaryIntent === "FIX" || hasTestKeywords
+				? "verification_heavy"
+				: complexityScore < 3.2
+					? "tactical_strike"
+					: complexityScore >= 7.2
+						? "full_legion"
 						: "balanced_squad"
 
 		const requestedStrategy = input.strategy ?? "adaptive"
@@ -1423,17 +1424,55 @@ export class LegionCoordinator {
 		return result.numInsertedOrUpdatedRows === 1n
 	}
 
-	/** Prevent concurrent processes from forming the same objective twice. */
+	/** Prevent concurrent processes from forming the same objective twice while allowing settled objectives to re-form. */
 	public async acquireAutomaticFormationToken(parentStreamId: string, objective: string): Promise<boolean> {
 		await dbPool.flush()
 		const db = await getPersistentDb()
 		const digest = createHash("sha256").update(objective).digest("hex")
+		const key = `legion_auto_formation:${digest}`
+		const now = Date.now()
+		const token = uuidv4()
+
+		// 1. Check if there is an active in-flight formation
+		const lastFormation = await this.recallLastLegionFormation(parentStreamId)
+		if (lastFormation && lastFormation.status === "active") {
+			const progression = lastFormation.stageProgression ?? this.evaluateStageProgression(lastFormation)
+			if (!progression.allStagesCompleted && progression.readyToExecuteMembers.length > 0) {
+				return false
+			}
+		}
+
+		// 2. Try inserting a fresh token. If unowned, this atomically succeeds.
 		const result = await db
 			.insertInto("agent_memory")
-			.values({ streamId: parentStreamId, key: `legion_auto_formation:${digest}`, value: uuidv4(), updatedAt: Date.now() })
+			.values({ streamId: parentStreamId, key, value: token, updatedAt: now })
 			.onConflict((conflict) => conflict.columns(["streamId", "key"]).doNothing())
 			.executeTakeFirst()
-		return result.numInsertedOrUpdatedRows === 1n
+		if (result.numInsertedOrUpdatedRows === 1n) {
+			return true
+		}
+
+		// 3. If row exists, check if it was just acquired concurrently (within 5 seconds)
+		const existing = await db
+			.selectFrom("agent_memory")
+			.selectAll()
+			.where("streamId", "=", parentStreamId)
+			.where("key", "=", key)
+			.executeTakeFirst()
+
+		if (existing && typeof existing.updatedAt === "number" && now - existing.updatedAt < 5000) {
+			// Concurrently acquired by another process/worker in this window
+			return false
+		}
+
+		// 4. Token belongs to an earlier settled run; atomically renew it
+		const updateRes = await db
+			.updateTable("agent_memory")
+			.set({ value: token, updatedAt: now })
+			.where("streamId", "=", parentStreamId)
+			.where("key", "=", key)
+			.executeTakeFirst()
+		return updateRes.numUpdatedRows === 1n
 	}
 
 	/**

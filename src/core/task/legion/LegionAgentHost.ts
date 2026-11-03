@@ -70,7 +70,7 @@ export class LegionAgentHost implements LegionExecutionHost {
 				return "Command observation is unavailable; inspect existing executions before repeating work."
 			}
 		}
-		const failed = (reason: string): LegionExecutionResult => {
+		const failed = (reason: string, safeToRetry = false): LegionExecutionResult => {
 			const blocker = pending()
 			return {
 				status: blocker ? "unresolved" : "failed",
@@ -78,6 +78,7 @@ export class LegionAgentHost implements LegionExecutionHost {
 					(actions.length
 						? `${reason}\nSpecialist operations attempted: ${actions.join(", ")}. Inspect partial work before retrying.`
 						: reason) + (blocker ? `\n${blocker}` : ""),
+				safeToRetry: blocker ? false : safeToRetry,
 			}
 		}
 		const budgetExceeded = () =>
@@ -202,7 +203,7 @@ export class LegionAgentHost implements LegionExecutionHost {
 				if (budgetExceeded()) return failed("Specialist team budget exhausted.")
 				handler.assertCompleteToolUses()
 				const calls = handler.getAllFinalizedToolUses()
-				if (!calls.length) return failed("Specialist stopped without a completion handoff.")
+				if (!calls.length) return failed("Specialist stopped without a completion handoff.", true)
 				const assistant: DietCodeAssistantContent[] = []
 				if (text) assistant.push({ type: "text", text })
 				assistant.push(...calls)
@@ -210,10 +211,10 @@ export class LegionAgentHost implements LegionExecutionHost {
 				const results: DietCodeUserContent[] = []
 				for (const call of calls) {
 					signal.throwIfAborted()
-					if (!call.id || seenCalls.has(call.id)) return failed("Duplicate or missing specialist tool ID.")
+					if (!call.id || seenCalls.has(call.id)) return failed("Duplicate or missing specialist tool ID.", false)
 					seenCalls.add(call.id)
 					if (call.name === "attempt_completion") {
-						if (calls.length !== 1) return failed("Completion was combined with other tool calls.")
+						if (calls.length !== 1) return failed("Completion was combined with other tool calls.", false)
 						const blocker = pending()
 						if (blocker) {
 							results.push({
@@ -227,9 +228,10 @@ export class LegionAgentHost implements LegionExecutionHost {
 						const summary = (call.input as { result?: unknown })?.result
 						return typeof summary === "string" && summary.trim()
 							? { status: "completed", summary }
-							: failed("Specialist completion did not contain a result.")
+							: failed("Specialist completion did not contain a result.", true)
 					}
-					if (!tools.allowedNames.has(call.name)) return failed(`Specialist requested disallowed tool ${call.name}.`)
+					if (!tools.allowedNames.has(call.name))
+						return failed(`Specialist requested disallowed tool ${call.name}.`, false)
 					const path = (call.input as { path?: unknown })?.path
 					actions.push(`${call.name}${typeof path === "string" ? ` (${path.slice(0, 200)})` : ""}`)
 					if (actions.length > 8) actions.shift()
@@ -238,9 +240,9 @@ export class LegionAgentHost implements LegionExecutionHost {
 				}
 				conversation.push({ role: "user", content: results })
 			}
-			return failed("Specialist turn limit reached.")
+			return failed("Specialist turn limit reached.", true)
 		} catch (error) {
-			return failed(error instanceof Error ? error.message : String(error))
+			return failed(error instanceof Error ? error.message : String(error), true)
 		} finally {
 			tools.dispose?.()
 		}

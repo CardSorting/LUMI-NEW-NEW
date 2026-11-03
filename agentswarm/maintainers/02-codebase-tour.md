@@ -11,8 +11,8 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 ### Key Types & Constants
 - **`DEFAULT_AGENT_SWARM_CONFIG` (lines 118–137):**
   - `enabled: false`, `criticalCompletionReviewEnabled: false`, `hierarchicalDeferEnabled: false`, `autoDeferBeforeCriticalReview: false`, `allowManualTriggerWhenDisabled: true`, `maxFollowUpReviewPasses: 1`, `maxRemediationPasses: 1`, `defaultDeferBoundary: "safe_boundary"`, `legionEnabled: false`, `legionClassificationStrategy: "adaptive"`, `legionMaxConcurrency: 4`, `legionAutoFailoverEnabled: true`, `legionRequireSynthesisGate: true`.
-- **`LEGION_ROLE_IDS` & `normalizeLegionRoleId` (lines 28–75):**
-  - Defines the 10 canonical specialist role IDs (`legion_systems_architect`, `legion_codebase_researcher`, `legion_implementation_engineer`, `legion_resilience_hardener`, `legion_ux_ergonomics`, `legion_verification_qa`, `legion_security_auditor`, `legion_performance_profiler`, `legion_data_migration_specialist`, `legion_documentation_synthesizer`).
+- **`LegionSpecialistRole` & `normalizeLegionSpecialistRole` (lines 10–37):**
+  - Defines the 7 canonical specialist role IDs (`legion_architect`, `legion_implementer`, `legion_ux_ergonomics`, `legion_hardener`, `legion_verifier`, `legion_researcher`, `legion_data_steward`).
   - Maps the legacy mixed-case alias `"legion_Trends_ux"` → `"legion_ux_ergonomics"` ([ADR-0011](../adr/ADR-0011-legacy-role-alias.md)).
 
 ### Critical Functions & Why They Exist
@@ -91,29 +91,28 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Specialist role registry, deterministic task classification, stage-ordered formation, file-reservation conflict avoidance, automatic stage progression on stream completion, bounded failover on stream failure, and synthesis reporting.
 
 ### Key Constants & Registry
-- **`LEGION_SPECIALIST_REGISTRY` (lines 195–498):**
-  - Declarative profiles for all 10 specialists: `id`, `title`, `stage`, `defaultPriority`, `keywords` (weighted `1`–`5`), `filePatterns` (regex strings), `capabilities`, `deliverables`, `fallbackRoleIds`, and `minComplexityScore`.
-- **`LEGION_STAGE_ORDER` (lines 32–38):**
-  1. `"discovery_architecture"`
-  2. `"implementation"`
-  3. `"hardening_security"`
-  4. `"verification_qa"`
-  5. `"synthesis_docs"`
-- **`LEGION_MAX_ATTEMPTS_PER_SLOT = 2` (line 47):**
-  - Initial specialist spawn (`attemptCount = 1`) + at most 1 failover reroute (`attemptCount = 2`).
+- **`LEGION_SPECIALIST_REGISTRY` (lines 269–540):**
+  - Declarative profiles for all 7 specialist archetypes: `role`, `title`, `codename`, `subagentType`, `description`, `capabilities`, `preferredLayers`, `defaultExecutionBoundary`, `keywords` (weighted), and `filePatterns` (regexes).
+- **`LegionExecutionStageName` (line 66):**
+  1. `"leadAndRecon"`
+  2. `"parallelExecution"`
+  3. `"verificationAndHardening"`
+  (Followed by automated stage synthesis into conductor handoff).
+- **`LEGION_MAX_ATTEMPTS_PER_SLOT = 2` (line 141):**
+  - Initial specialist spawn (`attempt = 1`) + at most 1 failover reroute (`attempt = 2`).
 
 ### Critical Methods & Invariants
-- **`withFormationLock(formationId, fn)` (lines 529–546):**
-  - Per-formation in-process Promise mutex (`this.formationLocks`). Prevents parallel specialists finishing/failing simultaneously from racing on `legion_formation_state:<formationId>`.
-- **`classifyTask(request)` (lines 580–825):**
-  - Evaluates `objective`, `targetFiles`, `constraints`, `preferredRoles`, `excludeRoles`, and `strategy` (`"adaptive" | "thorough" | "balanced" | "lean"`).
-  - Always ensures at least one primary execution role is selected, respects `maxSpecialists` / `maxConcurrency`, and builds the 5-stage `stagePlan`.
-- **`formLegion(request)` (lines 827–1115):**
+- **`withFormationLock(formationId, fn)` (lines 620–637):**
+  - Per-formation in-process Promise mutex (`this.formationLocks`). Prevents parallel specialists finishing/failing simultaneously from racing on `legion_formation:<formationId>`.
+- **`classifyTaskForLegion(input)` (lines 738–949):**
+  - Evaluates `taskDescription`, `targetFiles`, `strategy` (`"adaptive" | "tactical_strike" | "balanced_squad" | "full_legion" | "verification_heavy"`), `maxSpecialists`, and `preferredRoles`.
+  - Scores archetypes with keyword weights, file patterns, and intent bonuses, and partitions non-overlapping file reservations.
+- **`formLegion(parentStreamId, input)` (lines 955–1240):**
   - Creates child rows in `agent_streams` via **direct writes** (`dbPool.push({ type: "insert", table: "agent_streams", ... })` with **NO** `agentId` — [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md)).
   - Checks active file reservations via `dbPool.selectWhere("agent_memory", ...)` and filters by `agent_streams.status === "active"` so stale reservations from completed/failed streams never block new formations ([PM-008](../postmortems/PM-008-stale-reservation-false-positives.md)).
-  - Dispatches Stage 1 (`discovery_architecture`) tasks immediately (`status: "active"`) while queueing Stage 2–5 members (`status: "queued"`).
-- **`reconcileSpecialistStreamLifecycleUnlocked` (lines 1255–1470):**
-  - **CRITICAL TERMINAL-STATE GUARD (lines 1280–1294, [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)):**
+  - Dispatches Stage 1 (`leadAndRecon`) tasks immediately (`status: "active"`) while queueing downstream stage members (`status: "queued"`).
+- **`reconcileSpecialistStreamLifecycleUnlocked` (lines 1501–1780):**
+  - **CRITICAL TERMINAL-STATE GUARD (lines 1530–1545, [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)):**
     ```ts
     if (
       member.status === "completed" ||
@@ -208,6 +207,42 @@ This document walks you through every file that makes up Agent Swarm & The Legio
   - `shouldAcceptSteeringInterrupt`: Evaluates `this.activeLegionController`, ensuring incoming user steering immediately halts in-flight specialists ([PM-013](../postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md)).
   - `withLegionContext`: Injects `<specialist_handoff>` evidence into a copy of the original user prompt matching `this.legionObjective`, avoiding drift across multi-turn follow-ups.
   - `resumeTaskFromHistory`: Unconditionally sets `legionAttempted = true` and recovers persisted receipts.
+  - File Attachment Preservation: Preserves `this.legionObjective` when files are attached, only deferring to multimodal parent when images are present.
+  - Gating Resilience: Allows tactical strike strategies and test projects to execute even below the 3.2 complexity score floor.
+
+---
+
+## 9. Orchestrator Conductor, Tool Discovery & Progress Streaming (`src/core/prompts/` & `src/core/task/tools/`)
+
+**Purpose:** Provide the parent agent with explicit specialist conductor capabilities, auto-approval, prompt instructions, and human-observable streaming feedback.
+
+### Key Components & Invariants
+- **`EngageSwarmHandler.ts` (`src/core/task/tools/handlers/`):**
+  - Implements `IToolHandler` for `DietCodeDefaultTool.ENGAGE_SWARM`.
+  - Validates `objective` and checks that Swarm or Legion is enabled.
+  - Extracts and clamps parameters: `maxSpecialists` (1..8), `strategy` (validated via `isValidLegionStrategy`), `preferredRoles`.
+  - Converts specialist tool specifications into provider native tool schemas (`DietCodeToolSet.getNativeConverter`).
+  - Injects a fallback `attempt_completion` tool specification with a single `result` string parameter.
+  - Instantiates `LegionAgentHost` with parent task budget constraints (`maxTokens`, `maxCost`) and dispatches `runLegionPipeline`.
+  - Streams progress cards to the chat feed via `config.callbacks.say("text", formatLegionProgressMessage(event))`.
+  - Returns structured `<specialist_handoff status="...">` blocks containing synthesized markdown and unverified execution receipts.
+- **`engage_swarm.ts` (`src/core/prompts/system-prompt/tools/`):**
+  - Tool definition registered with `DietCodeDefaultTool.ENGAGE_SWARM`.
+  - Dynamic context requirement: enabled when `legionEnabled || enabled` and `!context.isTesting`.
+- **`autoApprove.ts` (`src/core/task/tools/`):**
+  - Automatically approves `DietCodeDefaultTool.ENGAGE_SWARM` in `AutoApprove.shouldAutoApproveToolWithPath`.
+  - Prevents interactive confirmation prompts from interrupting autonomous conductor workflows.
+- **System Prompt Components (`src/core/prompts/system-prompt/components/`):**
+  - `joy_zoning.ts`: Injects `# 🐝 AGENT SWARM & THE LEGION — Orchestrator Conductor` detailing the conductor role, 7 specialist roles, and Plan/Act mode expectations.
+  - `capabilities.ts`: Injects `{{SWARM_CAPABILITIES}}` describing specialist delegation and multi-agent coordination.
+  - `act_vs_plan_mode.ts`: Explains Plan Mode milestone role mapping and Act Mode `engage_swarm` execution.
+- **`LegionPipelineRunner.ts` (`formatLegionProgressMessage`):**
+  - Formats stage transitions, active specialist badges, completions, failure alerts, and ADR-0009 failover notifications into human-centered markdown cards streamed directly into the chat feed.
+- **Hardened Task Gating (`src/core/task/index.ts`):**
+  - Preserves `legionObjective` in `Task.startTask` when files are attached (only images defer to multimodal parent).
+  - Falls back to conversation history user prompt in `maybeRunAutomaticLegion` if `this.legionObjective` is not set directly.
+  - Relaxes the 3.2 complexity score floor and 2-member minimum for `tactical_strike` strategy, test projects, or explicit swarm/legion keywords.
+  - Defensively guards `messageStateHandler` in `hasUnansweredAsk` and `setResponseValues`.
 
 ---
 

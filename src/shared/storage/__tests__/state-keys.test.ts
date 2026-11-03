@@ -122,10 +122,10 @@ describe("State Keys Type Safety", () => {
 			"agentSwarmEnabled",
 			"agentSwarmCriticalCompletionReviewEnabled",
 			"agentSwarmHierarchicalDeferEnabled",
-			"agentSwarmLegionEnabled",
 		] as const) {
 			expect(getDefaultValue(key)).to.equal(false)
 		}
+		expect(getDefaultValue("agentSwarmLegionEnabled")).to.equal(true)
 		expect(getDefaultValue("agentSwarmDefaultDeferBoundary")).to.equal("safe_boundary")
 		expect(getDefaultValue("agentSwarmAutoDeferOnCompletionReview")).to.equal(true)
 		expect(getDefaultValue("agentSwarmMaxInitialCompletionReviews")).to.equal(1)

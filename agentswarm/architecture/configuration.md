@@ -58,6 +58,9 @@ Within the "global" step, a task's `settingsPatch` (from `TaskConfig`) is consul
 3. **The master switch is OR-ed in.** `reviewEnabled = enabled || reviewSetting` (same for defer and legion). You cannot turn one sub-capability off while the master is on — the UI therefore flips the master off and re-asserts the other sub-flags in one batch.
 4. **Manual invocation forces review and legion, not defer.** `manualInvocation` sets `enabled`, `reviewEnabled`, `legionEnabled`. Defer is forced by passing `forceEnable: true` to the defer methods. (Documented as a finding; intentional-by-implementation, not by spec.)
 5. **Presets** in the UI are just batched updates — see `handleApplySwarmPreset` in `FeatureSettingsSection.tsx`.
+6. **Auto-Approval of `engage_swarm`:** The `engage_swarm` conductor tool is auto-approved by default in `AutoApprove.shouldAutoApproveToolWithPath`. It does not prompt the user for interactive approval when the conductor dispatches specialist teams.
+7. **Test Isolation (`isTesting`):** `engage_swarm` tool specification and prompt conductor sections (`joy_zoning.ts`, `act_vs_plan_mode.ts`) check `context.isTesting`. When running under test runners (`isTesting: true`), they are omitted to keep prompt snapshot tests deterministic and stable.
+8. **Adaptive Gating Floor Overrides:** The automatic delegation complexity floor (`3.2`) and 2-specialist minimum are bypassed when `appliedStrategy === "tactical_strike"`, for test project tasks, or when explicit swarm/legion keywords appear in the objective.
 
 ## Quick recipes
 

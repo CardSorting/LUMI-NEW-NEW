@@ -13,6 +13,7 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | `LegionPipelineRunner.ts` | New | Autonomous multi-stage pipeline executor driving stages, context passing, and synthesis |
 | `Orchestrator.ts` | Mod | Public façade for all of the above; `acceptingNewWork` guards; `completeStream`/`failStream` hooks (`reconcileAfterStreamFailure`, `settleLegionSpecialist`), `getOrCreateLegionTaskStream` |
 | `__tests__/AgentSwarmAuxiliary.test.ts` | New | 49 tests in 8 sections (toggle, review, defer, barrier, real SQLite, proto/config, Legion, Legion lifecycle) |
+| `__tests__/Orchestrator.test.ts` | Mod | 14 tests covering Orchestrator Swarm and Legion stream integration |
 
 ## Specialist Task Execution (`src/core/task/legion/` & `src/core/task/`)
 | File | Status | Owns |
@@ -20,8 +21,25 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | `src/core/task/legion/LegionAgentHost.ts` | New | Autonomous agent execution host driving native tool conversations, model token/cost budgets, heuristic fallbacks, and UI progress streaming |
 | `src/core/task/legion/LegionToolAdapter.ts` | New | Specialist tool execution bridge with isolated `TaskState`, execution ownership (`legion:<streamId>`), command lifecycle tracking, process group abortion, and upward file revision propagation |
 | `src/core/task/legion/delegationPolicy.ts` | New | Policy rules for automatic delegation eligibility (opt-outs, plan-mode exclusions, native tool prerequisites) |
-| `src/core/task/index.ts` | Mod | `maybeRunAutomaticLegion`, `withLegionContext` objective-pinned handoff injection, `activeLegionController` steering interrupt abort, and `resumeTaskFromHistory` state recovery |
-| `src/core/task/legion/__tests__/` | New | 44 tests across `LegionAgentHost.test.ts`, `LegionToolAdapter.test.ts`, `TaskLegion.test.ts`, `LegionNativeProvider.integration.test.ts`, and `delegationPolicy.test.ts` |
+| `src/core/task/index.ts` | Mod | `maybeRunAutomaticLegion`, `withLegionContext` objective-pinned handoff injection, `activeLegionController` steering interrupt abort, file attachment preservation, and `resumeTaskFromHistory` state recovery |
+| `src/core/task/legion/__tests__/` | New | 52 tests across `TaskLegion.test.ts` (19), `LegionAgentHost.test.ts` (18), `LegionToolAdapter.test.ts` (13), `LegionNativeProvider.integration.test.ts` (1), and `delegationPolicy.test.ts` (1) |
+
+## Conductor Tool & System Prompt Integration (`src/core/prompts/` & `src/core/task/tools/`)
+| File | Status | Owns |
+|---|---|---|
+| `src/core/prompts/system-prompt/tools/engage_swarm.ts` | New | `engage_swarm` tool specification, parameters, and conditional enablement |
+| `src/core/task/tools/handlers/EngageSwarmHandler.ts` | New | Handler executing `engage_swarm`, mapping parameters, streaming progress cards, and returning specialist handoffs |
+| `src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts` | New | 8 unit tests covering `EngageSwarmHandler` (validation, config checks, progress streaming, abort) |
+| `src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts` | New | 3 unit tests verifying dynamic `engage_swarm` discovery and `isTesting` snapshot isolation |
+| `src/core/prompts/system-prompt/components/joy_zoning.ts` | Mod | `# 🐝 AGENT SWARM & THE LEGION — Orchestrator Conductor` section injection |
+| `src/core/prompts/system-prompt/components/capabilities.ts` | Mod | Dynamic `{{SWARM_CAPABILITIES}}` injection when Swarm or Legion is enabled |
+| `src/core/prompts/system-prompt/components/act_vs_plan_mode.ts` | Mod | Role mapping in Plan Mode and `engage_swarm` delegation in Act Mode |
+| `src/core/prompts/system-prompt/registry/DietCodeToolSet.ts` | Mod | Registers `engage_swarm` in `getEnabledTools` |
+| `src/core/prompts/system-prompt/tools/init.ts` | Mod | Variant registration for `engage_swarm` |
+| `src/core/task/tools/autoApprove.ts` | Mod | Auto-approval registration for `DietCodeDefaultTool.ENGAGE_SWARM` |
+| `src/core/task/tools/ToolExecutorCoordinator.ts` | Mod | Handler binding for `DietCodeDefaultTool.ENGAGE_SWARM` |
+| `src/shared/tools.ts` | Mod | Added `ENGAGE_SWARM = "engage_swarm"` to `DietCodeDefaultTool` |
+| `src/core/assistant-message/index.ts` | Mod | Added `objective`, `strategy`, `preferred_roles`, `max_specialists` to `toolParamNames` |
 
 ## Persistence
 | File | Status | Change |
@@ -39,7 +57,7 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 |---|---|---|
 | `package.json` | Mod | `lumi.agentSwarm.*` contributions |
 | `proto/dietcode/state.proto` | Mod | `agent_swarm_*` in `Settings` (339–348) and `UpdateSettingsRequest` (55–64); generated TS via `npm run protos` (generated output is not tracked) |
-| `src/shared/storage/state-keys.ts` (+ `__tests__/state-keys.test.ts`) | Mod | Defaults/types |
+| `src/shared/storage/state-keys.ts` (+ `__tests__/state-keys.test.ts`) | Mod | Defaults/types and 32 type-safety tests |
 | `src/shared/ExtensionMessage.ts` | Mod | `ExtensionState` fields |
 | `src/core/controller/index.ts` | Mod | Posts effective values to the webview |
 | `src/core/controller/state/updateSettings.ts`, `updateTaskSettings.ts` | Mod | Validation, clamping, cache invalidation |
@@ -70,3 +88,4 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | `agentswarm4.md` §6–7 | Deferred ≠ completed/failed; persistence, no blind replay | task metadata, receipts, durable checkpoints |
 | *(Extension, not in the specs)* | Legion specialists | `LegionCoordinator` — see ADR-0008/0009 |
 | [ADR-0012](../adr/ADR-0012-automatic-legion-default.md) | Automatic Legion execution host & sandboxed tools | `LegionAgentHost`, `LegionToolAdapter`, `Task.ts`, `LegionPipelineRunner` |
+| [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | Orchestrator Conductor tool, streaming cards, auto-approval & gating heuristics | `engage_swarm.ts`, `EngageSwarmHandler.ts`, `autoApprove.ts`, `joy_zoning.ts`, `formatLegionProgressMessage` |
