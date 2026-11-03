@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest"
-import { type DietCodeMessage, filterVisibleMessages, groupLowStakesTools, isToolGroup } from "./messageUtils"
+import {
+	type DietCodeMessage,
+	filterVisibleMessages,
+	findApiReqInfoForCheckpoint,
+	findNextSegmentCost,
+	groupLowStakesTools,
+	isToolGroup,
+} from "./messageUtils"
 
 const createTextMessage = (ts: number, text: string): DietCodeMessage => ({
 	type: "say",
@@ -96,5 +103,61 @@ describe("groupLowStakesTools", () => {
 		expect(grouped).toHaveLength(2)
 		expect(grouped[0]).toMatchObject({ type: "say", say: "reasoning", text: "Planning next read" })
 		expect(isToolGroup(grouped[1])).toBe(true)
+	})
+})
+
+describe("findNextSegmentCost", () => {
+	it("combines parent cost and specialistUsage cost", () => {
+		const messages: DietCodeMessage[] = [
+			{ type: "say", say: "checkpoint_created", ts: 10 },
+			{
+				type: "say",
+				say: "api_req_started",
+				ts: 20,
+				text: JSON.stringify({
+					cost: 0.05,
+					specialistUsage: { tokensIn: 100, tokensOut: 20, cacheWrites: 0, cacheReads: 0, cost: 0.02 },
+				}),
+			},
+		]
+		const cost = findNextSegmentCost(10, messages)
+		expect(cost).toBeCloseTo(0.07, 5)
+	})
+
+	it("returns cost when only specialistUsage cost exists", () => {
+		const messages: DietCodeMessage[] = [
+			{ type: "say", say: "checkpoint_created", ts: 10 },
+			{
+				type: "say",
+				say: "api_req_started",
+				ts: 20,
+				text: JSON.stringify({
+					specialistUsage: { tokensIn: 100, tokensOut: 20, cacheWrites: 0, cacheReads: 0, cost: 0.03 },
+				}),
+			},
+		]
+		const cost = findNextSegmentCost(10, messages)
+		expect(cost).toBeCloseTo(0.03, 5)
+	})
+})
+
+describe("findApiReqInfoForCheckpoint", () => {
+	it("includes specialistUsage cost in checkpoint cost calculation", () => {
+		const messages: DietCodeMessage[] = [
+			{
+				type: "say",
+				say: "api_req_started",
+				ts: 10,
+				text: JSON.stringify({
+					request: "Do task",
+					cost: 0.1,
+					specialistUsage: { tokensIn: 50, tokensOut: 10, cacheWrites: 0, cacheReads: 0, cost: 0.04 },
+				}),
+			},
+			{ type: "say", say: "checkpoint_created", ts: 20 },
+		]
+		const info = findApiReqInfoForCheckpoint(20, messages)
+		expect(info.cost).toBeCloseTo(0.14, 5)
+		expect(info.request).toBe("Do task")
 	})
 })

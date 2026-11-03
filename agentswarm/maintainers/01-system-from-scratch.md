@@ -120,15 +120,18 @@ flowchart TB
   3. **Formation & File Reservation (`formLegion`):** Spawns child streams and tasks for each selected specialist, checks for active file reservation conflicts (`file_res:<path>`), and dispatches Stage 1 (`discovery_architecture`).
   4. **Stage-Gated Handoff & Automatic Lifecycle (`settleSpecialistStream`):** When `Orchestrator.completeStream(streamId, summary)` is called on a specialist stream, `LegionCoordinator` records its handoff artifact and, once all members in the current stage are settled, automatically promotes the next stage (`queued` → `active`) with upstream context summaries injected into their task payloads.
   5. **Bounded Failover (`reconcileSpecialistStreamLifecycle`):** When `Orchestrator.failStream(streamId, reason)` is called on a specialist stream, `LegionCoordinator` marks the slot `"rerouted"` and spawns a fallback specialist (up to `LEGION_MAX_ATTEMPTS_PER_SLOT = 2`). If the fallback also fails, the slot is permanently marked `"failed"` (terminal states `completed`, `failed`, and `rerouted` can never be overwritten — [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)).
+  6. **Autonomous Host Execution (`LegionAgentHost`, `LegionToolAdapter`, `Task.ts`):** With [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), Legion executes automatically during act-mode tasks with native tool calls. `Task.ts` runs `maybeRunAutomaticLegion`, coordinating specialists via `LegionAgentHost` and sandboxed `LegionToolAdapter` instances with token/cost bounds, steering cancellation, and evidence-based `<specialist_handoff>` injection pinned to the user prompt.
 
 ---
 
-## 4. The Golden Rule of Agent Swarm: Zero Overhead When Off
+## 4. Configuration Defaults & Invariants
 
-Every entry point checks `resolveEffectiveAgentSwarmState` (`src/infrastructure/ai/AgentSwarmConfig.ts`). When all flags are at their default (`false`):
-- `AttemptCompletionHandler` does not instantiate or run `CriticalCompletionReviewService`.
-- `Orchestrator.completeStream` and `failStream` perform fast memory look-ups that no-op when no active pipeline or formation exists.
-- The single-agent path behaves identically to a build without `agentswarm`.
+Per [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), **Legion is enabled by default** for eligible act-mode tasks, while **Critical Completion Review** and **Hierarchical Defer** remain disabled by default.
+
+When an auxiliary capability is disabled or explicitly opted out:
+- `AttemptCompletionHandler` does not run `CriticalCompletionReviewService`.
+- `Orchestrator.completeStream` and `failStream` perform fast memory look-ups that no-op when no active pipeline exists.
+- `Task.ts` skips automatic Legion formation and proceeds directly with the standard single-agent loop.
 
 Next: Read **[02 — Line-by-Line Codebase Tour](02-codebase-tour.md)** to see how every file is structured and where each invariant lives.
 

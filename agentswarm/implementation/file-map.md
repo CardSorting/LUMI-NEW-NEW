@@ -9,8 +9,19 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | `HierarchicalDeferCoordinator.ts` | New | Defer/resume (single + pipeline), barrier, control messages, checkpoints |
 | `CriticalCompletionReview.ts` | New | Bounded review, finding classification, decisions, roadmap merge, auto-resume |
 | `LegionCoordinator.ts` | New | Specialist registry, classification, formation, stage progression, failover, synthesis, `settleSpecialistStream` |
-| `Orchestrator.ts` | Mod | Public façade for all of the above; `acceptingNewWork` guards; `completeStream`/`failStream` hooks (`reconcileAfterStreamFailure`, `settleLegionSpecialist`) |
-| `__tests__/AgentSwarmAuxiliary.test.ts` | New | 34 tests in 8 sections (toggle, review, defer, barrier, real SQLite, proto/config, Legion, Legion lifecycle) |
+| `LegionExecutionReceipt.ts` | New | Durable specialist operation receipts (`beginLegionOperation`, `finishLegionOperation`) and execution evidence queries |
+| `LegionPipelineRunner.ts` | New | Autonomous multi-stage pipeline executor driving stages, context passing, and synthesis |
+| `Orchestrator.ts` | Mod | Public façade for all of the above; `acceptingNewWork` guards; `completeStream`/`failStream` hooks (`reconcileAfterStreamFailure`, `settleLegionSpecialist`), `getOrCreateLegionTaskStream` |
+| `__tests__/AgentSwarmAuxiliary.test.ts` | New | 49 tests in 8 sections (toggle, review, defer, barrier, real SQLite, proto/config, Legion, Legion lifecycle) |
+
+## Specialist Task Execution (`src/core/task/legion/` & `src/core/task/`)
+| File | Status | Owns |
+|---|---|---|
+| `src/core/task/legion/LegionAgentHost.ts` | New | Autonomous agent execution host driving native tool conversations, model token/cost budgets, heuristic fallbacks, and UI progress streaming |
+| `src/core/task/legion/LegionToolAdapter.ts` | New | Specialist tool execution bridge with isolated `TaskState`, execution ownership (`legion:<streamId>`), command lifecycle tracking, process group abortion, and upward file revision propagation |
+| `src/core/task/legion/delegationPolicy.ts` | New | Policy rules for automatic delegation eligibility (opt-outs, plan-mode exclusions, native tool prerequisites) |
+| `src/core/task/index.ts` | Mod | `maybeRunAutomaticLegion`, `withLegionContext` objective-pinned handoff injection, `activeLegionController` steering interrupt abort, and `resumeTaskFromHistory` state recovery |
+| `src/core/task/legion/__tests__/` | New | 44 tests across `LegionAgentHost.test.ts`, `LegionToolAdapter.test.ts`, `TaskLegion.test.ts`, `LegionNativeProvider.integration.test.ts`, and `delegationPolicy.test.ts` |
 
 ## Persistence
 | File | Status | Change |
@@ -58,3 +69,4 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | `agentswarm4.md` §3 | Parent stops accepting conflicting work | `acceptingNewWork` guards |
 | `agentswarm4.md` §6–7 | Deferred ≠ completed/failed; persistence, no blind replay | task metadata, receipts, durable checkpoints |
 | *(Extension, not in the specs)* | Legion specialists | `LegionCoordinator` — see ADR-0008/0009 |
+| [ADR-0012](../adr/ADR-0012-automatic-legion-default.md) | Automatic Legion execution host & sandboxed tools | `LegionAgentHost`, `LegionToolAdapter`, `Task.ts`, `LegionPipelineRunner` |

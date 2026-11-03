@@ -182,7 +182,10 @@ export const ChatRowContent = memo(
 		const [cost, _apiReqCancelReason, apiReqStreamingFailedMessage] = useMemo(() => {
 			if (message.text != null && message.say === "api_req_started") {
 				const info: DietCodeApiReqInfo = JSON.parse(message.text)
-				return [info.cost, info.cancelReason, info.streamingFailedMessage, info.retryStatus]
+				const specialistCost = typeof info.specialistUsage?.cost === "number" ? info.specialistUsage.cost : 0
+				const totalCost =
+					typeof info.cost === "number" ? info.cost + specialistCost : specialistCost > 0 ? specialistCost : undefined
+				return [totalCost, info.cancelReason, info.streamingFailedMessage, info.retryStatus]
 			}
 			return [undefined, undefined, undefined, undefined, undefined]
 		}, [message.text, message.say])

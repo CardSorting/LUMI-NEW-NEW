@@ -269,8 +269,11 @@ export function findApiReqInfoForCheckpoint(
 		if (msg.say === "api_req_started" && msg.text) {
 			try {
 				const info = JSON.parse(msg.text)
+				const specialistCost = typeof info.specialistUsage?.cost === "number" ? info.specialistUsage.cost : 0
+				const cost =
+					typeof info.cost === "number" ? info.cost + specialistCost : specialistCost > 0 ? specialistCost : undefined
 				return {
-					cost: info.cost,
+					cost,
 					request: info.request,
 				}
 			} catch {
@@ -362,6 +365,9 @@ export function findNextSegmentCost(checkpointTs: number, allMessages: DietCodeM
 				const info = JSON.parse(msg.text)
 				if (typeof info.cost === "number") {
 					totalCost += info.cost
+				}
+				if (typeof info.specialistUsage?.cost === "number") {
+					totalCost += info.specialistUsage.cost
 				}
 			} catch {
 				// ignore parse errors

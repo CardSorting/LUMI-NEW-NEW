@@ -501,8 +501,8 @@
 				},
 				"lumi.agentSwarm.legion.enabled": {
 					"type": "boolean",
-					"default": false,
-					"description": "Enable the Legion specialist agent classification, formation, and delegation engine. Disabled by default."
+					"default": true,
+					"description": "Automatically form specialist teams for suitable tasks when the runtime supports delegation."
 				},
 				"lumi.agentSwarm.legion.strategy": {
 					"type": "string",

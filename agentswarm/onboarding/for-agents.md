@@ -10,7 +10,7 @@ Read this fully before modifying anything under `src/infrastructure/ai/`, `src/i
 
 ## 1. Ground rules (non-negotiable)
 
-1. **Everything is off by default.** Never change a default to `true`. Never make the off-path do extra work.
+1. **Legion defaults on; Review and Defer default off.** Respect explicit opt-outs and keep the off-path free of specialist execution. See [ADR-0012](../adr/ADR-0012-automatic-legion-default.md).
 2. **Defer ≠ cancel.** Never abort an in-flight operation to simulate suspension.
 3. **Do not merge streams.** No shared transcripts, no shared inboxes.
 4. **Terminal states are final.** `completed`, `failed`, `rerouted` are never flipped by later events.

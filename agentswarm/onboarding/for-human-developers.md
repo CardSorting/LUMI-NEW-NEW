@@ -4,7 +4,7 @@
 
 ## 1. What it is (60 seconds)
 
-Three optional capabilities, all behind switches that default to **off**:
+Three configurable capabilities: Legion is enabled by default; Review and Defer default to **off**.
 
 | Capability | One-liner | Main file |
 |---|---|---|

@@ -40,7 +40,7 @@ export function getApiMetrics(messages: DietCodeMessage[]): ApiMetrics {
 		if (message.type === "say" && (message.say === "api_req_started" || message.say === "deleted_api_reqs") && message.text) {
 			try {
 				const parsedData = JSON.parse(message.text)
-				const { tokensIn, tokensOut, cacheWrites, cacheReads, cost } = parsedData
+				const { tokensIn, tokensOut, cacheWrites, cacheReads, cost, specialistUsage } = parsedData
 
 				if (typeof tokensIn === "number") {
 					result.totalTokensIn += tokensIn
@@ -56,6 +56,15 @@ export function getApiMetrics(messages: DietCodeMessage[]): ApiMetrics {
 				}
 				if (typeof cost === "number") {
 					result.totalCost += cost
+				}
+				if (specialistUsage && typeof specialistUsage === "object") {
+					if (typeof specialistUsage.tokensIn === "number") result.totalTokensIn += specialistUsage.tokensIn
+					if (typeof specialistUsage.tokensOut === "number") result.totalTokensOut += specialistUsage.tokensOut
+					if (typeof specialistUsage.cacheWrites === "number")
+						result.totalCacheWrites = (result.totalCacheWrites ?? 0) + specialistUsage.cacheWrites
+					if (typeof specialistUsage.cacheReads === "number")
+						result.totalCacheReads = (result.totalCacheReads ?? 0) + specialistUsage.cacheReads
+					if (typeof specialistUsage.cost === "number") result.totalCost += specialistUsage.cost
 				}
 			} catch {
 				// Ignore JSON parse errors

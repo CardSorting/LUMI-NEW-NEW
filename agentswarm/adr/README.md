@@ -5,7 +5,7 @@ To change a decision, add a new ADR that supersedes the old one — never rewrit
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](ADR-0001-auxiliary-off-by-default.md) | Auxiliary, off by default, zero overhead when off | Accepted |
+| [0001](ADR-0001-auxiliary-off-by-default.md) | Auxiliary, off by default, zero overhead when off | Superseded for Legion by 0012 |
 | [0002](ADR-0002-defer-is-not-cancel.md) | Defer is cooperative suspension, never cancellation | Accepted |
 | [0003](ADR-0003-durable-state-in-agent-memory.md) | Persist all swarm state in `agent_memory` via `BufferedDbPool` | Accepted |
 | [0004](ADR-0004-suspension-barrier-and-ancestor-walk.md) | Parent suspension barrier with ancestor walk and per-pipeline lock | Accepted |
@@ -16,3 +16,4 @@ To change a decision, add a new ADR that supersedes the old one — never rewrit
 | [0009](ADR-0009-legion-lifecycle-dag-failover-terminal-states.md) | Legion lifecycle: stage DAG, bounded failover, final terminal states, per-formation lock | Accepted |
 | [0010](ADR-0010-direct-writes-for-shared-rows.md) | Direct (non-shadow) writes for rows others must read; FK-ordered flush | Accepted |
 | [0011](ADR-0011-legacy-role-alias.md) | Keep `legion_Trends_ux` as a legacy alias of `legion_ux_ergonomics` | Accepted |
+| [0012](ADR-0012-automatic-legion-default.md) | Automatic Legion formation by default | Accepted |

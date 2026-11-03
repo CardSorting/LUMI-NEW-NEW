@@ -445,6 +445,7 @@ export interface DietCodeApiReqInfo {
 	cacheWrites?: number
 	cacheReads?: number
 	cost?: number
+	specialistUsage?: { tokensIn: number; tokensOut: number; cacheWrites: number; cacheReads: number; cost?: number }
 	cancelReason?: DietCodeApiReqCancelReason
 	streamingFailedMessage?: string
 	retryStatus?: {

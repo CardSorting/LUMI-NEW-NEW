@@ -161,7 +161,7 @@ export class ToolExecutor {
 
 	// Create a properly typed TaskConfig object for handlers
 	// NOTE: modifying this object in the tool handlers is okay since these are all references to the singular ToolExecutor instance's variables. However, be careful modifying this object assuming it will update the ToolExecutor instance, e.g. config.browserSession = ... will not update the ToolExecutor.browserSession instance variable. Use applyLatestBrowserSettings() instead.
-	private async asToolConfig(): Promise<TaskConfig> {
+	public async asToolConfig(): Promise<TaskConfig> {
 		const kgService = await this.getKnowledgeGraphService()
 		if (!kgService) {
 			throw new Error("KnowledgeGraphService not initialized")

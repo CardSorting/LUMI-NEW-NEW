@@ -304,7 +304,7 @@ export const ExtensionStateContextProvider: React.FC<{
 		agentSwarmAutoDeferOnCompletionReview: true,
 		agentSwarmMaxInitialCompletionReviews: 1,
 		agentSwarmMaxCorrectiveVerificationPasses: 1,
-		agentSwarmLegionEnabled: false,
+		agentSwarmLegionEnabled: true,
 		agentSwarmLegionStrategy: "adaptive",
 		agentSwarmLegionMaxSpecialists: 4,
 		globalSkillsToggles: {},

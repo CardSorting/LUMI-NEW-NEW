@@ -61,7 +61,7 @@ export interface AgentSwarmConfig {
 	maxCorrectiveVerificationPasses: number
 	/** Automatically defer pipeline during Critical Completion Review when enabled (default: true). */
 	autoDeferOnCompletionReview: boolean
-	/** Legion Specialist Classification, Formation & Delegation toggle (default: false). */
+	/** Automatic Legion specialist formation toggle (default: true). */
 	legionEnabled: boolean
 	/** Default formation strategy for the Legion (default: "adaptive"). */
 	legionStrategy: LegionFormationStrategy
@@ -81,7 +81,7 @@ export const DEFAULT_AGENT_SWARM_CONFIG: AgentSwarmConfig = {
 	maxInitialCompletionReviews: 1,
 	maxCorrectiveVerificationPasses: 1,
 	autoDeferOnCompletionReview: true,
-	legionEnabled: false,
+	legionEnabled: true,
 	legionStrategy: "adaptive",
 	legionMaxSpecialists: 4,
 	agentOverrides: {},

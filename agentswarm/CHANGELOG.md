@@ -10,8 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Release & Phase Summary
 
-| Phase / Milestone | Date | Focus | Key Post-Mortems / ADRs | Test Count (`AgentSwarmAuxiliary.test.ts`) |
+| Phase / Milestone | Date | Focus | Key Post-Mortems / ADRs | Test Count (`AgentSwarmAuxiliary.test.ts` + Legion) |
 |---|---|---|---|---|
+| **[Phase 6 — Automatic Legion Execution, Sandboxed Tool Host & Steering Hardening](#phase-6--automatic-legion-execution-sandboxed-tool-host--steering-hardening-2026-11-03)** | 2026-11-03 | Automatic Legion default ([ADR-0012](adr/ADR-0012-automatic-legion-default.md)), `LegionAgentHost` native tool loop, `LegionToolAdapter` sandboxing, `activeLegionController` steering abort, objective handoff pinning, SQLite flush barriers, path reservation boundaries | [PM-013](postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md), [PM-014](postmortems/PM-014-composite-command-settlement-and-reservation-boundary.md), [ADR-0012](adr/ADR-0012-automatic-legion-default.md) | **104 passing** (49 auxiliary + 44 legion + 7 stream + 4 metrics) |
 | **[Phase 5 — Maintainer Hand-off, SQLite Cookbook & Persistence Hardening](#phase-5--maintainer-hand-off-sqlite-cookbook--persistence-hardening-2026-11-02)** | 2026-11-02 | Zero-to-hero Maintainers' Handbook, real-SQLite `Q1`–`Q8` probe, post-commit shadow stranding fix, post-resume barrier guard, same-batch `delete`/`upsert` ordering fix | [PM-011](postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md), [PM-012](postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md), [ADR-0010](adr/ADR-0010-direct-writes-for-shared-rows.md) | **34** (80 total backend + 7 webview) |
 | **[Phase 4 — Zenith Tier: Legion Lifecycle, DAG Stage Gating, Bounded Failover & Wiki](#phase-4--zenith-tier-legion-lifecycle-dag-stage-gating-bounded-failover--wiki-2026-11-02)** | 2026-11-02 | Automatic stage progression on `completeStream`/`failStream`, bounded 1-retry specialist failover (`LEGION_MAX_ATTEMPTS_PER_SLOT = 2`), absorbing terminal states, per-formation mutex, Interrupted-Worker Audit, full Knowledge Base Wiki | [PM-008](postmortems/PM-008-stale-reservation-false-positives.md), [PM-009](postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md), [PM-010](postmortems/PM-010-interrupted-worker-partial-work.md), [ADR-0009](adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), [ADR-0011](adr/ADR-0011-legacy-role-alias.md) | **31** |
 | **[Phase 3 — The Legion: Specialist Classification, Formation & Webview Roster](#phase-3--the-legion-specialist-classification-formation--webview-roster-2026-11-02)** | 2026-11-02 | 10 specialist archetypes across 5 stages, deterministic multi-signal classifier, file-reservation partitioning, remedial specialist spawning, proto + Webview UI Legion controls | [ADR-0008](adr/ADR-0008-deterministic-legion-classification.md) | **25** |
@@ -23,6 +24,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased / Active Working Tree]
 
 > **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–5 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/infrastructure/ai/` and `agentswarm/`). Verify `git log` when cutting a tagged release.
+
+---
+
+## Phase 6 — Automatic Legion Execution, Sandboxed Tool Host & Steering Hardening (2026-11-03)
+
+### Added
+- **Automatic Legion by Default ([ADR-0012](adr/ADR-0012-automatic-legion-default.md)):**
+  - Updated `agentSwarmLegionEnabled` default to `true` while keeping Critical Completion Review and Hierarchical Defer disabled by default.
+  - Implemented automatic eligibility checks and specialist delegation in `Task.ts` (`maybeRunAutomaticLegion`) for act-mode tasks with native tool calls and no multimodal attachments.
+- **Specialist Agent Execution Host (`src/core/task/legion/LegionAgentHost.ts`):**
+  - Multi-turn native tool execution loop driving specialist conversations independently of parent stream state.
+  - Token and cost budget tracking with `maxTokens` and `maxCost` enforcement and incremental webview broadcasts.
+  - Robust fallback token heuristics when provider streams omit usage chunks or emit zero tokens (`inputTokens: 0, outputTokens: 0`).
+  - Error absorption on webview updates (`onUsage`) to prevent UI stream disconnects from failing specialist pipelines.
+- **Sandboxed Specialist Tool Adapter (`src/core/task/legion/LegionToolAdapter.ts`):**
+  - Specialist-scoped tool execution bridge with isolated `TaskState` and execution ownership (`legion:<streamId>`).
+  - Strict preservation of parent approval callbacks, universal execution guards, and `.dietcodeignore` rules.
+  - Process group command cancellation and lifecycle tracking (`commandStarted`, `uncertainCommands`, `unresolvedCommandIds`).
+  - Inspection of both root and nested execution statuses (`observed.status`, `observed.command?.status`, `observed.action?.status`) in `getPendingWork`.
+  - Upward propagation of workspace file edit revisions (`base.taskState.workspaceRevision += revisions`) upon specialist edits.
+- **Autonomous Pipeline Runner & Receipts (`src/infrastructure/ai/`):**
+  - `LegionPipelineRunner.ts`: Executes stage progression (`leadAndRecon` → `parallelExecution` → `verificationAndHardening`) with stage handoff context injection and consolidated synthesis.
+  - `LegionExecutionReceipt.ts`: Operation audit trail (`beginLegionOperation`, `finishLegionOperation`) with operation receipts and settlement verification.
+- **Metrics & Webview Accounting (`src/shared/getApiMetrics.ts`, `webview-ui/`):**
+  - Aggregation of specialist token and cost usage into parent task metrics without inflating parent prompt context sizes.
+  - Seamless segment cost display in `messageUtils.ts` and `ChatRow.tsx`.
+
+### Fixed
+- **Dead-Code Steering Interrupt During Active Legion Execution ([PM-013](postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md)):**
+  - `shouldAcceptSteeringInterrupt` evaluated only `isStreaming` and `isWaitingForFirstChunk`, ignoring user steering during specialist runs. Updated to check `this.taskState.isStreaming || !!this.activeLegionController`, ensuring immediate `activeLegionController.abort()` upon steering input.
+- **Handoff Context Drift in Multi-Turn Conversations ([PM-013](postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md)):**
+  - `withLegionContext` previously searched backwards from the end of conversation history, pinning specialist handoff blocks to subsequent user steering turns. Pinned to the original objective matching `this.legionObjective`.
+- **Unsettled Legion State on Task Resume:**
+  - `resumeTaskFromHistory` previously only set `legionAttempted = true` if a prior Legion stream existed. Tasks resumed without a prior Legion stream now set `legionAttempted = true` unconditionally to avoid redundant evaluation.
+- **Direct SQLite Buffered Races & Missing Flush Barriers:**
+  - Added explicit `await dbPool.flush()` barriers prior to persistent SQLite access in `LegionExecutionReceipt.ts`, `LegionCoordinator.ts`, and `Orchestrator.ts`.
+- **Multi-Root Path Normalization & False Collisions ([PM-014](postmortems/PM-014-composite-command-settlement-and-reservation-boundary.md)):**
+  - Fixed substring collision on workspace root hints in `normalizeReservationPath` and pruned trailing slashes on POSIX reservation keys.
+- **Node 26 Decorator SyntaxError in Unit Tests:**
+  - Replaced `@withRetry` decorator syntax in `guardedStream.test.ts` with explicit method descriptor decoration, unblocking native Node 26 type-stripping ESM runs.
 
 ---
 

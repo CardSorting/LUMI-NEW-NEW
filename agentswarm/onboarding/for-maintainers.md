@@ -8,7 +8,7 @@ Welcome! If you have **never seen LUMI or `agentswarm` before** and are taking o
 
 For a deep, self-contained walkthrough that assumes **zero prior knowledge** of LUMI, read the 4-part handbook in [`maintainers/`](../maintainers/README.md):
 
-1. **[01 — The System from Scratch](../maintainers/01-system-from-scratch.md):** What LUMI is, how a single-agent task runs (`Controller` → `Task` → `ToolExecutor` → `AttemptCompletionHandler`), how `AgentOrchestrator` and `BufferedDbPool` work, and how the 3 Agent Swarm engines (**Hierarchical Defer**, **Critical Completion Review**, **The Legion**) plug in while remaining 100% inert by default.
+1. **[01 — The System from Scratch](../maintainers/01-system-from-scratch.md):** The task and swarm architecture. Its original default-off description predates [ADR-0012](../adr/ADR-0012-automatic-legion-default.md): Legion now defaults on.
 2. **[02 — Line-by-Line Codebase Tour](../maintainers/02-codebase-tour.md):** Exact file-by-file, method-by-method, and line-anchor walkthrough of every file you own — including **what breaks if you weaken each guard**.
 3. **[03 — Day-2 Operating & SQLite Inspection Handbook](../maintainers/03-operating-handbook.md):** Where `joyzoning.sqlite` lives on macOS/Linux/Windows, WAL & corruption auto-recovery, `BufferedDbPool` 1s flush + 5min shadow expiry + operation sort order, log prefixes to grep, and **8 empirically verified `sqlite3` diagnostic queries (`Q1`–`Q8`)**.
 4. **[04 — Failure Modes, War Games & Recovery Drills](../maintainers/04-failure-modes-and-drills.md):** Mutation-testing proofs (`M1`–`M4`) and hands-on recovery drills for stuck barriers, specialist crashes, SQLite flush errors, config precedence surprises, and interrupted AI subagent work.
@@ -19,7 +19,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 
 | Area | Files | Core Invariant You Protect |
 |---|---|---|
-| **Toggle & Precedence** | `src/infrastructure/ai/AgentSwarmConfig.ts`, `package.json` (`lumi.agentSwarm.*`) | **Off by default**; 5-tier precedence; explicit-vs-default detection in `StateManager` ([ADR-0001](../adr/ADR-0001-auxiliary-off-by-default.md), [ADR-0006](../adr/ADR-0006-config-precedence-and-explicit-detection.md), [PM-004](../postmortems/PM-004-statemanager-defaults-clobber-settings.md)) |
+| **Toggle & Precedence** | `src/infrastructure/ai/AgentSwarmConfig.ts`, `package.json` (`lumi.agentSwarm.*`) | Legion defaults on; Review and Defer default off; explicit settings retain precedence ([ADR-0012](../adr/ADR-0012-automatic-legion-default.md), [ADR-0006](../adr/ADR-0006-config-precedence-and-explicit-detection.md)) |
 | **Hierarchical Defer** | `src/infrastructure/ai/HierarchicalDeferCoordinator.ts` | **Defer ≠ cancel**; multi-level BFS barrier; dead-child reconciliation; no post-resume re-suspension; no blind step replay ([ADR-0002](../adr/ADR-0002-defer-is-not-cancel.md), [ADR-0004](../adr/ADR-0004-suspension-barrier-and-ancestor-walk.md), [PM-006](../postmortems/PM-006-multi-level-barrier-deadlock.md), [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)) |
 | **Critical Review** | `src/infrastructure/ai/CriticalCompletionReview.ts`, `src/core/task/tools/completionGatePipeline.ts`, `src/core/task/tools/handlers/AttemptCompletionHandler.ts` | **Bounded 1+1** (1 follow-up + 1 remediation max); strict `verified_defect` vs. `unverified_concern` separation; `finally` auto-resume ([ADR-0005](../adr/ADR-0005-bounded-review-with-category-separation.md), [PM-007](../postmortems/PM-007-review-left-pipeline-suspended-and-unwired.md)) |
 | **The Legion** | `src/infrastructure/ai/LegionCoordinator.ts`, `src/infrastructure/ai/Orchestrator.ts` | Deterministic multi-signal classification; 5-stage gated handoff; active-only file reservation checks; **terminal states (`completed`/`failed`/`rerouted`) are final**; max 2 attempts per slot ([ADR-0008](../adr/ADR-0008-deterministic-legion-classification.md), [ADR-0009](../adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), [PM-008](../postmortems/PM-008-stale-reservation-false-positives.md), [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)) |
@@ -31,7 +31,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 ## 2. PR Review Checklist (Copy-Paste into Pull Requests)
 
 **Behavioural & Safety**
-- [ ] With every Agent Swarm setting at default (`false`), single-agent behaviour is untouched (test: *"is disabled by default and does not alter normal completion or defer flows"*).
+- [ ] Legion defaults on, Review and Defer default off, and an explicit Legion opt-out prevents formation.
 - [ ] No unbounded loop introduced; every retry/review/failover has a numeric cap and a unit test proving termination.
 - [ ] Terminal member/stream states (`completed`, `failed`, `rerouted`) cannot be overwritten by later events, and `reconcilePipelineBarrier` only runs when `pipeline.phase` is `"waiting_for_children"` or `"suspending"`.
 

@@ -6,6 +6,7 @@ import * as path from "path"
 import { v4 as uuidv4 } from "uuid"
 import { Logger } from "@/shared/services/Logger"
 import { dbPool } from "../db/BufferedDbPool"
+import { getPersistentDb } from "../db/Config"
 import {
 	type AgentSwarmConfig,
 	type DeferExecutionBoundary,
@@ -54,6 +55,7 @@ import {
 	type LegionSpecialistAssignment,
 	type LegionSpecialistDescriptor,
 	legionCoordinator,
+	normalizeReservationPath,
 	type SpawnedLegionMember,
 } from "./LegionCoordinator"
 
@@ -450,6 +452,38 @@ export class AgentOrchestrator {
 		}
 	}
 
+	/** Atomically reuse the same root for a task across extension processes. */
+	public async getOrCreateLegionTaskStream(taskId: string, objective: string): Promise<AgentStream> {
+		await dbPool.flush()
+		const db = await getPersistentDb()
+		const externalId = `legion-task:${taskId}`
+		// Preserve roots created by earlier releases of the integration.
+		const existing = await db
+			.selectFrom("agent_streams")
+			.selectAll()
+			.where("externalId", "=", externalId)
+			.orderBy("id")
+			.executeTakeFirst()
+		if (existing) return existing
+		const id = `legion-root-${createHash("sha256").update(taskId).digest("hex")}`
+		await db
+			.insertInto("agent_streams")
+			.values({
+				id,
+				externalId,
+				parentId: null,
+				focus: objective,
+				status: "active",
+				sharedMemoryLayer: null,
+				createdAt: Date.now(),
+			})
+			.onConflict((conflict) => conflict.column("id").doNothing())
+			.execute()
+		const root = await db.selectFrom("agent_streams").selectAll().where("id", "=", id).executeTakeFirst()
+		if (!root || root.externalId !== externalId) throw new Error("Unable to create Legion task root")
+		return root
+	}
+
 	public async createTask(
 		streamId: string,
 		description: string,
@@ -768,7 +802,8 @@ export class AgentOrchestrator {
 		const activeStreamIds = new Set(activeStreams.map((s) => s.id))
 
 		for (const file of files) {
-			const normalizedPath = path.resolve(file)
+			const normalizedPath = normalizeReservationPath(file)
+			if (!normalizedPath) continue
 			const found = await dbPool.selectOne("agent_memory", { column: "key", value: `file_res:${normalizedPath}` })
 			if (found) {
 				const ownerStreamId = found.streamId
@@ -782,7 +817,8 @@ export class AgentOrchestrator {
 		}
 
 		for (const file of files) {
-			const normalizedPath = path.resolve(file)
+			const normalizedPath = normalizeReservationPath(file)
+			if (!normalizedPath) continue
 			await this.storeMemory(streamId, `file_res:${normalizedPath}`, String(Date.now()))
 		}
 
@@ -795,7 +831,8 @@ export class AgentOrchestrator {
 			await dbPool.flush()
 		}
 		for (const file of files) {
-			const normalizedPath = path.resolve(file)
+			const normalizedPath = normalizeReservationPath(file)
+			if (!normalizedPath) continue
 			// Direct delete: the reservation row was written directly by `storeMemory`, so a shadow-scoped delete
 			// would never reach SQLite (it would sit in the stream's overlay until the idle overlay expires).
 			await dbPool.push({
@@ -1072,9 +1109,10 @@ export class AgentOrchestrator {
 	private async settleLegionSpecialist(
 		streamId: string,
 		outcome: { status: "completed" | "failed"; summary?: string; failureReason?: string },
+		options?: { skipFailover?: boolean },
 	): Promise<void> {
 		try {
-			await legionCoordinator.settleSpecialistStream(streamId, outcome)
+			await legionCoordinator.settleSpecialistStream(streamId, outcome, options)
 		} catch (err) {
 			Logger.warn(
 				`[Orchestrator] Legion lifecycle reconciliation skipped for ${streamId.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1085,7 +1123,7 @@ export class AgentOrchestrator {
 	/**
 	 * Mark a stream as failed and store the error reason.
 	 */
-	public async failStream(streamId: string, reason: string): Promise<void> {
+	public async failStream(streamId: string, reason: string, options?: { skipFailover?: boolean }): Promise<void> {
 		await dbPool.push({
 			type: "update",
 			table: "agent_streams",
@@ -1099,7 +1137,7 @@ export class AgentOrchestrator {
 		await this.releaseAllReservations(streamId)
 
 		await hierarchicalDeferCoordinator.reconcileAfterStreamFailure(streamId).catch(() => null)
-		await this.settleLegionSpecialist(streamId, { status: "failed", failureReason: reason })
+		await this.settleLegionSpecialist(streamId, { status: "failed", failureReason: reason }, options)
 	}
 
 	// ── Context-Window Compression ──────────────────────────────────
@@ -1203,7 +1241,8 @@ export class AgentOrchestrator {
 	public async checkCollision(requestingStreamId: string, files: string[]): Promise<string | null> {
 		const activeFiles = await dbPool.getActiveAffectedFiles()
 		for (const file of files) {
-			const normalizedPath = path.resolve(file)
+			const normalizedPath = normalizeReservationPath(file)
+			if (!normalizedPath) continue
 			const agentId = activeFiles.get(normalizedPath) || activeFiles.get(file)
 			if (agentId && agentId !== requestingStreamId) {
 				return `Collision detected: File '${path.basename(file)}' is currently being modified by Stream ${agentId.slice(0, 8)}.`
@@ -1213,7 +1252,8 @@ export class AgentOrchestrator {
 		const activeStreams = await this.getActiveStreams()
 		const activeStreamIds = new Set(activeStreams.map((s) => s.id))
 		for (const file of files) {
-			const normalizedPath = path.resolve(file)
+			const normalizedPath = normalizeReservationPath(file)
+			if (!normalizedPath) continue
 			const found = await dbPool.selectOne("agent_memory", { column: "key", value: `file_res:${normalizedPath}` })
 			if (found) {
 				const ownerStreamId = found.streamId

@@ -1,7 +1,7 @@
 # agentswarm — Knowledge Base Wiki
 
 > Optional multi-agent orchestration for LUMI: **Critical Completion Review**, **Hierarchical Defer & Resume**, and **The Legion** (specialist agent classification, formation and failover).
-> Everything here is **off by default** and costs nothing when off.
+> Legion is enabled by default for suitable tasks; Review and Defer remain off by default. Explicit settings can disable Legion. See [PB-03](playbooks/PB-03-add-a-legion-specialist.md) for current runtime limits.
 
 This directory is both the **original specification set** (`agentswarm.md` … `agentswarm4.md`, untouched) and the **engineering wiki** built while implementing it.
 
@@ -22,7 +22,7 @@ This directory is both the **original specification set** (`agentswarm.md` … `
 ```
 agentswarm/
 ├── README.md                      ← you are here
-├── CHANGELOG.md                   ← chronological feature changelog (Phases 1–5, fixes, ADRs, PMs)
+├── CHANGELOG.md                   ← chronological feature changelog (Phases 1–6, fixes, ADRs, PMs)
 ├── agentswarm.md … agentswarm4.md ← ORIGINAL SPECS (source of truth for intent; do not edit)
 ├── glossary.md                    ← every term in one place
 ├── reincorporation.md             ← how to re-apply / port / cleanly remove the feature
@@ -44,8 +44,8 @@ agentswarm/
 │   ├── how-it-works.md            ← inner workings and *why this is possible*
 │   ├── data-model.md              ← tables, storage keys, state shapes
 │   └── configuration.md           ← every setting, env var, precedence
-├── adr/                           ← Architecture Decision Records (0001–0011)
-├── postmortems/                   ← blameless post-mortems (PM-001–PM-012)
+├── adr/                           ← Architecture Decision Records (0001–0012)
+├── postmortems/                   ← blameless post-mortems (PM-001–PM-014)
 ├── playbooks/                     ← step-by-step operational runbooks (PB-01–PB-08)
 └── implementation/
     ├── file-map.md                ← every file touched and what it owns
@@ -54,13 +54,13 @@ agentswarm/
 
 ## The feature in one paragraph
 
-A parent agent can (1) **suspend** itself and its whole child hierarchy at safe execution boundaries and later **resume** exactly where each stream left off (*Hierarchical Defer*); (2) subject a completed task to **one bounded, evidence-based adversarial review** that must end in a decision (*Critical Completion Review*); and (3) **classify** a task and spawn the right **specialist child agents** that run in dependency-ordered stages, hand context forward, fail over once on failure, and report a synthesized result (*The Legion*). All three persist through the existing SQLite buffer (`BufferedDbPool`) — no new queue, engine or mailbox.
+A parent agent can (1) **suspend** itself and its whole child hierarchy at safe execution boundaries and later **resume** exactly where each stream left off (*Hierarchical Defer*); (2) subject a completed task to **one bounded, evidence-based adversarial review** that must end in a decision (*Critical Completion Review*); and (3) **classify** a task and spawn the right **specialist child agents** that run in dependency-ordered stages, hand context forward, fail over once on failure, and report a synthesized result (*The Legion*). With [ADR-0012](adr/ADR-0012-automatic-legion-default.md), Legion runs automatically in act mode using an isolated specialist execution host and sandboxed tool adapters. All swarm state persists through the existing SQLite buffer (`BufferedDbPool`) — no new queue, engine or mailbox.
 
 ## Status of this documentation
 
-- Written against the working tree at the time of authoring. **The implementation was uncommitted** (`git status` showed modified + untracked files); check `git log` before assuming it is merged.
-- Verified at authoring time: type-check (root + `webview-ui`), Biome lint on touched files, 34 tests in `AgentSwarmAuxiliary.test.ts`, 14 in `Orchestrator.test.ts`, state-key tests (80 total backend assertions), and 7 webview component tests — all passing.
-- **Not verified:** behaviour inside a live VS Code extension host with real model runs. See [implementation/findings.md](implementation/findings.md#known-limits-and-open-questions).
+- Written against the active working tree. Check `git status` and `git log` before assuming it is merged.
+- Verified at authoring time: type-check (root + `webview-ui`), Biome lint on touched files (1,760 files checked with 0 errors), 104 backend unit tests passing (covering Auxiliary, Legion Host, Tool Adapter, Task Legion, and Guarded Streams), and 10 webview unit tests passing.
+- **Not verified:** behaviour inside a live VS Code extension host with real remote model network drops. See [implementation/findings.md](implementation/findings.md#known-limits-and-open-questions).
 
 ## Conventions
 

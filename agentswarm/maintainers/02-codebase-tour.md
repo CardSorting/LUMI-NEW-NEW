@@ -187,4 +187,28 @@ This document walks you through every file that makes up Agent Swarm & The Legio
   6. `src/core/task/ToolExecutor.ts`, `TaskConfig.ts`, `ToolConstants.ts` (`TASK_CONFIG_KEYS` — enforced by unit test so no key is ever dropped, [PM-005](../postmortems/PM-005-task-config-keys-drift.md))
   7. `webview-ui/src/components/settings/sections/FeatureSettingsSection.tsx` & `SettingsView.tsx` (Quick Filter bar, section jump pills, 1-click Workflow Presets `Off`/`Conservative`/`Balanced`/`Full Swarm`, progressive disclosure, and Legion roster & 5-stage pipeline visualization).
 
+---
+
+## 8. Specialist Execution Host & Sandboxed Adapter (`src/core/task/legion/`)
+
+**Purpose:** Autonomous specialist loop execution, tool sandboxing, command settlement tracking, and parent context integration.
+
+### Key Components & Invariants
+- **`LegionAgentHost.ts`:**
+  - Manages independent LLM client conversations for specialists.
+  - Implements budget capping (`maxTokens`, `maxCost`) and heuristic token estimation when usage chunks are omitted by providers or return 0 tokens.
+  - Defends UI streaming: wraps `onUsage` in `.catch()` error logging so webview transport disconnections do not fail the execution pipeline.
+- **`LegionToolAdapter.ts`:**
+  - Isolates tool state with `executionOwner = legion:<streamId>`.
+  - Maps parent permissions, approval callbacks, universal execution guards, and `.dietcodeignore` filters into the specialist context.
+  - Commands lifecycle tracking: captures command start, registers uncertainty, and resolves settlement via `getPendingWork` across composite `{ status, command?.status, action?.status }` returns ([PM-014](../postmortems/PM-014-composite-command-settlement-and-reservation-boundary.md)).
+  - Process group abort wiring: binds `parentSignal` directly into the composite `AbortSignal.any` signal array.
+- **`Task.ts` Integration Points:**
+  - `maybeRunAutomaticLegion`: Coordinates specialist pipeline before initiating the parent LLM loop.
+  - `shouldAcceptSteeringInterrupt`: Evaluates `this.activeLegionController`, ensuring incoming user steering immediately halts in-flight specialists ([PM-013](../postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md)).
+  - `withLegionContext`: Injects `<specialist_handoff>` evidence into a copy of the original user prompt matching `this.legionObjective`, avoiding drift across multi-turn follow-ups.
+  - `resumeTaskFromHistory`: Unconditionally sets `legionAttempted = true` and recovers persisted receipts.
+
+---
+
 Next: Read **[03 — Day-2 Operating & SQLite Inspection Handbook](03-operating-handbook.md)** to learn how to inspect a live database, grep logs, and diagnose production state in under 60 seconds.

@@ -11,7 +11,7 @@
 | `lumi.agentSwarm.hierarchicalDefer.enabled` | `agentSwarmHierarchicalDeferEnabled` | bool | `false` | |
 | `lumi.agentSwarm.hierarchicalDefer.defaultBoundary` | `agentSwarmDefaultDeferBoundary` | enum | `safe_boundary` | `before_turn` \| `safe_boundary` \| `immediate` |
 | `lumi.agentSwarm.autoDeferOnCompletionReview` | `agentSwarmAutoDeferOnCompletionReview` | bool | `true` | only acts if both Review and Defer are on |
-| `lumi.agentSwarm.legion.enabled` | `agentSwarmLegionEnabled` | bool | `false` | |
+| `lumi.agentSwarm.legion.enabled` | `agentSwarmLegionEnabled` | bool | `true` | automatic formation; explicit false opts out |
 | `lumi.agentSwarm.legion.strategy` | `agentSwarmLegionStrategy` | enum | `adaptive` | `adaptive` \| `tactical_strike` \| `balanced_squad` \| `full_legion` \| `verification_heavy` |
 | `lumi.agentSwarm.legion.maxSpecialists` | `agentSwarmLegionMaxSpecialists` | int | `4` | 1–8 |
 

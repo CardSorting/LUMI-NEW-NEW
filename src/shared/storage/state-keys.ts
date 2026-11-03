@@ -309,7 +309,7 @@ const USER_SETTINGS_FIELDS = {
 	agentSwarmAutoDeferOnCompletionReview: { default: true as boolean },
 	agentSwarmMaxInitialCompletionReviews: { default: 1 as number },
 	agentSwarmMaxCorrectiveVerificationPasses: { default: 1 as number },
-	agentSwarmLegionEnabled: { default: false as boolean },
+	agentSwarmLegionEnabled: { default: true as boolean },
 	agentSwarmLegionStrategy: {
 		default: "adaptive" as "adaptive" | "tactical_strike" | "balanced_squad" | "full_legion" | "verification_heavy",
 	},

@@ -28,7 +28,7 @@ grep -rn "DEBUG\|console.error" src/infrastructure/ai/ | grep -v __tests__
 - Launch the extension; open Settings → Preferences; apply each preset; reload; confirm persistence.
 - With a real task: enable Review; trigger `attempt_completion`; confirm `REMEDIATE`/`ESCALATE` block and `ACCEPT` pass through.
 - With Defer enabled and a parent with children: defer, observe `suspended`, resume.
-- Confirm defaults after a clean profile: everything off.
+- Confirm defaults after a clean profile: Legion on; Review and Defer off. Verify an explicit Legion opt-out persists.
 
 ## Gate
 All automated steps green **and** the manual smoke recorded in the PR.

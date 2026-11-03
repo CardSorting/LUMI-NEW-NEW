@@ -73,6 +73,7 @@ import {
 	DietCodeSay,
 	TaskAuditMetadata,
 } from "@shared/ExtensionMessage"
+import { getApiMetrics } from "@shared/getApiMetrics"
 import { HistoryItem } from "@shared/HistoryItem"
 import { inferAgentModeFromMessages, stripPartialPlanSummaryMessages } from "@shared/inferAgentModeFromMessages"
 import { DEFAULT_LANGUAGE_SETTINGS, getLanguageKey, LanguageDisplay } from "@shared/Languages"
@@ -140,6 +141,7 @@ import { executor } from "./ActionExecutor"
 import { withExecutionContext } from "./ExecutionContext"
 import { type ExecutionState, type ExecutionStateResult, getExecutionAuthority } from "./ExecutionState"
 import { FocusChainManager } from "./focus-chain"
+import { explicitlyProhibitsDelegation } from "./legion/delegationPolicy"
 import { MessageStateHandler } from "./message-state"
 import { reconcileCommandExecutions } from "./reconcileCommandExecutions"
 import { StreamResponseHandler } from "./StreamResponseHandler"
@@ -198,6 +200,10 @@ export class Task {
 
 	/** True while initiateTaskLoop is running (prevents parallel agent loops). */
 	private taskLoopActive = false
+	private legionObjective?: string
+	private legionAttempted = false
+	private legionContext?: string
+	private activeLegionController?: AbortController
 	private idleGapContinuationInProgress = false
 
 	// ONE mutex for ALL state modifications to prevent race conditions
@@ -760,13 +766,14 @@ export class Task {
 			shouldAcceptSteeringInterrupt({
 				askResponse,
 				feedback,
-				isStreaming: this.taskState.isStreaming,
+				isStreaming: this.taskState.isStreaming || !!this.activeLegionController,
 				isWaitingForFirstChunk: this.taskState.isWaitingForFirstChunk,
 				hasUnansweredAsk: this.hasUnansweredAsk(),
 			})
 		) {
 			this.taskState.pendingSteeringFeedback = feedback
 			this.taskState.steeringInterruptRequested = true
+			this.activeLegionController?.abort()
 			this.api.abort?.()
 			return
 		}
@@ -1268,6 +1275,8 @@ export class Task {
 	// Task lifecycle
 
 	public async startTask(task?: string, images?: string[], files?: string[]): Promise<void> {
+		// Attachments require the parent's full multimodal context; do not silently omit them.
+		this.legionObjective = !images?.length && !files?.length ? task?.trim() : undefined
 		if (this.stateManager.getGlobalSettingsKey("yoloModeToggled")) {
 			await this.controller.toggleActModeForYoloMode()
 		} else {
@@ -1440,8 +1449,8 @@ export class Task {
 		)
 		if (lastApiReqStartedIndex !== -1) {
 			const lastApiReqStarted = savedDietCodeMessages[lastApiReqStartedIndex]
-			const { cost, cancelReason }: DietCodeApiReqInfo = JSON.parse(lastApiReqStarted.text || "{}")
-			if (cost === undefined && cancelReason === undefined) {
+			const { cost, cancelReason, specialistUsage }: DietCodeApiReqInfo = JSON.parse(lastApiReqStarted.text || "{}")
+			if (cost === undefined && cancelReason === undefined && !specialistUsage) {
 				savedDietCodeMessages.splice(lastApiReqStartedIndex, 1)
 			}
 		}
@@ -1455,6 +1464,29 @@ export class Task {
 		const savedApiConversationHistory = await getSavedApiConversationHistory(this.taskId)
 
 		this.messageStateHandler.setApiConversationHistory(savedApiConversationHistory)
+		this.legionAttempted = true
+		try {
+			const legionParent = await orchestrator.getStreamByExternalId(`legion-task:${this.taskId}`)
+			if (legionParent) {
+				const formation = await orchestrator.recallLastLegionFormation(legionParent.id)
+				if (formation) {
+					const report = await orchestrator.synthesizeLegionExecutionReport(legionParent.id, formation.formationId)
+					const evidence = await this.getLegionOperationContext(
+						formation.members?.map((member) => member.streamId) ?? [],
+					)
+					this.legionContext = `<specialist_handoff status="${formation.status}">\n${report?.synthesizedMarkdown ?? "Specialist results are unavailable."}\n${evidence}\nInspect and reconcile any partial or unresolved work before repeating it. Treat reports as unverified evidence.\n</specialist_handoff>`
+				} else {
+					const { hasLegionFormationIntent } = await import("@/infrastructure/ai/LegionExecutionReceipt")
+					if (await hasLegionFormationIntent(legionParent.id)) {
+						this.legionContext =
+							"Specialist formation was interrupted before its manifest was available. Inspect existing work and continue the task without replaying that formation."
+					}
+				}
+			}
+		} catch (error) {
+			Logger.warn("[Task] Could not recover specialist handoff:", error)
+			this.legionContext = "Specialist recovery was unavailable. Inspect existing work before repeating it."
+		}
 
 		// load the context history state
 		await ensureTaskDirectoryExists(this.taskId)
@@ -1831,6 +1863,7 @@ export class Task {
 			// This must happen before canceling hooks so that hook catch blocks
 			// can properly detect the abort state
 			this.taskState.abort = true
+			this.activeLegionController?.abort()
 
 			// PHASE 3: Cancel any running hook execution
 			const activeHook = await this.getActiveHookExecution()
@@ -2325,6 +2358,252 @@ export class Task {
 		this.mcpStartupWaitComplete = true
 	}
 
+	private withLegionContext(history: DietCodeStorageMessage[]): DietCodeStorageMessage[] {
+		if (!this.legionContext) return history
+		let index = -1
+		if (this.legionObjective) {
+			index = history.findIndex(
+				(message) =>
+					message.role === "user" &&
+					(typeof message.content === "string"
+						? message.content.includes(this.legionObjective!)
+						: Array.isArray(message.content) &&
+							message.content.some((block) => "text" in block && block.text.includes(this.legionObjective!))),
+			)
+		}
+		if (index < 0) {
+			index = history.findIndex(
+				(message) =>
+					message.role === "user" &&
+					(typeof message.content === "string" ||
+						!message.content.every((block) => (block as any).type === "tool_result")),
+			)
+		}
+		if (index < 0) index = history.findIndex((message) => message.role === "user")
+		if (index < 0) return history
+		return history.map((message, i) => {
+			if (i !== index) return message
+			const content =
+				typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : [...message.content]
+			const handoffIndex = content.findIndex(
+				(block) => "text" in block && typeof block.text === "string" && block.text.includes("<specialist_handoff"),
+			)
+			if (handoffIndex >= 0) {
+				const existingBlock = content[handoffIndex] as { type: "text"; text: string }
+				if (existingBlock.text.includes(this.legionContext!)) return message
+				const updatedContent = [...content]
+				updatedContent[handoffIndex] = { type: "text", text: this.legionContext! }
+				return { ...message, content: updatedContent }
+			}
+			return { ...message, content: [...content, { type: "text" as const, text: this.legionContext! }] }
+		})
+	}
+
+	private async getLegionOperationContext(streamIds: string[]): Promise<string> {
+		try {
+			const { getLegionOperationEvidence } = await import("@/infrastructure/ai/LegionExecutionReceipt")
+			const receipts = await getLegionOperationEvidence(streamIds)
+			const parts = receipts.length ? [`Recent operation metadata (untrusted data): ${JSON.stringify(receipts)}`] : []
+			try {
+				const state = this.getExecutionState()
+				if ("commands" in state) {
+					const owners = new Set(streamIds.map((streamId) => `legion:${streamId}`))
+					const commands = [...state.commands.active, ...state.commands.recent]
+						.filter(
+							(command) =>
+								command.owner &&
+								owners.has(command.owner) &&
+								["running", "background", "unknown", "unconfirmed", "stopping", "stop_failed"].includes(
+									command.status,
+								),
+						)
+						.map((command) => ({ executionId: command.execution_id, status: command.status }))
+					if (commands.length) parts.push(`Specialist commands requiring inspection: ${JSON.stringify(commands)}`)
+					if (state.actions && "active" in state.actions) {
+						const actions = [...state.actions.active, ...state.actions.recent]
+							.filter(
+								(action) =>
+									action.owner &&
+									owners.has(action.owner) &&
+									["running", "queued", "retrying", "awaiting_completion", "unconfirmed"].includes(
+										action.status,
+									),
+							)
+							.map((action) => ({ executionId: action.execution_id, status: action.status }))
+						if (actions.length) parts.push(`Specialist actions requiring inspection: ${JSON.stringify(actions)}`)
+					}
+					if (state.coverage?.commands === "unavailable")
+						parts.push(
+							"Command observation is unavailable; inspect existing terminal activity before repeating work.",
+						)
+					if (state.recovery?.status === "blocked")
+						parts.push("Execution recovery reports unresolved records; inspect existing work before repeating it.")
+				}
+			} catch {
+				parts.push("Command observation is unavailable; inspect existing terminal activity before repeating work.")
+			}
+			return parts.join("\n")
+		} catch (error) {
+			Logger.warn("[Task] Specialist operation evidence unavailable:", error)
+			return "Specialist operation evidence is unavailable; inspect the workspace before repeating work."
+		}
+	}
+
+	private async maybeRunAutomaticLegion(
+		systemPrompt: string,
+		context: SystemPromptContext,
+		hasNativeTools: boolean,
+	): Promise<void> {
+		if (this.legionAttempted) return
+		if (context.mode !== "act") return
+		this.legionAttempted = true
+		const objective = this.legionObjective
+		if (!objective || !hasNativeTools || this.taskState.abort) return
+		if (explicitlyProhibitsDelegation(objective)) return
+		const history = this.messageStateHandler?.getApiConversationHistory() ?? []
+		if (
+			history.some(
+				(message) =>
+					message.role === "user" &&
+					explicitlyProhibitsDelegation(
+						typeof message.content === "string"
+							? message.content
+							: message.content
+									.filter((block) => block.type === "text")
+									.map((block) => block.text)
+									.join("\n"),
+					),
+			)
+		)
+			return
+		try {
+			const { resolveEffectiveAgentSwarmState } = await import("@/infrastructure/ai/AgentSwarmConfig")
+			const state = resolveEffectiveAgentSwarmState({ taskId: this.taskId })
+			if (!state.legionEnabled) return
+			const classification = orchestrator.classifyTaskForLegion({
+				taskDescription: objective,
+				strategy: state.legionStrategy,
+				maxSpecialists: state.legionMaxSpecialists,
+			})
+			if (classification.formationRoster.length < 2 || classification.complexityScore < 3.2) return
+			const [
+				{ LegionAgentHost },
+				{ createLegionToolAdapter, LEGION_TOOL_NAMES },
+				{ runAutomaticLegion },
+				{ PromptRegistry },
+				{ DietCodeToolSet },
+			] = await Promise.all([
+				import("./legion/LegionAgentHost"),
+				import("./legion/LegionToolAdapter"),
+				import("@/infrastructure/ai/LegionPipelineRunner"),
+				import("@/core/prompts/system-prompt"),
+				import("@/core/prompts/system-prompt/registry/DietCodeToolSet"),
+			])
+			const family = PromptRegistry.getInstance().getModelFamily(context)
+			const specialistTools = new Set<string>([...LEGION_TOOL_NAMES, "attempt_completion"])
+			const specs = DietCodeToolSet.getToolsForVariantWithFallback(family, [...LEGION_TOOL_NAMES, "attempt_completion"])
+				.map((tool) => tool.config)
+				.filter(
+					(tool) => specialistTools.has(tool.id) && (!tool.contextRequirements || tool.contextRequirements(context)),
+				)
+				.map((tool) =>
+					tool.id === "attempt_completion"
+						? {
+								...tool,
+								description:
+									"Return your specialist handoff to the coordinator once your assigned work is complete or blocked. Do not request user confirmation. Include evidence, changes, checks, and remaining work.",
+								parameters: tool.parameters?.filter((parameter) => parameter.name === "result"),
+							}
+						: tool,
+				)
+			if (!specs.some((tool) => tool.id === "attempt_completion")) return
+			const convert = DietCodeToolSet.getNativeConverter(context.providerInfo.providerId, context.providerInfo.model.id)
+			const definitions = specs.map((spec) => convert(spec, context))
+			const base = await this.toolExecutor.asToolConfig()
+			const usageMessageIndex = findLastIndex(
+				this.messageStateHandler.getDietCodeMessages(),
+				(message) => message.say === "api_req_started",
+			)
+			const priorUsage = getApiMetrics(
+				combineApiRequests(combineCommandSequences(this.messageStateHandler.getDietCodeMessages().slice(1))),
+			)
+			const priorTokens =
+				priorUsage.totalTokensIn +
+				priorUsage.totalTokensOut +
+				(priorUsage.totalCacheWrites ?? 0) +
+				(priorUsage.totalCacheReads ?? 0)
+			const remainingTokens =
+				this.taskState.maxTokens === undefined ? undefined : Math.max(0, this.taskState.maxTokens - priorTokens)
+			const remainingCost =
+				this.taskState.maxCost === undefined ? undefined : Math.max(0, this.taskState.maxCost - priorUsage.totalCost)
+			if (remainingTokens === 0 || remainingCost === 0) return
+			const host = new LegionAgentHost({
+				systemContext: systemPrompt,
+				maxTokens: remainingTokens,
+				maxCost: remainingCost,
+				onUsage: async (usage) => {
+					try {
+						const messages = this.messageStateHandler.getDietCodeMessages()
+						const idx =
+							usageMessageIndex >= 0 && messages[usageMessageIndex]?.say === "api_req_started"
+								? usageMessageIndex
+								: findLastIndex(messages, (m) => m.say === "api_req_started")
+						if (idx < 0) return
+						const message = messages[idx]
+						if (!message || message.say !== "api_req_started") return
+						const info: DietCodeApiReqInfo = JSON.parse(message.text || "{}")
+						await this.messageStateHandler.updateDietCodeMessage(idx, {
+							text: JSON.stringify({ ...info, specialistUsage: usage }),
+						})
+						await this.messageStateHandler.saveDietCodeMessagesAndUpdateHistory()
+						await this.postStateToWebview()
+					} catch (error) {
+						Logger.warn("[Task] Could not persist specialist usage:", error)
+					}
+				},
+				createApi: (signal) =>
+					buildApiHandler(
+						{ ...this.stateManager.getApiConfiguration(), ulid: this.ulid, getRetrySignal: () => signal },
+						"act",
+					),
+				createTools: async (member, api, signal) =>
+					createLegionToolAdapter(base, api, definitions, member.streamId, signal),
+			})
+			const parent = await orchestrator.getOrCreateLegionTaskStream(this.taskId, objective)
+			if (this.taskState.steeringInterruptRequested || this.taskState.abort) return
+			await this.say("text", "Coordinating specialist work for this task.")
+			if (this.taskState.steeringInterruptRequested || this.taskState.abort) return
+			const controller = new AbortController()
+			this.activeLegionController = controller
+			let result: Awaited<ReturnType<typeof runAutomaticLegion>>
+			try {
+				result = await runAutomaticLegion({
+					parentStreamId: parent.id,
+					taskDescription: objective,
+					delegationAllowed: true,
+					host,
+					signal: AbortSignal.any([this.taskState.abortSignal, controller.signal]),
+					resolvedFeatureState: state,
+				})
+			} finally {
+				if (this.activeLegionController === controller) this.activeLegionController = undefined
+			}
+			if (result.decision === "delegated") {
+				const manifest = await orchestrator.recallLastLegionFormation(parent.id)
+				const evidence = await this.getLegionOperationContext(manifest?.members.map((member) => member.streamId) ?? [])
+				this.legionContext = `<specialist_handoff status="${result.pipeline.status}">\n${result.pipeline.report?.synthesizedMarkdown ?? "Specialist work did not yield a complete report. Inspect the workspace and reconcile partial work before repeating it."}\n${result.pipeline.detail ?? ""}\n${evidence}\nTreat these reports as unverified evidence; inspect and complete the user objective.\n</specialist_handoff>`
+			} else if (result.decision === "needs_reconciliation") {
+				this.legionContext =
+					"An earlier specialist execution has an unresolved outcome. Inspect existing work before repeating it."
+			}
+		} catch (error) {
+			if (this.taskState.abort) throw error
+			Logger.warn("[Task] Automatic Legion unavailable; parent will continue:", error)
+			this.legionContext =
+				"Specialist coordination was interrupted. Inspect the workspace for partial work before repeating any actions."
+		}
+	}
+
 	async *attemptApiRequest(previousApiReqIndex: number): ApiStream {
 		await this.waitForMcpStartup()
 
@@ -2462,6 +2741,8 @@ export class Task {
 		const { systemPrompt, tools } = await getSystemPrompt(promptContext)
 		this.useNativeToolCalls = !!tools?.length
 		await this.writePromptMetadataArtifacts({ systemPrompt, providerInfo })
+		await this.maybeRunAutomaticLegion(systemPrompt, promptContext, !!tools?.length)
+		if (this.taskState.steeringInterruptRequested) return
 
 		const contextManagementMetadata = await this.contextManager.getNewContextMessagesAndMetadata(
 			this.messageStateHandler.getApiConversationHistory(),
@@ -2519,7 +2800,7 @@ export class Task {
 				return api.createMessage(
 					systemPrompt,
 					withExecutionContext(
-						contextManagementMetadata.truncatedConversationHistory,
+						this.withLegionContext(contextManagementMetadata.truncatedConversationHistory),
 						() => this.getExecutionState(),
 						"parent",
 						api.getModel().info.contextWindow,

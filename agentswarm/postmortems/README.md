@@ -16,6 +16,8 @@ Blameless. Each lists reproduction, root cause, fix, why it escaped, and the pre
 | [PM-010](PM-010-interrupted-worker-partial-work.md) | Interrupted worker left partial, regressed and unwired work; status was mis-reported | Medium (process) |
 | [PM-011](PM-011-completion-state-stranded-in-shadow-overlay.md) | Completion state and reservation releases were stranded in a shadow overlay | High |
 | [PM-012](PM-012-post-resume-reconcile-and-delete-upsert-ordering.md) | Post-resume barrier reconciliation re-suspended a resumed parent; same-batch reservation `delete` sorted before `upsert` | High |
+| [PM-013](PM-013-dead-code-steering-interrupt-and-specialist-drift.md) | Dead-code steering interrupt during active Legion execution; specialist handoff drift across multi-turn user messages | High |
+| [PM-014](PM-014-composite-command-settlement-and-reservation-boundary.md) | Composite command settlement failure in `LegionToolAdapter`; false multi-root reservation collisions | Medium |
 
 ## Cross-cutting themes
 1. **Permissive mocks hide real defects** (PM-001/002/003/008/011/012). Always add a real-store test.

@@ -115,12 +115,14 @@ describe("provider stream lifecycle", () => {
 						release = resolve
 					}),
 			}
-			@withRetry({ baseDelay: 1 })
 			async *createMessage() {
 				if (++this.calls === 1) throw new RetriableError("busy")
 				yield "new request succeeded"
 			}
 		}
+		const descriptor = Object.getOwnPropertyDescriptor(Provider.prototype, "createMessage")!
+		withRetry({ baseDelay: 1 })(Provider.prototype, "createMessage", descriptor)
+		Object.defineProperty(Provider.prototype, "createMessage", descriptor)
 		const provider = new Provider()
 		const create = () =>
 			guardedStream(

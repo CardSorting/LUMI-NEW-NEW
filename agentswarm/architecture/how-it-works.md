@@ -139,10 +139,23 @@ flowchart LR
 - `settleSpecialistStream` (called automatically from `completeStream`/`failStream`) = reconcile → bounded failover (only if Legion is enabled for the parent) → synthesize a report when the formation finishes or is stuck. All manifest read-modify-write cycles run under a **per-formation lock**; terminal member states are final (idempotent).
 - Synthesis writes `last_legion_synthesis_report` (completed deliverables, failover log, unresolved failures, outstanding streams) and updates the roadmap's completed/blockers/next-actions.
 
+### 5.4 Specialist Agent Host & Sandboxed Execution (`LegionAgentHost`, `LegionToolAdapter`, `Task.ts`)
+
+With [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), Legion executes automatically during act-mode tasks when native tool support is active:
+
+1. **Eligibility & Delegation Policy (`delegationPolicy.ts`):** Evaluates whether the user prohibited delegation (`explicitlyProhibitsDelegation`), whether plan mode is active, or if multimodal attachments are present. If permitted, `Task.ts` dispatches `maybeRunAutomaticLegion`.
+2. **Autonomous Tool Loop (`LegionAgentHost.ts`):** Dispatches specialist members through isolated API client conversations without polluting the parent transcript. Tracks `maxTokens` and `maxCost`, and aggregates incremental usage updates to the webview UI via `postStateToWebview()`. Heuristic token estimators step in if providers omit usage metadata.
+3. **Sandboxed Tool Adapter (`LegionToolAdapter.ts`):**
+   - Each specialist operates under an isolated `TaskState` with `executionOwner = legion:<streamId>`.
+   - Approval callbacks, user permissions, and universal execution guards are inherited from the parent.
+   - Command lifecycle tracking: captures spawned processes, settles completed terminal states across `{ status, command?.status, action?.status }`, and handles command abortion cleanly via `AbortSignal.any`.
+   - File edit revisions are bubbled up to parent task state (`base.taskState.workspaceRevision += revisions`) so parent environment refreshes reflect all specialist file edits.
+4. **Context Handoff Injection (`withLegionContext`):** When specialist pipelines complete, an evidence-rich `<specialist_handoff status="...">` block is injected into a copy of the root user objective turn in `apiConversationHistory`, allowing the parent task to review and build upon specialist findings without losing track of user follow-up turns.
+5. **Steering Cancellation (`shouldAcceptSteeringInterrupt`):** Evaluates `this.activeLegionController` so that user chat messages during in-flight specialist runs abort the specialist pipeline immediately.
+
 ## 6. What this design deliberately does *not* do
 
-- It does not execute specialist tasks. It creates streams/tasks and keeps the books; a host runner must execute them and call `completeStream`/`failStream`.
-- It does not interrupt a running tool to "look" suspended.
-- It does not share transcripts or inboxes between agents.
-- It does not make an LLM call to classify (determinism > cleverness here).
+- It does not interrupt running child tools mid-operation to pretend to be suspended (all defer/cancellation points are cooperative or cleanly cancelled via process group signals).
+- It does not share transcripts or conversational memory directly between agents (context is passed via structured summaries and receipts).
+- It does not make an LLM call to classify tasks (deterministic scoring ensures instant and predictable roster selection).
 

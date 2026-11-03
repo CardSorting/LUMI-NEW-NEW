@@ -337,8 +337,8 @@ export function getDatabaseHealth(): DatabaseHealth {
 
 export async function getDb(): Promise<Kysely<Schema>> {
 	await _lifecyclePromise
-	if (_db) return _db
 	if (_dbPromise) return _dbPromise
+	if (_db) return _db
 
 	_dbPromise = (async () => {
 		try {
@@ -407,6 +407,7 @@ export async function getDb(): Promise<Kysely<Schema>> {
 			const execute = (q: string) => newDb.executeQuery(CompiledQuery.raw(q))
 
 			// Performance Tweaks (WAL Mode)
+			await execute("PRAGMA busy_timeout = 5000;")
 			await execute("PRAGMA journal_mode = WAL;")
 			await execute("PRAGMA synchronous = NORMAL;")
 			await execute("PRAGMA foreign_keys = ON;")
@@ -805,9 +806,15 @@ export async function getDb(): Promise<Kysely<Schema>> {
 }
 
 export async function getRawDb(): Promise<Database.Database> {
-	if (_rawDb) return _rawDb
 	await getDb()
 	return _rawDb!
+}
+
+/** Used for claims whose safety depends on surviving process termination. */
+export async function getPersistentDb(): Promise<Kysely<Schema>> {
+	const db = await getDb()
+	if ((await getRawDb()).memory) throw new Error("Persistent SQLite storage is unavailable")
+	return db
 }
 
 export async function destroyDb(): Promise<void> {

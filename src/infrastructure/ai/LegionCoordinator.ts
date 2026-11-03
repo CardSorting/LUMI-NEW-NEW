@@ -7,6 +7,7 @@ import * as path from "path"
 import { v4 as uuidv4 } from "uuid"
 import { Logger } from "@/shared/services/Logger"
 import { dbPool } from "../db/BufferedDbPool"
+import { getPersistentDb } from "../db/Config"
 import {
 	type CanonicalLegionSpecialistRole,
 	type EffectiveAgentSwarmFeatureState,
@@ -19,6 +20,47 @@ import { hierarchicalDeferCoordinator } from "./HierarchicalDeferCoordinator"
 
 export type { CanonicalLegionSpecialistRole, LegionFormationStrategy, LegionSpecialistRole }
 export { normalizeLegionSpecialistRole }
+
+/**
+ * Normalizes file paths for reservation keys across multi-root workspaces, Windows backslashes,
+ * and inline workspace hints (e.g. `@workspace:path`).
+ */
+export function normalizeReservationPath(
+	file: string,
+	cwd: string = process.cwd(),
+	workspaceRoots?: Array<{ name?: string; path: string }>,
+): string {
+	if (!file || !file.trim()) return ""
+	let clean = file.trim()
+	const match = clean.match(/^@([^:/]+)[:/](.*)$/)
+	if (match) {
+		const hint = match[1]
+		const subpath = match[2]
+		if (workspaceRoots?.length) {
+			const matchingRoot = workspaceRoots.find((r) => {
+				const rName = r.name?.toLowerCase()
+				const h = hint.toLowerCase()
+				if (rName === h) return true
+				const rPath = r.path.replace(/\\/g, "/").toLowerCase()
+				return rPath.endsWith(`/${h}`) || path.basename(rPath) === h
+			})
+			if (matchingRoot) {
+				clean = path.resolve(matchingRoot.path, subpath)
+			} else {
+				clean = subpath
+			}
+		} else {
+			clean = subpath
+		}
+	}
+	clean = clean.replace(/\\/g, "/")
+	const resolved = path.isAbsolute(clean) ? path.normalize(clean) : path.resolve(cwd, clean)
+	let posix = resolved.replace(/\\/g, "/")
+	if (posix.length > 1 && posix.endsWith("/")) {
+		posix = posix.slice(0, -1)
+	}
+	return process.platform === "win32" ? posix.toLowerCase() : posix
+}
 
 export type SubagentCategoryType = "worker" | "verifier" | "researcher"
 export type LegionExecutionStageName = "leadAndRecon" | "parallelExecution" | "verificationAndHardening"
@@ -117,6 +159,8 @@ export interface LegionStageProgressionStatus {
 	}
 	readyToExecuteMembers: SpawnedLegionMember[]
 	leadAndReconHandOffContext: string[]
+	/** Completed work from prior stages, for the next eligible specialist. */
+	priorStageHandoffContext: string[]
 	allStagesCompleted: boolean
 	hasFailures: boolean
 }
@@ -945,9 +989,13 @@ export class LegionCoordinator {
 		taskDescription: string,
 		assignedFiles: string[],
 	): string {
-		const trimmedTask = taskDescription.trim().slice(0, 280)
+		const trimmedTask = taskDescription.trim()
 		const scopeClause = assignedFiles.length > 0 ? ` Focus Files: ${assignedFiles.join(", ")}.` : ""
-		return `[${descriptor.codename} · ${descriptor.title}] Execute ${descriptor.role} responsibilities for: ${trimmedTask}.${scopeClause}`
+		return (
+			`[${descriptor.codename} · ${descriptor.title}] Your specialty: ${descriptor.capabilities.join("; ")}. ` +
+			`Apply this specialty to the following parent objective; coordinate through your handoff and avoid unrelated changes. ` +
+			`Parent objective: ${trimmedTask}.${scopeClause} Report concrete evidence, changed paths, checks, and remaining work.`
+		)
 	}
 
 	/**
@@ -1026,7 +1074,9 @@ export class LegionCoordinator {
 			} else {
 				const anyRunning = pendingOrRunning.some((m) => m.status === "running")
 				status = anyRunning || completedStreamIds.length > 0 ? "in_progress" : "ready"
-				readyStreamIds = pendingOrRunning.map((m) => m.streamId)
+				// Running and deferred members already have an owner. Exposing them as
+				// dispatchable can launch the same assignment twice on a scheduler tick.
+				readyStreamIds = pendingOrRunning.filter((m) => !m.status || m.status === "pending").map((m) => m.streamId)
 			}
 
 			stageStatuses[stage] = {
@@ -1056,6 +1106,12 @@ export class LegionCoordinator {
 		const leadAndReconHandOffContext = membersByStage.leadAndRecon
 			.filter((m) => m.status === "completed" && m.resultSummary)
 			.map((m) => `[${m.assignment.codename} (${m.assignment.role})]: ${m.resultSummary}`)
+		const activeStageIndex = stageNames.indexOf(currentActiveStage as LegionExecutionStageName)
+		const priorStageHandoffContext = stageNames
+			.slice(0, activeStageIndex < 0 ? stageNames.length : activeStageIndex)
+			.flatMap((stage) => membersByStage[stage])
+			.filter((m) => m.status === "completed" && m.resultSummary)
+			.map((m) => `[${m.assignment.codename} (${m.assignment.role})]: ${m.resultSummary}`)
 
 		const allStagesCompleted = manifest.members.length > 0 && manifest.members.every((m) => isTerminalResolved(m))
 		const hasFailures = manifest.members.some((m) => isFailedUnrerouted(m))
@@ -1066,6 +1122,7 @@ export class LegionCoordinator {
 			stages: stageStatuses,
 			readyToExecuteMembers,
 			leadAndReconHandOffContext,
+			priorStageHandoffContext,
 			allStagesCompleted,
 			hasFailures,
 		}
@@ -1198,7 +1255,8 @@ export class LegionCoordinator {
 			let reservationWarning: string | undefined
 			if (shouldReserve && assignment.assignedFiles.length > 0) {
 				for (const file of assignment.assignedFiles) {
-					const normalizedPath = path.resolve(file)
+					const normalizedPath = normalizeReservationPath(file)
+					if (!normalizedPath) continue
 					// Check ALL holders (not just the first row) and only count reservations owned by currently-active streams.
 					const existingReservations = await dbPool.selectWhere("agent_memory", {
 						column: "key",
@@ -1211,7 +1269,8 @@ export class LegionCoordinator {
 							activeStreamIds.has(String(res.streamId)),
 					)
 					if (existingRes) {
-						reservationWarning = `File '${path.basename(file)}' already reserved by active stream ${String(existingRes.streamId).slice(0, 8)}`
+						const warn = `File '${path.basename(file)}' already reserved by active stream ${String(existingRes.streamId).slice(0, 8)}`
+						reservationWarning = reservationWarning ? `${reservationWarning}; ${warn}` : warn
 					} else {
 						await this.storeRecord(childStreamId, `file_res:${normalizedPath}`, String(now))
 						reservedFiles.push(file)
@@ -1292,6 +1351,89 @@ export class LegionCoordinator {
 			manifest,
 			classification,
 		}
+	}
+
+	/**
+	 * Claim a ready slot under the same lock used for lifecycle transitions.
+	 * This protects competing dispatchers in this extension process; it is not a
+	 * durable cross-process lease and does not prove the host execution started.
+	 */
+	public async claimReadySpecialist(streamId: string): Promise<boolean> {
+		const profile = await this.getSpecialistProfileForStream(streamId)
+		if (!profile) return false
+		return this.withFormationLock(profile.formationId, async () => {
+			const manifest = await this.recallRecord<LegionFormationManifest>(
+				profile.parentStreamId,
+				`legion_formation:${profile.formationId}`,
+			)
+			if (
+				!manifest ||
+				!this.evaluateStageProgression(manifest).readyToExecuteMembers.some((m) => m.streamId === streamId)
+			) {
+				return false
+			}
+			const updated = await this.reconcileSpecialistStreamLifecycleUnlocked(streamId, { status: "running" })
+			return (
+				updated?.updatedManifest.members.some((member) => member.streamId === streamId && member.status === "running") ??
+				false
+			)
+		})
+	}
+
+	/** Read the persisted manifest directly; buffered overlays are not a durability guarantee. */
+	public async isClaimDurable(parentStreamId: string, formationId: string, streamId: string): Promise<boolean> {
+		await dbPool.flush()
+		const db = await getPersistentDb()
+		const row = await db
+			.selectFrom("agent_memory")
+			.select("value")
+			.where("streamId", "=", parentStreamId)
+			.where("key", "=", `legion_formation:${formationId}`)
+			.executeTakeFirst()
+		if (!row?.value) return false
+		try {
+			const manifest = JSON.parse(row.value) as LegionFormationManifest
+			return manifest.members.some((member) => member.streamId === streamId && member.status === "running")
+		} catch {
+			return false
+		}
+	}
+
+	/** A permanent per-attempt dispatch token, acquired atomically across processes. */
+	public async acquireDispatchToken(streamId: string): Promise<boolean> {
+		await dbPool.flush()
+		const db = await getPersistentDb()
+		const result = await db
+			.insertInto("agent_memory")
+			.values({ streamId, key: "legion_dispatch_token", value: uuidv4(), updatedAt: Date.now() })
+			.onConflict((conflict) => conflict.columns(["streamId", "key"]).doNothing())
+			.executeTakeFirst()
+		return result.numInsertedOrUpdatedRows === 1n
+	}
+
+	/** One durable driver per formation; abandoned ownership requires reconciliation. */
+	public async acquireFormationDispatchToken(parentStreamId: string, formationId: string): Promise<boolean> {
+		await dbPool.flush()
+		const db = await getPersistentDb()
+		const result = await db
+			.insertInto("agent_memory")
+			.values({ streamId: parentStreamId, key: `legion_driver:${formationId}`, value: uuidv4(), updatedAt: Date.now() })
+			.onConflict((conflict) => conflict.columns(["streamId", "key"]).doNothing())
+			.executeTakeFirst()
+		return result.numInsertedOrUpdatedRows === 1n
+	}
+
+	/** Prevent concurrent processes from forming the same objective twice. */
+	public async acquireAutomaticFormationToken(parentStreamId: string, objective: string): Promise<boolean> {
+		await dbPool.flush()
+		const db = await getPersistentDb()
+		const digest = createHash("sha256").update(objective).digest("hex")
+		const result = await db
+			.insertInto("agent_memory")
+			.values({ streamId: parentStreamId, key: `legion_auto_formation:${digest}`, value: uuidv4(), updatedAt: Date.now() })
+			.onConflict((conflict) => conflict.columns(["streamId", "key"]).doNothing())
+			.executeTakeFirst()
+		return result.numInsertedOrUpdatedRows === 1n
 	}
 
 	/**
@@ -1665,11 +1807,32 @@ export class LegionCoordinator {
 			layer: "infrastructure",
 		})
 
+		const allStreams = await dbPool.selectAllFrom("agent_streams")
+		const activeStreamIds = new Set(
+			allStreams.filter((s: { status: string }) => s.status === "active").map((s: { id: string }) => s.id),
+		)
 		const reservedFiles: string[] = []
+		let reservationWarning: string | undefined
 		for (const file of replacementAssignment.assignedFiles) {
-			const normalizedPath = path.resolve(file)
-			await this.storeRecord(replacementStreamId, `file_res:${normalizedPath}`, String(now))
-			reservedFiles.push(file)
+			const normalizedPath = normalizeReservationPath(file)
+			if (!normalizedPath) continue
+			const existingReservations = await dbPool.selectWhere("agent_memory", {
+				column: "key",
+				value: `file_res:${normalizedPath}`,
+			})
+			const existingRes = existingReservations.find(
+				(res: { streamId: string }) =>
+					res.streamId !== replacementStreamId &&
+					res.streamId !== parentStreamId &&
+					activeStreamIds.has(String(res.streamId)),
+			)
+			if (existingRes) {
+				const warn = `File '${path.basename(file)}' already reserved by active stream ${String(existingRes.streamId).slice(0, 8)}`
+				reservationWarning = reservationWarning ? `${reservationWarning}; ${warn}` : warn
+			} else {
+				await this.storeRecord(replacementStreamId, `file_res:${normalizedPath}`, String(now))
+				reservedFiles.push(file)
+			}
 		}
 
 		const replacementMember: SpawnedLegionMember = {
@@ -1677,6 +1840,7 @@ export class LegionCoordinator {
 			streamId: replacementStreamId,
 			taskId: replacementTaskId,
 			reservedFiles,
+			reservationWarning,
 			status: "pending",
 			stage,
 			attempt: nextAttempt,
@@ -1751,6 +1915,7 @@ export class LegionCoordinator {
 	public async settleSpecialistStream(
 		streamId: string,
 		outcome: { status: "completed" | "failed"; summary?: string; failureReason?: string },
+		options?: { skipFailover?: boolean },
 	): Promise<{
 		manifest: LegionFormationManifest
 		newlyUnblockedMembers: SpawnedLegionMember[]
@@ -1766,7 +1931,7 @@ export class LegionCoordinator {
 		let manifest = reconciled.updatedManifest
 		let failover: { rerouted: boolean; replacementMember?: SpawnedLegionMember; reason?: string } | undefined
 
-		if (outcome.status === "failed") {
+		if (outcome.status === "failed" && !options?.skipFailover) {
 			const state = resolveEffectiveAgentSwarmState({ streamId: profile.parentStreamId })
 			if (state.legionEnabled) {
 				try {

@@ -1,6 +1,10 @@
+import type { ApiHandler } from "@core/api"
 import { expect } from "chai"
+import { LegionAgentHost } from "@/core/task/legion/LegionAgentHost"
+import { createLegionToolAdapter } from "@/core/task/legion/LegionToolAdapter"
 import { TaskState } from "@/core/task/TaskState"
 import { evaluateOptionalCriticalCompletionReview, runCompletionGateFlow } from "@/core/task/tools/completionGatePipeline"
+import { ToolExecutorCoordinator } from "@/core/task/tools/ToolExecutorCoordinator"
 import type { TaskConfig } from "@/core/task/tools/types/TaskConfig"
 import { dbPool } from "../../db/BufferedDbPool"
 import {
@@ -13,6 +17,8 @@ import {
 } from "../AgentSwarmConfig"
 import { CriticalCompletionReviewService } from "../CriticalCompletionReview"
 import { HierarchicalDeferCoordinator } from "../HierarchicalDeferCoordinator"
+import { legionCoordinator } from "../LegionCoordinator"
+import { runAutomaticLegion, runLegionPipeline } from "../LegionPipelineRunner"
 import { AgentOrchestrator } from "../Orchestrator"
 
 describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hierarchical Defer)", () => {
@@ -38,8 +44,20 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 	}
 
 	let originalDbMethods: Record<string, any> = {}
+	let originalIsClaimDurable: typeof legionCoordinator.isClaimDurable
+	let originalAcquireDispatchToken: typeof legionCoordinator.acquireDispatchToken
+	let originalAcquireFormationDispatchToken: typeof legionCoordinator.acquireFormationDispatchToken
+	let originalAcquireAutomaticFormationToken: typeof legionCoordinator.acquireAutomaticFormationToken
 
 	beforeEach(() => {
+		originalIsClaimDurable = legionCoordinator.isClaimDurable
+		originalAcquireDispatchToken = legionCoordinator.acquireDispatchToken
+		originalAcquireFormationDispatchToken = legionCoordinator.acquireFormationDispatchToken
+		originalAcquireAutomaticFormationToken = legionCoordinator.acquireAutomaticFormationToken
+		legionCoordinator.isClaimDurable = async () => true
+		legionCoordinator.acquireDispatchToken = async () => true
+		legionCoordinator.acquireFormationDispatchToken = async () => true
+		legionCoordinator.acquireAutomaticFormationToken = async () => true
 		streamsTable = new Map()
 		tasksTable = new Map()
 		memoryTable = new Map()
@@ -55,9 +73,11 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			selectAllFrom: target.selectAllFrom,
 			push: target.push,
 			pushBatch: target.pushBatch,
+			flush: target.flush,
 		}
 
 		target.beginWork = async () => {}
+		target.flush = async () => {}
 		target.commitWork = async () => {}
 		target.rollbackWork = async () => {}
 
@@ -112,6 +132,10 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 	})
 
 	afterEach(() => {
+		legionCoordinator.isClaimDurable = originalIsClaimDurable
+		legionCoordinator.acquireDispatchToken = originalAcquireDispatchToken
+		legionCoordinator.acquireFormationDispatchToken = originalAcquireFormationDispatchToken
+		legionCoordinator.acquireAutomaticFormationToken = originalAcquireAutomaticFormationToken
 		setAgentSwarmConfigOverride(null)
 		const target = dbPool as any
 		for (const [k, fn] of Object.entries(originalDbMethods)) {
@@ -120,15 +144,16 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 	})
 
 	describe("1. Auxiliary Feature Toggle & Precedence", () => {
-		it("is disabled by default and does not alter normal completion or defer flows", async () => {
+		it("enables Legion by default without enabling review or defer", async () => {
 			const cfg = getAgentSwarmConfig()
 			expect(cfg.enabled).to.equal(false)
 			expect(cfg.criticalCompletionReviewEnabled).to.equal(false)
 			expect(cfg.hierarchicalDeferEnabled).to.equal(false)
+			expect(cfg.legionEnabled).to.equal(true)
 
 			const effective = orchestrator.isAuxiliaryFeatureEnabled({ streamId: "stream-1", taskId: "task-1" })
-			expect(effective.enabled).to.equal(false)
-			expect(effective.resolvedFrom).to.equal("default")
+			expect(effective.enabled).to.equal(true)
+			expect(effective.legionEnabled).to.equal(true)
 
 			const root = await orchestrator.createStream("Normal Root Stream")
 			const deferRes = await orchestrator.deferAgent(root.id)
@@ -181,6 +206,13 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			expect(manualState.enabled).to.equal(true)
 			expect(manualState.criticalCompletionReviewEnabled).to.equal(true)
 			expect(manualState.resolvedFrom).to.equal("manual_invocation")
+		})
+
+		it("respects an explicit Legion opt-out with the master switch off", () => {
+			setAgentSwarmConfigOverride({ enabled: false, legionEnabled: false })
+			expect(resolveEffectiveAgentSwarmState().legionEnabled).to.equal(false)
+			setAgentSwarmTaskOverride("task-opt-in", { legionEnabled: true })
+			expect(resolveEffectiveAgentSwarmState({ taskId: "task-opt-in" }).legionEnabled).to.equal(true)
 		})
 	})
 
@@ -1196,7 +1228,8 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 		it("forms and spawns a Legion hierarchy when enabled, reserves non-overlapping files, and updates the parent RollingRoadmapSnapshot", async () => {
 			const parentStream = await orchestrator.createStream("Parent Coordinator: Feature Delivery")
 
-			// 1. When Legion is disabled (default), formLegion classifies without spawning child streams
+			// 1. An explicit opt-out classifies without spawning child streams.
+			toggleAgentSwarmFeature(false)
 			const disabledRes = await orchestrator.formLegion(parentStream.id, {
 				taskDescription: "Implement settings UI and unit tests",
 				targetFiles: [
@@ -1323,6 +1356,64 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			const spawnedRoles = remedialRes.manifest?.members.map((a) => a.assignment.role) ?? []
 			expect(spawnedRoles).to.include("legion_data_steward")
 			expect(spawnedRoles).to.include("legion_verifier")
+		})
+
+		it("normalizes reservation paths across multi-root hints, backslashes, and accumulates reservation warnings", async () => {
+			const { normalizeReservationPath } = await import("../LegionCoordinator")
+			const norm1 = normalizeReservationPath("@frontend:src/components/App.tsx")
+			const norm2 = normalizeReservationPath("src/components/App.tsx")
+			expect(norm1).to.equal(norm2)
+
+			// Verify collision detection with accumulated warnings across multiple already-reserved files
+			const parentStream = await orchestrator.createStream("Parent: Multi-File Reservation Collision")
+			toggleAgentSwarmFeature(true, { legionEnabled: true })
+			const otherStream = await orchestrator.createStream("Prior active stream")
+			const path1 = normalizeReservationPath("src/a.ts")
+			const path2 = normalizeReservationPath("src/b.ts")
+			await dbPool.push({
+				type: "insert",
+				table: "agent_memory",
+				values: { streamId: otherStream.id, key: `file_res:${path1}`, value: String(Date.now()), updatedAt: Date.now() },
+				layer: "domain",
+			})
+			await dbPool.push({
+				type: "insert",
+				table: "agent_memory",
+				values: { streamId: otherStream.id, key: `file_res:${path2}`, value: String(Date.now()), updatedAt: Date.now() },
+				layer: "domain",
+			})
+
+			const formed = await orchestrator.formLegion(parentStream.id, {
+				taskDescription: "Fix bugs in src/a.ts and src/b.ts and src/c.ts",
+				targetFiles: ["src/a.ts", "src/b.ts", "src/c.ts"],
+			})
+			// Multi-root roots resolution
+			const multiRoot = normalizeReservationPath("@frontend:src/components/App.tsx", process.cwd(), [
+				{ name: "frontend", path: "/projects/frontend" },
+			])
+			expect(multiRoot).to.include("/projects/frontend/src/components/App.tsx")
+			// Empty path check
+			expect(normalizeReservationPath("")).to.equal("")
+			expect(normalizeReservationPath("   ")).to.equal("")
+			// Trailing slash normalization check
+			expect(normalizeReservationPath("/workspace/project/")).to.equal(normalizeReservationPath("/workspace/project"))
+			// Suffix boundary check: hint "frontend" must not match folder "myfrontend"
+			const nonMatching = normalizeReservationPath("@frontend:src/index.ts", "/default/cwd", [
+				{ name: "sub", path: "/projects/myfrontend" },
+			])
+			expect(nonMatching).to.not.include("/projects/myfrontend")
+
+			// Verify failStream automatically triggers reroute and replacement accumulates reservation warning
+			const failedMember = formed.manifest!.members[0]
+			await orchestrator.failStream(failedMember.streamId, "Reroute test failure")
+			const manifest = (await orchestrator.recallLastLegionFormation(parentStream.id))!
+			const original = manifest.members.find((m) => m.streamId === failedMember.streamId)!
+			expect(original.status).to.equal("rerouted")
+			const replacement = manifest.members.find((m) => m.streamId === original.reroutedToStreamId)!
+			expect(replacement).to.not.equal(undefined)
+			if (replacement.reservationWarning) {
+				expect(replacement.reservationWarning).to.include("already reserved by active stream")
+			}
 		})
 
 		it("synchronizes Legion proto fields in updateSettings and updateTaskSettings with strategy validation and 1..8 specialist clamping", async () => {
@@ -1465,6 +1556,294 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			expect(roadmap.nextActions[0]).to.include("synthesize")
 		})
 
+		it("does not offer running or deferred specialists for dispatch again", async () => {
+			const parent = await orchestrator.createStream("Parent: dispatch ownership")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			const member = manifest.members.find((m) => m.streamId === lead.streamId)!
+			member.status = "running"
+			let progress = legionCoordinator.evaluateStageProgression(manifest)
+			expect(progress.stages.leadAndRecon.status).to.equal("in_progress")
+			expect(progress.readyToExecuteMembers).to.have.length(0)
+			member.status = "deferred"
+			progress = legionCoordinator.evaluateStageProgression(manifest)
+			expect(progress.readyToExecuteMembers).to.have.length(0)
+			expect(progress.stages.parallelExecution.status).to.equal("blocked_by_prior_stage")
+		})
+
+		it("retains constraints beyond the first 280 characters in specialist assignments", async () => {
+			const parent = await orchestrator.createStream("Parent: assignment context")
+			const taskDescription = `${"Investigate the implementation and its dependencies. ".repeat(8)}Constraint: preserve existing user data.`
+			const { manifest } = await formPipelineLegion(parent.id, { taskDescription })
+			for (const member of manifest.members) {
+				expect(member.assignment.focusObjective).to.include("Constraint: preserve existing user data.")
+				expect(member.assignment.focusObjective).to.include("Your specialty:")
+				const tasks = await orchestrator.getStreamTasks(member.streamId)
+				expect(tasks[0].description).to.include("Constraint: preserve existing user data.")
+			}
+		})
+
+		it("drives eligible specialists in stage order through a host and passes lead findings forward", async () => {
+			const parent = await orchestrator.createStream("Parent: host execution")
+			const { manifest, lead, worker, verifier } = await formPipelineLegion(parent.id)
+			const seen: string[] = []
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async (member, context) => {
+						seen.push(member.streamId)
+						if (member.streamId === worker.streamId) expect(context.handoff.join(" ")).to.include("lead findings")
+						if (member.streamId === verifier.streamId) expect(context.handoff.join(" ")).to.include("worker findings")
+						return {
+							status: "completed",
+							summary: member.streamId === lead.streamId ? "lead findings" : "worker findings",
+						}
+					},
+				},
+				new AbortController().signal,
+			)
+			expect(seen).to.deep.equal([lead.streamId, worker.streamId, verifier.streamId])
+			expect(result.status).to.equal("completed")
+			expect(result.report?.completedMembers).to.have.length(3)
+		})
+
+		it("does not replay an unresolved running specialist", async () => {
+			const parent = await orchestrator.createStream("Parent: recovery")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			await legionCoordinator.reconcileSpecialistStreamLifecycle(lead.streamId, { status: "running" })
+			let calls = 0
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						calls++
+						return { status: "completed", summary: "done" }
+					},
+				},
+				new AbortController().signal,
+			)
+			expect(result.status).to.equal("needs_reconciliation")
+			expect(calls).to.equal(0)
+		})
+
+		it("atomically claims only eligible pending members within the formation", async () => {
+			const parent = await orchestrator.createStream("Parent: claim")
+			const { lead, worker } = await formPipelineLegion(parent.id)
+			expect(await legionCoordinator.claimReadySpecialist(worker.streamId)).to.equal(false)
+			const claims = await Promise.all([
+				legionCoordinator.claimReadySpecialist(lead.streamId),
+				legionCoordinator.claimReadySpecialist(lead.streamId),
+			])
+			expect(claims.filter(Boolean)).to.have.length(1)
+			expect((await orchestrator.getLegionStageProgression(parent.id))!.readyToExecuteMembers).to.have.length(0)
+		})
+
+		it("automatically forms and operates a team only when a permitted host is available", async () => {
+			const parent = await orchestrator.createStream("Parent: automatic formation")
+			const taskDescription =
+				"Design the proto contract, implement handler wiring, harden concurrency, and verify with tests"
+			let calls = 0
+			const host = {
+				execute: async () => {
+					calls++
+					return { status: "completed" as const, summary: "Specialist finished" }
+				},
+			}
+			const base = { parentStreamId: parent.id, taskDescription, host, signal: new AbortController().signal }
+			expect((await runAutomaticLegion({ ...base, delegationAllowed: false })).decision).to.equal("local")
+			expect(await orchestrator.recallLastLegionFormation(parent.id)).to.equal(null)
+			const result = await runAutomaticLegion({ ...base, delegationAllowed: true })
+			expect(result.decision).to.equal("delegated")
+			if (result.decision === "delegated") expect(result.pipeline.status).to.equal("completed")
+			expect(calls).to.be.greaterThan(1)
+			expect((await runAutomaticLegion({ ...base, delegationAllowed: true })).decision).to.equal("local")
+		})
+
+		it("forms a team and runs isolated provider conversations through the tool adapter", async () => {
+			const parent = await orchestrator.createStream("Parent: integrated execution")
+			const base = {
+				cwd: process.cwd(),
+				taskState: new TaskState(),
+				callbacks: {},
+				services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			} as unknown as TaskConfig
+			const original = ToolExecutorCoordinator.prototype.execute
+			let executed = 0
+			ToolExecutorCoordinator.prototype.execute = async () => {
+				executed++
+				return "observed file"
+			}
+			try {
+				const host = new LegionAgentHost({
+					createApi: () => {
+						let turn = 0
+						return {
+							createMessage: () => {
+								const current = turn++
+								return (async function* () {
+									yield {
+										type: "tool_calls",
+										tool_call: {
+											function:
+												current === 0
+													? { id: "read", name: "read_file", arguments: '{"path":"a.ts"}' }
+													: {
+															id: "done",
+															name: "attempt_completion",
+															arguments: '{"result":"Observed file"}',
+														},
+										},
+									}
+								})()
+							},
+						} as unknown as ApiHandler
+					},
+					createTools: async (_member, api) => createLegionToolAdapter(base, api, []),
+				})
+				const result = await runAutomaticLegion({
+					parentStreamId: parent.id,
+					taskDescription: "Design proto contract, implement handler and harden concurrency, then verify tests",
+					delegationAllowed: true,
+					host,
+					signal: new AbortController().signal,
+				})
+				expect(result.decision).to.equal("delegated")
+				if (result.decision === "delegated") expect(result.pipeline.status).to.equal("completed")
+				expect(executed).to.be.greaterThan(1)
+			} finally {
+				ToolExecutorCoordinator.prototype.execute = original
+			}
+		})
+
+		it("coalesces concurrent pipeline calls and never starts a second host execution", async () => {
+			const parent = await orchestrator.createStream("Parent: concurrent schedulers")
+			const { manifest } = await formPipelineLegion(parent.id)
+			let release!: () => void
+			const gate = new Promise<void>((resolve) => {
+				release = resolve
+			})
+			let calls = 0
+			const controller = new AbortController()
+			const host = {
+				execute: async () => {
+					calls++
+					await gate
+					return { status: "completed" as const, summary: "done" }
+				},
+			}
+			const first = runLegionPipeline(parent.id, manifest.formationId, host, controller.signal)
+			const second = runLegionPipeline(parent.id, manifest.formationId, host, controller.signal)
+			expect(second).to.equal(first)
+			// Cancel after the in-flight host call settles; no later stage should start.
+			while (calls === 0) await new Promise((resolve) => setImmediate(resolve))
+			controller.abort()
+			release()
+			expect((await first).status).to.equal("cancelled")
+			expect(calls).to.equal(1)
+		})
+
+		it("does not create a replacement when a host stops due to cancellation", async () => {
+			const parent = await orchestrator.createStream("Parent: cancellation")
+			const { manifest } = await formPipelineLegion(parent.id)
+			const controller = new AbortController()
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						controller.abort()
+						return { status: "failed", reason: "cancelled" }
+					},
+				},
+				controller.signal,
+			)
+			expect(result.status).to.equal("cancelled")
+			const after = (await orchestrator.recallLastLegionFormation(parent.id))!
+			expect(after.members).to.have.length(manifest.members.length)
+			expect(after.members.filter((member) => member.status === "failed")).to.have.length(1)
+		})
+
+		it("does not automatically replay a failed execution whose side effects are unknown", async () => {
+			const parent = await orchestrator.createStream("Parent: uncertain effects")
+			const { manifest } = await formPipelineLegion(parent.id)
+			let calls = 0
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						calls++
+						return { status: "failed", reason: "connection lost after a write" }
+					},
+				},
+				new AbortController().signal,
+			)
+			expect(result.status).to.equal("failed")
+			expect(calls).to.equal(1)
+			expect((await orchestrator.recallLastLegionFormation(parent.id))!.members).to.have.length(manifest.members.length)
+		})
+
+		it("leaves a specialist running when a command outcome is unresolved", async () => {
+			const parent = await orchestrator.createStream("Parent: active command")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => ({ status: "unresolved", reason: "command-1 is still active" }),
+				},
+				new AbortController().signal,
+			)
+			expect(result.status).to.equal("needs_reconciliation")
+			expect(result.detail).to.include("command-1")
+			expect(
+				(await orchestrator.recallLastLegionFormation(parent.id))!.members.find(
+					(member) => member.streamId === lead.streamId,
+				)?.status,
+			).to.equal("running")
+		})
+
+		it("does not launch a specialist when its claim is not durable", async () => {
+			const parent = await orchestrator.createStream("Parent: durability failure")
+			const { manifest } = await formPipelineLegion(parent.id)
+			legionCoordinator.isClaimDurable = async () => false
+			let calls = 0
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						calls++
+						return { status: "completed", summary: "done" }
+					},
+				},
+				new AbortController().signal,
+			)
+			expect(result.status).to.equal("needs_reconciliation")
+			expect(calls).to.equal(0)
+		})
+
+		it("does not start a second driver for an owned formation", async () => {
+			const parent = await orchestrator.createStream("Parent: owned formation")
+			const { manifest } = await formPipelineLegion(parent.id)
+			legionCoordinator.acquireFormationDispatchToken = async () => false
+			let calls = 0
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						calls++
+						return { status: "completed", summary: "done" }
+					},
+				},
+				new AbortController().signal,
+			)
+			expect(result.status).to.equal("needs_reconciliation")
+			expect(calls).to.equal(0)
+		})
+
 		it("is idempotent: repeated terminal events never duplicate roadmap or manifest entries", async () => {
 			const parent = await orchestrator.createStream("Parent: idempotency")
 			const { lead } = await formPipelineLegion(parent.id)
@@ -1543,6 +1922,7 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 
 		it("skips automatic failover when Legion is disabled for the parent, leaving an explicit recoverable failure", async () => {
 			setAgentSwarmConfigOverride(null)
+			toggleAgentSwarmFeature(false)
 			const parent = await orchestrator.createStream("Parent: manual-only legion")
 			const res = await orchestrator.formLegion(parent.id, {
 				taskDescription: "Implement handler wiring",
@@ -1572,6 +1952,10 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 		})
 
 		it("flushes a full Legion lifecycle (form, stage hand-off, failover, synthesis) to real SQLite without FK errors", async () => {
+			legionCoordinator.isClaimDurable = originalIsClaimDurable
+			legionCoordinator.acquireDispatchToken = originalAcquireDispatchToken
+			legionCoordinator.acquireFormationDispatchToken = originalAcquireFormationDispatchToken
+			legionCoordinator.acquireAutomaticFormationToken = originalAcquireAutomaticFormationToken
 			const target = dbPool as any
 			for (const [k, fn] of Object.entries(originalDbMethods)) {
 				target[k] = fn
@@ -1586,8 +1970,90 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 
 			try {
 				const parent = await orchestrator.createStream("Real SQLite Legion Parent")
-				const { lead, worker } = await formPipelineLegion(parent.id)
 				await dbPool.flush()
+				const { execFile } = await import("node:child_process")
+				const { promisify } = await import("node:util")
+				const workerPath = path.join(process.cwd(), "src/infrastructure/ai/__tests__/fixtures/legion-claim-worker.cjs")
+				const runWorker = () =>
+					promisify(execFile)(
+						process.execPath,
+						[
+							"-r",
+							"ts-node/register",
+							"-r",
+							"tsconfig-paths/register",
+							"-r",
+							"./src/test/requires.cjs",
+							workerPath,
+							tempDbFile,
+						],
+						{ env: { ...process.env, TS_NODE_PROJECT: "./tsconfig.unit-test.json" }, timeout: 20_000 },
+					)
+				const results = await Promise.all([runWorker(), runWorker()])
+				const claims = results.map(({ stdout }) => {
+					const line = stdout.split("\n").find((entry) => entry.startsWith("LEGION_RESULT:"))
+					if (!line) throw new Error(`Missing worker result: ${stdout}`)
+					return JSON.parse(line.slice("LEGION_RESULT:".length)) as {
+						root: string
+						claimed: boolean
+						driver: boolean
+						dispatch: boolean
+					}
+				})
+				expect(claims[0].root).to.equal(claims[1].root)
+				expect(claims.filter((claim) => claim.claimed)).to.have.length(1)
+				expect(claims.filter((claim) => claim.driver)).to.have.length(1)
+				expect(claims.filter((claim) => claim.dispatch)).to.have.length(1)
+				const roots = await Promise.all([
+					orchestrator.getOrCreateLegionTaskStream("same-task", "objective"),
+					orchestrator.getOrCreateLegionTaskStream("same-task", "objective"),
+				])
+				expect(roots[0].id).to.equal(roots[1].id)
+				const formations = await Promise.all([
+					legionCoordinator.acquireAutomaticFormationToken(roots[0].id, "objective"),
+					legionCoordinator.acquireAutomaticFormationToken(roots[1].id, "objective"),
+				])
+				expect(formations.filter(Boolean)).to.have.length(1)
+				const { hasLegionFormationIntent } = await import("../LegionExecutionReceipt")
+				expect(await hasLegionFormationIntent(roots[0].id)).to.equal(true)
+				const { manifest: formed, lead, worker } = await formPipelineLegion(parent.id)
+				await dbPool.flush()
+				const { beginLegionOperation, finishLegionOperation, getLegionOperationEvidence } = await import(
+					"../LegionExecutionReceipt"
+				)
+				const receipt = await beginLegionOperation(lead.streamId, "call-1", "write_to_file", {
+					path: "src/a.ts",
+					content: "sensitive content",
+				})
+				expect((await getLegionOperationEvidence([lead.streamId]))[0].status).to.equal("started")
+				let duplicateRejected = false
+				try {
+					await beginLegionOperation(lead.streamId, "call-1", "write_to_file", {})
+				} catch {
+					duplicateRejected = true
+				}
+				expect(duplicateRejected).to.equal(true)
+				await finishLegionOperation(lead.streamId, "call-1", receipt, "returned")
+				await beginLegionOperation(lead.streamId, "call-2", "apply_patch", {
+					input: "*** Update File: src/b.ts\nsecret patch contents",
+				})
+				const evidence = await getLegionOperationEvidence([lead.streamId])
+				expect(evidence.map((entry) => entry.status)).to.have.members(["started", "returned"])
+				expect(JSON.stringify(evidence)).to.include("src/b.ts").and.not.include("secret patch contents")
+				const owners = await Promise.all([
+					legionCoordinator.acquireFormationDispatchToken(parent.id, formed.formationId),
+					legionCoordinator.acquireFormationDispatchToken(parent.id, formed.formationId),
+				])
+				expect(owners.filter(Boolean)).to.have.length(1)
+				expect(await legionCoordinator.claimReadySpecialist(lead.streamId)).to.equal(true)
+				await dbPool.flush()
+				expect(await legionCoordinator.isClaimDurable(parent.id, formed.formationId, lead.streamId)).to.equal(true)
+				const tokens = await Promise.all([
+					legionCoordinator.acquireDispatchToken(lead.streamId),
+					legionCoordinator.acquireDispatchToken(lead.streamId),
+				])
+				expect(tokens.filter(Boolean)).to.have.length(1)
+				expect(await legionCoordinator.acquireDispatchToken(lead.streamId)).to.equal(false)
 
 				await orchestrator.completeStream(lead.streamId, "Contract ready")
 				await dbPool.flush()
@@ -1598,6 +2064,15 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				const manifest = (await orchestrator.recallLastLegionFormation(parent.id))!
 				expect(manifest.members.some((m) => m.status === "rerouted")).to.equal(true)
 				await dbPool.flush()
+				setDbPath(":memory:")
+				const { getPersistentDb } = await import("../../db/Config")
+				let failure = ""
+				try {
+					await getPersistentDb()
+				} catch (error) {
+					failure = String(error)
+				}
+				expect(failure).to.include("Persistent SQLite storage is unavailable")
 			} finally {
 				await dbPool.stop()
 				try {

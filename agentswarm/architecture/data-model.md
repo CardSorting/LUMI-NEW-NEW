@@ -27,6 +27,10 @@ All Agent Swarm state is stored in three existing tables via `BufferedDbPool`. *
 | `legion_stage_handoff_context` | specialist stream | `{fromStage, handoffSummary, receivedAt}` | Legion |
 | `last_legion_formation` / `legion_formation:<formationId>` | **parent** stream | `LegionFormationManifest` | Legion |
 | `last_legion_synthesis_report` | parent stream | `LegionSynthesisReport` | Legion |
+| `legion_op_receipt:<callId>` | specialist stream | `LegionOperationReceipt` (`callId`, `toolName`, `inputHash`, `startedAt`) | LegionToolAdapter |
+| `legion_op_outcome:<callId>` | specialist stream | `{receipt, outcome: "returned" \| "uncertain", settledAt}` | LegionToolAdapter |
+| `legion_dispatch_token:<formationId>:<memberStreamId>` | parent stream | `{formationId, streamId, acquiredAt}` | LegionCoordinator |
+| `legion_formation_intent:<parentStreamId>` | parent stream | `{parentStreamId, intendedAt}` | LegionExecutionReceipt |
 | `file_res:<absolutePath>` | stream | epoch ms string | Orchestrator / Legion |
 | `stream_summary` / `failure_reason` | stream | **raw text** (not JSON-encoded) | `completeStream` / `failStream` |
 
@@ -66,7 +70,8 @@ interface LegionFormationManifest {
 2. Rows other streams must read ⇒ `push(op)` **without** an agent id.
 3. **Never write with agent id `x` after `commitWork(x)`** — the write can never commit (PM-011).
 4. Flush order is enforced by `TABLE_FK_ORDER` in `BufferedDbPool.flush()` (`agent_streams` → `agent_tasks` → `agent_memory`).
-4. In-memory `selectWhere` for upserts matches on `conflictTarget` columns when `where` is absent (prevents duplicate buffered rows).
+5. In-memory `selectWhere` for upserts matches on `conflictTarget` columns when `where` is absent (prevents duplicate buffered rows).
+6. **Flush before direct persistent SQLite queries**: Any query bypassing `dbPool` via `getPersistentDb()` to inspect foreign keys or durable manifests must call `await dbPool.flush()` first.
 
 See [ADR-0003](../adr/ADR-0003-durable-state-in-agent-memory.md), [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md), [PB-06](../playbooks/PB-06-triage-sqlite-flush-errors.md).
 
