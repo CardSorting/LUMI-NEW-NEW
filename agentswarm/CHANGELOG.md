@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 | Phase / Milestone | Date | Focus | Key Post-Mortems / ADRs | Test Count (`AgentSwarmAuxiliary.test.ts` + Legion) |
 |---|---|---|---|---|
+| **[Phase 10 — Multi-Tier Terminal File Read Defense, Specialist Token Budget Starvation Resolution & Full Conductor-Specialist Prompt Parity](#phase-10--multi-tier-terminal-file-read-defense-specialist-token-budget-starvation-resolution--full-conductor-specialist-prompt-parity-2026-11-04)** | 2026-11-04 | Terminal file read policy engine (`terminalFileReadPolicy.ts`), universal pre-execution interception and UI ask suppression (`ExecuteCommandToolHandler.ts`, `UniversalGuard.ts`, `FluidPolicyEngine.ts`, `ToolValidator.ts`), terminal process circuit-breaker (`VscodeTerminalProcess.ts`), token budget starvation resolution in `LegionAgentHost.ts` (`usedTokens` unconstrained unless explicit `maxTokens`), File Reading rules in `LEGION_CORE_RULES`, conductor prompt parity (`rules.ts`, `editing_files.ts`, `execute_command.ts`), and skill tool `read_file` guidance (`UseSkillToolHandler.ts`) | [ADR-0016](adr/ADR-0016-terminal-file-read-defense-budget-starvation-and-conductor-prompt-parity.md), [PM-017](postmortems/PM-017-terminal-file-dump-specialist-starvation-and-conductor-fallback.md) | **315 passing** (all 315 unit tests across Agent Swarm, Legion Host, Tool Handlers, Terminal, and Policy; 0 TypeScript errors, 0 Biome lint errors) |
 | **[Phase 9 — Multi-Tier Terminal Heredoc Defense, Specialist Prompt Parity & Shell Integration Circuit-Breaking](#phase-9--multi-tier-terminal-heredoc-defense-specialist-prompt-parity--shell-integration-circuit-breaking-2026-11-04)** | 2026-11-04 | Specialist prompt parity via `LEGION_CORE_RULES` (`LegionAgentHost.ts`), shell token-aware parser `findTopLevelHeredocs` and file redirection detector `detectHeredocFileRedirection` (`heredocPolicy.ts`), pre-execution interception and UI approval prompt suppression (`ExecuteCommandToolHandler.ts`, `UniversalGuard.ts`, `FluidPolicyEngine.ts`, `ToolValidator.ts`), multiline shell integration circuit breaker in `VscodeTerminalProcess.ts`, and microtask deferral in `VscodeTerminalManager.ts` | [ADR-0015](adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md) | **291 passing** (all 291 unit tests across Agent Swarm, Legion Host, Tool Handlers, Terminal, and Policy; 0 TypeScript errors, 0 Biome lint errors) |
 | **[Phase 8 — Tool Argument Stream Deduplication, Self-Healing Parser & Transport Circuit-Breaking](#phase-8--tool-argument-stream-deduplication-self-healing-parser--transport-circuit-breaking-2026-11-04)** | 2026-11-04 | Tool call argument offset tracking and snapshot slicing (`openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`), interleaved tool call name tracking, `extractJsonRoots` state-machine parser in `StreamResponseHandler.ts`, self-healing across identical duplicate JSON roots (including nested objects and string literals with braces), typed `ToolArgumentError` diagnostics, and transport error circuit-breaking in `LegionAgentHost.ts` (`safeToRetry: false`) | [ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md) | **190 passing** (49 auxiliary + 54 legion host/tool + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys + 15 codex streaming + 15 stream response handler); 50 passing in streaming & host suite |
 | **[Phase 7 — Orchestrator Conductor Tool, Progress Streaming & Hardened Gating](#phase-7--orchestrator-conductor-tool-progress-streaming--hardened-gating-2026-11-03)** | 2026-11-03 | Conductor tool `engage_swarm`, auto-approval (`autoApprove.ts`), streaming progress cards (`formatLegionProgressMessage`), prompt conductor injection (`joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`), relaxed gating heuristics (tactical strikes, test projects), conversation history fallback, file attachment preservation, fallback `attempt_completion`, token/cost budget enforcement, categorized `safeToRetry` failover | [ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | **158 passing** (49 auxiliary + 52 legion + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys) |
@@ -27,6 +28,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased / Active Working Tree]
 
 > **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–9 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/integrations/terminal/`, `src/core/task/`, `src/hosts/vscode/terminal/`, and `agentswarm/`). Verify `git log` when cutting a tagged release.
+
+## Phase 10 — Multi-Tier Terminal File Read Defense, Specialist Token Budget Starvation Resolution & Full Conductor-Specialist Prompt Parity (2026-11-04)
+
+### Added
+- **Terminal File Read Policy Engine (`src/integrations/terminal/terminalFileReadPolicy.ts`, [ADR-0016](adr/ADR-0016-terminal-file-read-defense-budget-starvation-and-conductor-prompt-parity.md)):**
+  - `splitTopLevelStatements(command: string)`: Tokenizes compound shell commands separated by `;`, `\n`, `&&`, and `||` while respecting quoted strings and subshells.
+  - `detectTerminalFileRead(command: string)`: Identifies commands reading files to terminal stdout (`cat`, `head`, `tail`, `more`, `less`). Differentiates unpiped/unredirected file dumps from safe pipe processing (`cat file | grep`) and output redirection (`cat a b > c`).
+  - Whitelists safe OS/kernel environment probes (`/proc/*`, `/sys/*`, `/etc/os-release`, etc.) and non-blocking streaming (`tail -f`).
+  - Detects interactive stdin traps (e.g. `cat > file` with no heredoc or arguments).
+  - Returns structured `{ isTerminalFileRead, targetFiles, reason }` directing agents to `read_file` or `list_files`.
+  - Exported `detectTerminalFileRead` and `isTerminalFileReadCommand` from `commandPolicy.ts` and `index.ts`.
+- **Pre-Execution Interception & UI Approval Suppression:**
+  - `ExecuteCommandToolHandler.ts`: Suppresses UI approval asks in `handlePartialBlock` during streaming, and intercepts terminal file reads in `execute()` before approval or execution, logging `command_permission_denied` and returning tool failure directing the agent to `read_file`.
+  - `UniversalGuard.ts` & `FluidPolicyEngine.ts`: Injected `detectTerminalFileRead` into `guardPreExecution` and `validatePreExecution`.
+  - `ToolValidator.ts`: Added pre-dispatch command validation against terminal file reading.
+- **Terminal Process Circuit-Breaker (`VscodeTerminalProcess.ts`, `VscodeTerminalManager.ts`):**
+  - Circuit-breaks terminal file read commands unconditionally before shell execution, rejecting them without falling back to managed terminal to prevent dumping hundreds of lines of code into the user's terminal.
+  - Added `isTerminalFileReadCommand` fast-path dispatch in `VscodeTerminalManager.runCommand` alongside `isMultilineHeredocCommand`.
+- **Specialist Token Budget Starvation Resolution (`LegionAgentHost.ts`, [PM-017](postmortems/PM-017-terminal-file-dump-specialist-starvation-and-conductor-fallback.md)):**
+  - Fixed `budgetExceeded` in `LegionAgentHost.ts` to only enforce token limits when `this.options.maxTokens !== undefined`: `(this.options.maxTokens !== undefined && this.usedTokens >= this.options.maxTokens)`.
+  - Removed arbitrary 100,000 cumulative token ceiling that starved multi-turn specialist teams after 5–6 turns.
+- **Conductor-Specialist Prompt Parity & Skill Guidance:**
+  - `LegionAgentHost.ts`: Added File Reading & Inspection Rules to `LEGION_CORE_RULES`.
+  - `rules.ts`: Mandated `read_file`/`list_files` and `write_to_file`/`replace_in_file`, strictly prohibiting terminal `cat`/`head`/`tail` dumps and heredoc file writing.
+  - `editing_files.ts`: Injected explicit prohibition against terminal heredocs and terminal file reading.
+  - `execute_command.ts`: Updated tool specs across `GENERIC`, `NATIVE_GPT_5`, `NATIVE_NEXT_GEN`, and `GEMINI_3` warning against terminal file reads and heredoc file writes.
+  - `UseSkillToolHandler.ts`: Directed agents to access skill reference files using `read_file`.
+- **Comprehensive Unit Testing:**
+  - `src/integrations/terminal/__tests__/terminalFileReadPolicy.test.ts`: 19 tests covering compound statements, runlog.md commands, whitelist filters, pipe distinctions, and stdin traps.
+  - `src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts`: Added tests for standalone and compound terminal file read interception, and UI ask suppression.
+  - `src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts`: Added tests for refusing terminal file reads unconditionally.
+  - `src/core/task/legion/__tests__/LegionAgentHost.test.ts`: Verified updated `LEGION_CORE_RULES` injection and multi-turn execution.
 
 ---
 

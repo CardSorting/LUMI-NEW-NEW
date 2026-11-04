@@ -20,6 +20,7 @@ Blameless. Each lists reproduction, root cause, fix, why it escaped, and the pre
 | [PM-014](PM-014-composite-command-settlement-and-reservation-boundary.md) | Composite command settlement failure in `LegionToolAdapter`; false multi-root reservation collisions | Medium |
 | [PM-015](PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md) | Tool argument snapshot concatenation caused JSON parse errors and futile specialist failover loops | High |
 | [PM-016](PM-016-terminal-heredoc-deadlock-and-prompt-parity.md) | Terminal heredoc shell integration deadlock and specialist prompt parity drift | High |
+| [PM-017](PM-017-terminal-file-dump-specialist-starvation-and-conductor-fallback.md) | Terminal file dump, specialist token budget starvation & conductor fallback drift | High |
 
 ## Cross-cutting themes
 1. **Permissive mocks hide real defects** (PM-001/002/003/008/011/012). Always add a real-store test.
@@ -29,3 +30,4 @@ Blameless. Each lists reproduction, root cause, fix, why it escaped, and the pre
 5. **Process** (PM-010) — verify claims; audit after interruptions.
 6. **Streaming transport hygiene & circuit breaking** (PM-015) — model streaming providers yield heterogeneous delta/snapshot contracts; parsers must self-heal duplicate roots, and transport decoding errors must never trigger futile specialist failover loops.
 7. **Terminal safety, prompt parity & shell circuit-breaking** (PM-016) — models instructed to write files via terminal heredocs deadlock non-interactive shell integration and bypass file tracking; defense requires prompt parity, pre-execution interception, and terminal process circuit-breakers.
+8. **Token budget ceilings & conductor fallback parity** (PM-017) — hardcoded token limits starve multi-turn specialists due to cumulative context accumulation, while prompt asymmetry allows fallback conductors to dump file reads directly into the user terminal; universal policy enforcement and prompt parity are required across conductor and specialist layers.

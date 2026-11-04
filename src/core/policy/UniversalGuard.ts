@@ -2,7 +2,7 @@
  * [LAYER: CORE]
  */
 
-import { detectHeredocFileRedirection } from "@integrations/terminal/commandPolicy"
+import { detectHeredocFileRedirection, detectTerminalFileRead } from "@integrations/terminal/commandPolicy"
 import { DietCodeDefaultTool } from "@shared/tools"
 import { PlanModeEnforcer } from "@/core/policy/PlanModeEnforcer"
 import { ToolUse } from "../assistant-message"
@@ -71,6 +71,13 @@ export class UniversalGuard {
 				return {
 					success: false,
 					error: heredocCheck.reason,
+				}
+			}
+			const fileReadCheck = detectTerminalFileRead(rawCmd)
+			if (fileReadCheck.isTerminalFileRead) {
+				return {
+					success: false,
+					error: fileReadCheck.reason,
 				}
 			}
 		}

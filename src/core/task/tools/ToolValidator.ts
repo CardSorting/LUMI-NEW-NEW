@@ -1,6 +1,6 @@
 import { ToolParamName, ToolUse } from "@core/assistant-message"
 import { DietCodeIgnoreController } from "@core/ignore/DietCodeIgnoreController"
-import { detectHeredocFileRedirection } from "@integrations/terminal/commandPolicy"
+import { detectHeredocFileRedirection, detectTerminalFileRead } from "@integrations/terminal/commandPolicy"
 import { DietCodeDefaultTool } from "@shared/tools"
 import { UniversalGuard } from "../../policy/UniversalGuard"
 
@@ -83,6 +83,15 @@ export class ToolValidator {
 				error:
 					heredocCheck.reason ??
 					"Multiline heredoc file creation is prohibited in execute_command. Use the write_to_file tool instead.",
+			}
+		}
+		const fileReadCheck = detectTerminalFileRead(command)
+		if (fileReadCheck.isTerminalFileRead) {
+			return {
+				ok: false,
+				error:
+					fileReadCheck.reason ??
+					"Reading files via shell commands in execute_command is prohibited. Use the read_file tool instead.",
 			}
 		}
 		return { ok: true }

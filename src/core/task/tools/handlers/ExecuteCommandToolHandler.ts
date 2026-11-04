@@ -2,7 +2,11 @@ import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import { WorkspacePathAdapter } from "@core/workspace/WorkspacePathAdapter"
 import { showSystemNotification } from "@integrations/notifications"
-import { detectHeredocFileRedirection, resolveCommandTimeoutSeconds } from "@integrations/terminal/commandPolicy"
+import {
+	detectHeredocFileRedirection,
+	detectTerminalFileRead,
+	resolveCommandTimeoutSeconds,
+} from "@integrations/terminal/commandPolicy"
 import { normalizeShellCommand } from "@integrations/terminal/normalizeCommand"
 import type { CommandExecutionResult } from "@integrations/terminal/types"
 import {
@@ -40,11 +44,13 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 	async handlePartialBlock(block: ToolUse, uiHelpers: StronglyTypedUIHelpers): Promise<void> {
 		const command = block.params.command === undefined ? undefined : normalizeShellCommand(block.params.command)
 
-		// Check if this should be auto-approved to determine UI flow
-		const shouldAutoApprove = uiHelpers.shouldAutoApproveTool(this.name)
-
-		if (shouldAutoApprove || (command && detectHeredocFileRedirection(command).isHeredocFileWrite)) {
-			// For auto-approved commands or intercepted heredoc file writes, do not prompt user prematurely
+		if (
+			(command &&
+				(detectHeredocFileRedirection(command).isHeredocFileWrite ||
+					detectTerminalFileRead(command).isTerminalFileRead)) ||
+			uiHelpers.shouldAutoApproveTool?.(this.name)
+		) {
+			// For auto-approved commands or intercepted heredoc/file-read commands, do not prompt user prematurely
 			return
 		}
 		await uiHelpers
@@ -118,6 +124,16 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 			const errorMsg =
 				heredocCheck.reason ??
 				"Multiline heredoc file creation is prohibited in execute_command. Use the write_to_file tool instead."
+			await display.observe(() => config.callbacks.say("command_permission_denied", errorMsg))
+			return formatResponse.toolError(errorMsg)
+		}
+
+		// Intercept terminal file read commands to prevent dumping file contents into the terminal
+		const fileReadCheck = detectTerminalFileRead(actualCommand)
+		if (fileReadCheck.isTerminalFileRead) {
+			const errorMsg =
+				fileReadCheck.reason ??
+				"Reading files via shell commands in execute_command is prohibited. Use the read_file tool instead."
 			await display.observe(() => config.callbacks.say("command_permission_denied", errorMsg))
 			return formatResponse.toolError(errorMsg)
 		}

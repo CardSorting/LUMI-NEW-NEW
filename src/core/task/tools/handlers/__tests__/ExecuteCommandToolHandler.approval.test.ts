@@ -307,4 +307,57 @@ describe("command approval execution", () => {
 		assert.match(String(result), /output\.txt/)
 		assert.match(String(result), /write_to_file/)
 	})
+	it("intercepts terminal file read commands before approval and directs to read_file", async () => {
+		const { config, callbacks, handler } = fixture()
+		const catCommand = "cat /Users/bozoegg/.agents/skills/impeccable/reference/craft-floor.md"
+
+		const result = await handler.execute(config, {
+			...block,
+			params: { command: catCommand, requires_approval: "true" },
+		})
+
+		sinon.assert.notCalled(callbacks.ask)
+		sinon.assert.notCalled(callbacks.executeCommandTool)
+		sinon.assert.calledWithMatch(callbacks.say, "command_permission_denied", sinon.match(/read_file/))
+		assert.equal(isToolFailure(result), true)
+		assert.match(String(result), /Terminal file read detected for '.*craft-floor\.md'/)
+		assert.match(String(result), /read_file/)
+	})
+	it("intercepts compound terminal file read commands before approval and directs to read_file", async () => {
+		const { config, callbacks, handler } = fixture()
+		const compoundCommand =
+			"find . -maxdepth 3 -type f -print; printf '\\n--- main ---\\n'; cat src/main.c; printf '\\n--- game ---\\n'; cat src/game.c; printf '\\n--- header ---\\n'; cat src/game.h"
+
+		const result = await handler.execute(config, {
+			...block,
+			params: { command: compoundCommand, requires_approval: "true" },
+		})
+
+		sinon.assert.notCalled(callbacks.ask)
+		sinon.assert.notCalled(callbacks.executeCommandTool)
+		assert.equal(isToolFailure(result), true)
+		assert.match(String(result), /Terminal file read detected for 'src\/main\.c', 'src\/game\.c', 'src\/game\.h'/)
+		assert.match(String(result), /read_file/)
+	})
+	it("handlePartialBlock suppresses ask for terminal file read commands", async () => {
+		const { callbacks, handler } = fixture()
+		const uiHelpers = {
+			ask: callbacks.ask,
+			say: callbacks.say,
+			removeLastPartialMessageIfExistsWithType: callbacks.removeLastPartialMessageIfExistsWithType,
+			shouldAutoApproveTool: sinon.stub().returns(false),
+		} as any
+
+		await handler.handlePartialBlock(
+			{
+				type: "tool_use",
+				name: DietCodeDefaultTool.BASH,
+				params: { command: "cat src/game.c" },
+				partial: true,
+			},
+			uiHelpers,
+		)
+
+		sinon.assert.notCalled(callbacks.ask)
+	})
 })

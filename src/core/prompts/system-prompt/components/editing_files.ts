@@ -65,6 +65,9 @@ You have access to two tools for working with files: **write_to_file** and **rep
   - You need to completely reorganize or restructure a file
   - The file is relatively small and the changes affect most of its content
   - You're generating boilerplate or template files
+- **Terminal File Operations Strictly Prohibited**:
+  - NEVER use execute_command with multiline heredocs (such as cat <<'EOF', cat > file, tee, or echo >) or stdin piping to create or write files. All file writing must use write_to_file or replace_in_file.
+  - NEVER use execute_command with cat, head, tail, or terminal dumping to read or inspect files. All file reading must use read_file.
 
 {{AUTO_FORMATTING_SECTION}}
 

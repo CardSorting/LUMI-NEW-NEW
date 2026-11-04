@@ -9,6 +9,8 @@ export { CommandExecutor } from "./CommandExecutor"
 export { orchestrateCommandExecution } from "./CommandOrchestrator"
 export type { HeredocRedirectionDetection } from "./heredocPolicy"
 export { detectHeredocFileRedirection, findTopLevelHeredocs, isMultilineHeredocCommand } from "./heredocPolicy"
+export type { TerminalFileReadDetection } from "./terminalFileReadPolicy"
+export { detectTerminalFileRead, isTerminalFileReadCommand } from "./terminalFileReadPolicy"
 
 // Export all types from types.ts
 export type {

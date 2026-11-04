@@ -1,4 +1,4 @@
-import { detectHeredocFileRedirection } from "@integrations/terminal/commandPolicy"
+import { detectHeredocFileRedirection, detectTerminalFileRead } from "@integrations/terminal/commandPolicy"
 import { DietCodeDefaultTool } from "@shared/tools"
 import * as crypto from "crypto"
 import * as fs from "fs/promises"
@@ -293,6 +293,13 @@ export class FluidPolicyEngine {
 				return {
 					success: false,
 					error: heredocCheck.reason,
+				}
+			}
+			const fileReadCheck = detectTerminalFileRead(rawCmd)
+			if (fileReadCheck.isTerminalFileRead) {
+				return {
+					success: false,
+					error: fileReadCheck.reason,
 				}
 			}
 		}

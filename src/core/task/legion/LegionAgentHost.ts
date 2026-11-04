@@ -42,6 +42,11 @@ export const LEGION_CORE_RULES = `File Creation & Modification Rules:
 - You are STRICTLY FORBIDDEN from using execute_command with multiline heredocs (such as cat <<'EOF', cat > file, tee, or echo >) or stdin piping to create or write files. All file creations and edits must be performed using write_to_file or replace_in_file.
 - Terminal commands run in non-interactive sessions without stdin. Interactive stdin redirection, heredocs, and terminal file piping will deadlock shell integration and freeze the session.
 
+File Reading & Inspection Rules:
+- When you want to read file contents, use the read_file tool.
+- When you want to list directory contents or inspect file trees, use list_files or search_files.
+- You are STRICTLY FORBIDDEN from using execute_command with cat, head, tail, more, less, or terminal file dumping to read or inspect files. All file reads must be performed using read_file or list_files. File inspection in the terminal pollutes interactive terminal sessions and bypasses tool execution safety.
+
 Command Execution Guidelines:
 - Use execute_command exclusively for non-interactive tasks: build scripts, compilation, running tests, linters, and environment checks.
 - Always prefer non-interactive flags (e.g. '--no-pager', '-y', '--non-interactive') and never run interactive commands that wait for user or stdin input.
@@ -94,7 +99,7 @@ export class LegionAgentHost implements LegionExecutionHost {
 			}
 		}
 		const budgetExceeded = () =>
-			this.usedTokens >= (this.options.maxTokens ?? 100_000) ||
+			(this.options.maxTokens !== undefined && this.usedTokens >= this.options.maxTokens) ||
 			(this.options.maxCost !== undefined && this.reportedCost >= this.options.maxCost)
 		try {
 			for (let turn = 0; turn < (this.options.maxTurns ?? 24); turn++) {

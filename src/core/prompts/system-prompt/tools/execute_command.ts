@@ -23,12 +23,12 @@ const GENERIC: DietCodeToolSpec = {
 	variant: ModelFamily.GENERIC,
 	id: DietCodeDefaultTool.BASH,
 	name: "execute_command",
-	description: `Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Commands will be executed in the current working directory: {{CWD}}{{MULTI_ROOT_HINT}}`,
+	description: `Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Do not use this tool to read files (use read_file) or create/write files via multiline heredocs (use write_to_file). Commands will be executed in the current working directory: {{CWD}}{{MULTI_ROOT_HINT}}`,
 	parameters: [
 		{
 			name: "command",
 			required: true,
-			instruction: `The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.`,
+			instruction: `The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions. Do not use cat, head, or tail to read files (use read_file). Do not use heredocs or redirection to create files (use write_to_file or replace_in_file).`,
 			usage: "Your command here",
 		},
 		approvalParameter,
@@ -41,13 +41,13 @@ const NATIVE_GPT_5: DietCodeToolSpec = {
 	id: DietCodeDefaultTool.BASH,
 	name: DietCodeDefaultTool.BASH,
 	description:
-		"Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task.",
+		"Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. Do not use this tool to read files (use read_file) or write files via heredocs (use write_to_file).",
 	parameters: [
 		{
 			name: "command",
 			required: true,
 			instruction:
-				"The CLI command to execute. This should be valid for the current operating system. Do not use the ~ character or $HOME to refer to the home directory. Always use absolute paths. The command will be executed from the current workspace, you do not need to cd to the workspace.",
+				"The CLI command to execute. This should be valid for the current operating system. Do not use the ~ character or $HOME to refer to the home directory. Always use absolute paths. The command will be executed from the current workspace, you do not need to cd to the workspace. Do not use cat to read files or heredocs to write files.",
 		},
 		approvalParameter,
 		timeoutParameter,
@@ -64,13 +64,13 @@ const GEMINI_3: DietCodeToolSpec = {
 	id: DietCodeDefaultTool.BASH,
 	name: DietCodeDefaultTool.BASH,
 	description:
-		"Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. When chaining commands, use the shell operator && (not the HTML entity &amp;&amp;). If using search/grep commands, be careful to not use vague search terms that may return thousands of results. When in PLAN MODE, you may use the execute_command tool, but only in a non-destructive manner and in a way that does not alter any files.",
+		"Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. When chaining commands, use the shell operator && (not the HTML entity &amp;&amp;). If using search/grep commands, be careful to not use vague search terms that may return thousands of results. When in PLAN MODE, you may use the execute_command tool, but only in a non-destructive manner and in a way that does not alter any files. Do not use this tool to read files (use read_file) or create files via heredocs (use write_to_file).",
 	parameters: [
 		{
 			name: "command",
 			required: true,
 			instruction:
-				"The CLI command to execute. This should be valid for the current operating system. For command chaining, use proper shell operators like && to chain commands (e.g., 'cd path && command'). Do not use the ~ character or $HOME to refer to the home directory. Always use absolute paths. Do not run search/grep commands that may return thousands of results.",
+				"The CLI command to execute. This should be valid for the current operating system. For command chaining, use proper shell operators like && to chain commands (e.g., 'cd path && command'). Do not use the ~ character or $HOME to refer to the home directory. Always use absolute paths. Do not run search/grep commands that may return thousands of results. Do not use cat to inspect files or heredocs to create files.",
 		},
 		approvalParameter,
 		timeoutParameter,

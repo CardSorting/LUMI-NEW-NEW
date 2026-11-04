@@ -2,7 +2,7 @@ import { arePathsEqual } from "@utils/path"
 import { getShellForProfile } from "@utils/shell"
 import pWaitFor from "p-wait-for"
 import * as vscode from "vscode"
-import { isMultilineHeredocCommand } from "@/integrations/terminal/commandPolicy"
+import { isMultilineHeredocCommand, isTerminalFileReadCommand } from "@/integrations/terminal/commandPolicy"
 import {
 	TerminalInfo as ITerminalInfo,
 	ITerminalManager,
@@ -185,6 +185,7 @@ export class VscodeTerminalManager implements ITerminalManager {
 		if (
 			vscodeTerminalInfo.managed ||
 			isMultilineHeredocCommand(command) ||
+			isTerminalFileReadCommand(command) ||
 			vscodeTerminalInfo.terminal.shellIntegration?.executeCommand ||
 			!(vscode.window as typeof vscode.window & { onDidEndTerminalShellExecution?: unknown }).onDidEndTerminalShellExecution
 		) {

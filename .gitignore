@@ -27,6 +27,7 @@ pnpm-lock.yaml
 .venv
 .actrc
 CLAUDE.local.md
+runlog*.md
 
 webview-ui/src/**/*.js
 webview-ui/src/**/*.js.map

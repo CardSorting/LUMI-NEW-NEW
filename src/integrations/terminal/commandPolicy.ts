@@ -46,3 +46,4 @@ export function resolveCommandTimeoutSeconds(command: string, timeout?: string |
 }
 
 export * from "./heredocPolicy"
+export * from "./terminalFileReadPolicy"

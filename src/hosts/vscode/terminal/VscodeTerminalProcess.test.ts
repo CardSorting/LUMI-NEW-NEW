@@ -154,6 +154,67 @@ describe("TerminalProcess output and capability handling", () => {
 			onError.firstCall.args[0].message.should.match(/multiline heredoc commands cannot be safely executed/)
 			mockExecuteCommand.called.should.be.false()
 		})
+
+		it("safely refuses terminal file reads to prevent interactive terminal dump and directs to read_file", async () => {
+			const terminal = TerminalRegistry.createTerminal().terminal
+			createdTerminals.push(terminal)
+
+			const mockExecuteCommand = sandbox.stub()
+			sandbox.stub(terminal, "shellIntegration").get(() => ({
+				executeCommand: mockExecuteCommand,
+			}))
+
+			const onError = sandbox.spy()
+			process.on("error", onError)
+
+			const catCommand = "cat /Users/bozoegg/.agents/skills/impeccable/reference/craft-floor.md"
+			await process.run(terminal, catCommand)
+
+			onError.calledOnce.should.be.true()
+			onError.firstCall.args[0].message.should.match(/reading files directly in the terminal/)
+			onError.firstCall.args[0].message.should.match(/craft-floor\.md/)
+			onError.firstCall.args[0].message.should.match(/read_file/)
+			mockExecuteCommand.called.should.be.false()
+		})
+
+		it("safely refuses terminal file reads inside subshells and compound commands", async () => {
+			const terminal = TerminalRegistry.createTerminal().terminal
+			createdTerminals.push(terminal)
+
+			const mockExecuteCommand = sandbox.stub()
+			sandbox.stub(terminal, "shellIntegration").get(() => ({
+				executeCommand: mockExecuteCommand,
+			}))
+
+			const onError = sandbox.spy()
+			process.on("error", onError)
+
+			const subshellCat = "(cat /Users/bozoegg/.agents/skills/impeccable/reference/craft-floor.md)"
+			await process.run(terminal, subshellCat)
+
+			onError.calledOnce.should.be.true()
+			onError.firstCall.args[0].message.should.match(/reading files directly in the terminal/)
+			mockExecuteCommand.called.should.be.false()
+		})
+
+		it("runManaged safely refuses terminal file reads before dispatching to managed execution", async () => {
+			const managedExecution = { terminate: sandbox.stub().resolves() }
+			const mockManagedTerminal = {
+				terminal: TerminalRegistry.createTerminal().terminal,
+				run: sandbox.stub().returns(managedExecution),
+			}
+			createdTerminals.push(mockManagedTerminal.terminal)
+
+			const onError = sandbox.spy()
+			process.on("error", onError)
+
+			const catCommand = "cat /Users/bozoegg/.agents/skills/impeccable/reference/craft-floor.md"
+			await process.runManaged(mockManagedTerminal as any, catCommand)
+
+			onError.calledOnce.should.be.true()
+			onError.firstCall.args[0].message.should.match(/reading files directly in the terminal/)
+			mockManagedTerminal.run.called.should.be.false()
+		})
 	})
 
 	// Tests with controlled output

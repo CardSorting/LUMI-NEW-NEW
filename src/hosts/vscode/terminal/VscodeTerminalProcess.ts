@@ -1,6 +1,6 @@
 import { EventEmitter } from "events"
 import * as vscode from "vscode"
-import { boundCommandOutput, isMultilineHeredocCommand } from "@/integrations/terminal/commandPolicy"
+import { boundCommandOutput, detectTerminalFileRead, isMultilineHeredocCommand } from "@/integrations/terminal/commandPolicy"
 import {
 	isCompilingOutput,
 	MAX_FULL_OUTPUT_SIZE,
@@ -156,6 +156,16 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 
 	async runManaged(terminal: ManagedTerminal, command: string) {
 		if (this.stopped || this.stopRequested || this.dispatched) return
+		const fileRead = detectTerminalFileRead(command)
+		if (fileRead.isTerminalFileRead) {
+			const fileList = fileRead.targetFiles.length ? ` for '${fileRead.targetFiles.join("', '")}'` : ""
+			this.failBeforeDispatch(
+				new Error(
+					`Command execution blocked: reading files directly in the terminal${fileList} is prohibited. Use the read_file tool instead.`,
+				),
+			)
+			return
+		}
 		this.disposeObservers()
 		this.terminal = terminal.terminal
 		const decoder = new TerminalOutputDecoder()
@@ -190,6 +200,13 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		this.watchTerminal(terminal)
 		try {
 			const isHeredoc = isMultilineHeredocCommand(command)
+			const fileRead = detectTerminalFileRead(command)
+			if (fileRead.isTerminalFileRead) {
+				const fileList = fileRead.targetFiles.length ? ` for '${fileRead.targetFiles.join("', '")}'` : ""
+				throw new Error(
+					`Command execution blocked: reading files directly in the terminal${fileList} is prohibited. Use the read_file tool instead.`,
+				)
+			}
 			if (
 				!terminal.shellIntegration?.executeCommand ||
 				!(vscode.window as typeof vscode.window & ShellEvents).onDidEndTerminalShellExecution ||
