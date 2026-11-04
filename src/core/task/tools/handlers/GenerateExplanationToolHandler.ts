@@ -11,7 +11,7 @@ import {
 import { formatResponse } from "@core/prompts/responses"
 import fs from "fs/promises"
 import path from "path"
-import simpleGit from "simple-git"
+import { simpleGit } from "simple-git"
 import type { DietCodeSayGenerateExplanation } from "@/shared/ExtensionMessage"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"

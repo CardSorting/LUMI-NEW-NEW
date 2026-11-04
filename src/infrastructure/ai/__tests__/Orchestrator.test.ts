@@ -1,4 +1,5 @@
 import { expect } from "chai"
+import { after } from "mocha"
 import { dbPool } from "../../db/BufferedDbPool"
 import { AgentOrchestrator } from "../Orchestrator"
 
@@ -12,6 +13,8 @@ describe("AgentOrchestrator audit ergonomics", () => {
 		push: (op: any, agentId?: string, affectedFile?: string) => Promise<any>
 		pushBatch: (ops: any[], agentId?: string, affectedFile?: string) => Promise<any>
 		commitWork: (agentId: string, validator?: unknown) => Promise<unknown>
+		clearShadow: (agentId: string) => Promise<void>
+		flush: () => Promise<void>
 	}
 
 	const withPatchedDbPool = async <T>(patch: Partial<DbPoolPatch>, callback: () => Promise<T>): Promise<T> => {
@@ -23,6 +26,8 @@ describe("AgentOrchestrator audit ergonomics", () => {
 			push: target.push,
 			pushBatch: target.pushBatch,
 			commitWork: target.commitWork,
+			clearShadow: target.clearShadow,
+			flush: target.flush,
 		}
 
 		if (patch.selectOne) target.selectOne = patch.selectOne
@@ -31,6 +36,8 @@ describe("AgentOrchestrator audit ergonomics", () => {
 		if (patch.push) target.push = patch.push
 		if (patch.pushBatch) target.pushBatch = patch.pushBatch
 		if (patch.commitWork) target.commitWork = patch.commitWork
+		if (patch.clearShadow) target.clearShadow = patch.clearShadow
+		if (patch.flush) target.flush = patch.flush
 
 		try {
 			return await callback()
@@ -41,6 +48,8 @@ describe("AgentOrchestrator audit ergonomics", () => {
 			if (original.push) target.push = original.push
 			if (original.pushBatch) target.pushBatch = original.pushBatch
 			if (original.commitWork) target.commitWork = original.commitWork
+			if (original.clearShadow) target.clearShadow = original.clearShadow
+			if (original.flush) target.flush = original.flush
 		}
 	}
 
@@ -519,5 +528,103 @@ describe("AgentOrchestrator audit ergonomics", () => {
 		expect(signals[0].type).to.equal("vibe")
 		expect(signals[0].value).to.equal("recovering")
 		expect(signals[0].timestamp).to.equal(300)
+	})
+
+	it("detects file reservation collisions across active streams when preceded by inactive stream reservation", async () => {
+		const result = await withPatchedDbPool(
+			{
+				selectAllFrom: async (table) => {
+					if (table === "agent_streams") {
+						return [
+							{ id: "stream-active-holder", status: "active" },
+							{ id: "stream-requesting", status: "active" },
+						]
+					}
+					return []
+				},
+				selectWhere: async (table, where) => {
+					if (table === "agent_memory") {
+						return [
+							{ streamId: "stream-inactive-old", key: where.value },
+							{ streamId: "stream-active-holder", key: where.value },
+						]
+					}
+					return []
+				},
+			},
+			() => orchestrator.reserveFiles("stream-requesting", ["src/shared/target.ts"]),
+		)
+
+		expect(result.reserved).to.equal(false)
+		expect(result.reason).to.include("already reserved by active Stream stream-a")
+	})
+
+	it("detects file collisions in detectFileCollisions across multiple stream reservation rows", async () => {
+		const collision = await withPatchedDbPool(
+			{
+				selectAllFrom: async (table) => {
+					if (table === "agent_streams") {
+						return [
+							{ id: "stream-active-holder", status: "active" },
+							{ id: "stream-requesting", status: "active" },
+						]
+					}
+					return []
+				},
+				selectWhere: async (table, where) => {
+					if (table === "agent_memory") {
+						return [
+							{ streamId: "stream-inactive-old", key: where.value },
+							{ streamId: "stream-active-holder", key: where.value },
+						]
+					}
+					return []
+				},
+			},
+			() => orchestrator.detectFileCollisions("stream-requesting", ["src/shared/target.ts"]),
+		)
+
+		expect(collision).to.include("Collision detected: File 'target.ts' is reserved by active Stream stream-a")
+	})
+
+	it("reconciles orphaned child streams from prior crashed sessions on initialize or warmup", async () => {
+		const pushedOps: any[] = []
+		const count = await withPatchedDbPool(
+			{
+				selectAllFrom: async (table) => {
+					if (table === "agent_streams") {
+						return [
+							{ id: "stream-parent-root", parentId: null, status: "active" },
+							{ id: "stream-orphaned-child", parentId: "stream-parent-root", status: "active" },
+						]
+					}
+					return []
+				},
+				selectWhere: async (table) => {
+					if (table === "agent_tasks") return []
+					if (table === "agent_memory") return []
+					return []
+				},
+				push: async (op) => {
+					pushedOps.push(op)
+				},
+				pushBatch: async (ops) => {
+					pushedOps.push(...ops)
+				},
+				clearShadow: async () => {},
+				flush: async () => {},
+			},
+			() => orchestrator.reconcileOrphanedStreams(),
+		)
+
+		expect(count).to.equal(1)
+		const failedStreamOp = pushedOps.find(
+			(op) => op.table === "agent_streams" && op.values?.status === "failed" && op.where?.value === "stream-orphaned-child",
+		)
+		expect(failedStreamOp).to.not.equal(undefined)
+	})
+
+	after(async () => {
+		await dbPool.stop()
 	})
 })

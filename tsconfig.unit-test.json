@@ -9,7 +9,6 @@
 		]
 	},
 	"ts-node": {
-		"experimentalResolver": true,
 		"require": [
 			"tsconfig-paths/register"
 		],

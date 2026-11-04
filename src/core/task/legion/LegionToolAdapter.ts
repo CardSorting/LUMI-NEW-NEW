@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto"
+import * as path from "node:path"
 import type { ApiHandler } from "@core/api"
 import type { ToolParamName, ToolUse } from "@core/assistant-message"
+import { EnvironmentIntegrity } from "@core/integrity/EnvironmentIntegrity"
 import { TaskState } from "@core/task/TaskState"
+import { UseSkillToolHandler } from "@core/task/tools/handlers/UseSkillToolHandler"
 import { ToolExecutorCoordinator } from "@core/task/tools/ToolExecutorCoordinator"
 import { ToolValidator } from "@core/task/tools/ToolValidator"
 import type { TaskConfig } from "@core/task/tools/types/TaskConfig"
@@ -29,6 +32,7 @@ export const LEGION_TOOL_NAMES: readonly DietCodeDefaultTool[] = [
 	DietCodeDefaultTool.BASH,
 	DietCodeDefaultTool.READ_COMMAND_OUTPUT,
 	DietCodeDefaultTool.GET_EXECUTION_STATE,
+	DietCodeDefaultTool.USE_SKILL,
 ]
 
 /**
@@ -48,7 +52,10 @@ export function createLegionToolAdapter(
 	const coordinator = new ToolExecutorCoordinator()
 	const validator = new ToolValidator(base.services.dietcodeIgnoreController, base.universalGuard)
 	for (const name of LEGION_TOOL_NAMES) coordinator.registerByName(name, validator)
-	const allowedNames = new Set<string>(LEGION_TOOL_NAMES)
+	if (!coordinator.has(DietCodeDefaultTool.USE_SKILL)) {
+		coordinator.register(new UseSkillToolHandler())
+	}
+	const allowedNames = new Set<string>([...LEGION_TOOL_NAMES, "use_skill"])
 	const onAbort = () => {
 		state.abort = true
 		try {
@@ -139,6 +146,9 @@ export function createLegionToolAdapter(
 		dispose() {
 			onAbort()
 		},
+		getModifiedArtifacts() {
+			return [...state.workspaceArtifacts]
+		},
 		getPendingWork() {
 			if (!commandStarted) return undefined
 			if (uncertainCommands.size)
@@ -223,6 +233,29 @@ export function createLegionToolAdapter(
 						Logger.warn("[Legion] Post-execution observation failed; retaining the tool result", error)
 					}
 				}
+				if (!isToolFailure(result)) {
+					const filePath =
+						(params as Record<string, string>)?.path ||
+						(params as Record<string, string>)?.targetFile ||
+						(params as Record<string, string>)?.filePath
+					if (
+						filePath &&
+						(name === DietCodeDefaultTool.FILE_NEW ||
+							name === DietCodeDefaultTool.FILE_EDIT ||
+							name === DietCodeDefaultTool.APPLY_PATCH ||
+							name === "write_to_file" ||
+							name === "replace_in_file" ||
+							name === "apply_patch")
+					) {
+						state.trackWorkspaceArtifact(filePath)
+						base.taskState.trackWorkspaceArtifact(filePath)
+						const fileName = path.basename(filePath)
+						const manifests = Object.values(EnvironmentIntegrity.PROJECT_MARKERS).map((m) => m.manifest)
+						if (manifests.includes(fileName)) {
+							EnvironmentIntegrity.invalidateCache()
+						}
+					}
+				}
 				// Preserve the actual outcome even if cancellation arrived during execution.
 				return typeof result === "string" ? result : JSON.stringify(result)
 			} finally {
@@ -239,6 +272,9 @@ export function createLegionToolAdapter(
 				if (revisions > 0) {
 					base.taskState.workspaceRevision += revisions
 					base.taskState.didEditFile = true
+					for (const art of state.workspaceArtifacts) {
+						base.taskState.trackWorkspaceArtifact(art)
+					}
 				}
 				if (!unresolvedCommandIds.size && !uncertainCommands.size) {
 					signal.removeEventListener("abort", onAbort)

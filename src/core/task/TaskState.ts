@@ -134,9 +134,24 @@ export class TaskState {
 	currentTurnUniqueReadCount = 0
 	currentTurnExplorationCount = 0
 	taskReadHistory = new Map<string, number>()
-	// Cross-Agent Intelligence (Blackboard)
+	// Cross-Agent Intelligence (Blackboard) & Workspace Artifacts
 	public swarmBlackboard: string[] = []
+	public workspaceArtifacts: string[] = []
 	public sovereignAuditSynthesis?: string
+
+	public addSwarmHeuristic(heuristic: string): void {
+		const trimmed = heuristic?.trim()
+		if (trimmed && !this.swarmBlackboard.includes(trimmed)) {
+			this.swarmBlackboard.push(trimmed)
+		}
+	}
+
+	public trackWorkspaceArtifact(filePath: string): void {
+		const trimmed = filePath?.trim()
+		if (trimmed && !this.workspaceArtifacts.includes(trimmed)) {
+			this.workspaceArtifacts.push(trimmed)
+		}
+	}
 
 	// Agent ergonomics: intent routing + completion audit state
 	preAuditedIntent?: string

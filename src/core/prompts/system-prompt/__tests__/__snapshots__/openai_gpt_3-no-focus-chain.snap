@@ -124,9 +124,9 @@ Always adhere to this format for the tool use to ensure proper parsing and execu
 # Tools
 
 ## execute_command
-Description: Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Commands will be executed in the current working directory: /test/project
+Description: Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Do not use this tool to read files (use read_file) or create/write files via multiline heredocs (use write_to_file). Commands will be executed in the current working directory: /test/project
 Parameters:
-- command: (required) The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.
+- command: (required) The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions. Do not use cat, head, or tail to read files (use read_file). Do not use heredocs or redirection to create files (use write_to_file or replace_in_file).
 - requires_approval: (optional) Optional risk hint: true for commands that may have destructive or external effects, false for routine reads, builds, and tests. Configured authority, saved trust, and command policy determine approval. Submit the tool call directly; do not ask for approval separately in text.
 - timeout: (optional) Positive seconds to wait in the foreground, capped at 300. This does not kill the command. All commands use a bounded wait when omitted (30 seconds, or 300 for builds and tests). If still running, use read_command_output with the returned execution_id or continue independent work; do not launch a duplicate. A stop request or missing exit code is not proof of success.
 Usage:
@@ -386,23 +386,6 @@ Usage:
 <user_request></user_request>
 </roadmap_checkpoint>
 
-## use_subagents
-Description: Run up to five focused in-process subagents in parallel for independent investigation, implementation, debugging, or verification. Each helper can use its exposed tools to read and edit files, execute commands, and check results within the assigned scope and configured permissions. Give each helper a concrete deliverable and useful context. Use one or more helpers when delegation materially accelerates the task; reconcile their evidence and continue execution without peer-approval ceremonies.
-Parameters:
-- prompt_1: (required) First subagent prompt.
-- prompt_2: (optional) Optional second subagent prompt.
-- prompt_3: (optional) Optional third subagent prompt.
-- prompt_4: (optional) Optional fourth subagent prompt.
-- prompt_5: (optional) Optional fifth subagent prompt.
-Usage:
-<use_subagents>
-<prompt_1></prompt_1>
-<prompt_2></prompt_2>
-<prompt_3></prompt_3>
-<prompt_4></prompt_4>
-<prompt_5></prompt_5>
-</use_subagents>
-
 ## read_command_output
 Description: Read bounded output and authoritative status for an existing execute_command execution in this task. Never starts, restarts, or stops a command. Use its execution_id after a foreground timeout instead of running the command again. Completed receipts remain available for the latest 64 runs in this session. Exit code 0 confirms success; unknown or missing exit codes do not. After unchanged output, do independent work or diagnose the blocker; do not poll indefinitely.
 Parameters:
@@ -417,7 +400,7 @@ Usage:
 ## get_execution_state
 Description: Inspect tracked work shared by this task's parent and helpers: commands, action input previews, attempt limits, queue capacity and occupants, current approval settings, and recent results. Returns immediately and never starts or cancels work. Accepts either a command or action execution_id, including IDs from duplicate-action errors. Use read_command_output with the command's execution_id for full command output. Missing or unavailable observation does not prove no work is running. Caller cancellation or timeout does not prove an action stopped; awaiting_completion means its underlying operation is unresolved. Do independent work between checks; inventory polling is not task progress.
 Parameters:
-- execution_id: (optional) Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Command results include their read_command_output handle. Expired or other-task IDs are rejected.
+- execution_id: (optional) Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Helper receipts include structured helper_handoff with committed paths and pending command IDs, including late results after a batch stops waiting. Command results include their read_command_output handle. After a host restart, historical receipts have recovery.authority=none: inspect their evidence without assuming a live owner or replaying unfinished work. Recovery issues are reported explicitly. Expired or other-task IDs are rejected.
 Usage:
 <get_execution_state>
 <execution_id>command or action execution ID (optional)</execution_id>
@@ -633,6 +616,9 @@ You have access to two tools for working with files: **write_to_file** and **rep
   - You need to completely reorganize or restructure a file
   - The file is relatively small and the changes affect most of its content
   - You're generating boilerplate or template files
+- **Terminal File Operations Strictly Prohibited**:
+  - NEVER use execute_command with multiline heredocs (such as cat <<'EOF', cat > file, tee, or echo >) or stdin piping to create or write files. All file writing must use write_to_file or replace_in_file.
+  - NEVER use execute_command with cat, head, tail, or terminal dumping to read or inspect files. All file reading must use read_file.
 
 # Auto-formatting Considerations
 
@@ -696,7 +682,8 @@ RULES
 - Be sure to consider the type of project (e.g. Python, JavaScript, web application) when determining the appropriate structure and files to include. Also consider what files may be most relevant to accomplishing the task, for example looking at a project's manifest file would help you understand the project's dependencies, which you could incorporate into any code you write.
 - Verification is bounded by the task: run relevant checks and required workspace checks, reuse passing results for unchanged code, and stop once those pass. Broaden or repeat tests only after changes, a failure, or new evidence. Report unavailable checks and unrelated baseline failures accurately; do not invent extra testing gates or keep retrying an unchanged failure.
 - When making changes to code, always consider the context in which the code is being used. Ensure that your changes are compatible with the existing codebase and that they follow the project's coding standards and best practices.
-- When you want to modify a file, use the replace_in_file or write_to_file tool directly with the desired changes. You do not need to display the changes before using the tool.
+- When you want to read or inspect file contents, you MUST use the read_file tool. When listing files or directory trees, use list_files or search_files. You are STRICTLY FORBIDDEN from using execute_command with cat, head, tail, more, less, or terminal file dumping to read or inspect files. All file reading must be performed using read_file.
+- When you want to modify a file, use the replace_in_file or write_to_file tool directly with the desired changes. You do not need to display the changes before using the tool. You are STRICTLY FORBIDDEN from using execute_command with multiline heredocs (such as cat <<'EOF', cat > file, tee, or echo >) or stdin piping to create or write files. Terminal sessions run non-interactively without stdin; heredocs and stdin redirection will deadlock shell integration.
 - Do not ask for more information than necessary. Use the tools provided to accomplish the user's request efficiently and effectively. When you've completed your task, you must use the attempt_completion tool to present the result to the user. The user may provide feedback, which you can use to make improvements and try again.
 - You are only allowed to ask the user questions using the ask_followup_question tool. Use this tool only when you need additional details to complete a task, and be sure to use a clear and concise question that will help you move forward with the task. However if you can use the available tools to avoid having to ask the user questions, you should do so. For example, if the user mentions a file that may be in an outside directory like the Desktop, you should use the list_files tool to list the files in the Desktop and check if the file they are talking about is there, rather than asking the user to provide the file path themselves.
 - When executing commands, do not assume success when expected output is missing or incomplete. Treat the result as unverified and run follow-up checks (for example checking exit status, verifying files with `test`/`ls`, or validating content with `grep`/`wc`) before proceeding. The user's terminal may be unable to stream output reliably. If output is still unavailable after reasonable checks and you need it to continue, use the ask_followup_question tool to request the user to copy and paste it back to you.

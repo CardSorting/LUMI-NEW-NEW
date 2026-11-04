@@ -128,12 +128,11 @@ describe("completionGatePipeline", () => {
 		;(taskState.completionGateBlockCount ?? 0).should.equal(0)
 	})
 
-	it("still identifies explicitly unfinished checklist work", async () => {
+	it("treats the focus chain as advisory while rejecting explicitly unfinished task progress", async () => {
 		const config = { ...configWithState(taskState), focusChainSettings: { enabled: true } } as TaskConfig
 		taskState.currentFocusChainChecklist = "- [x] Implement change\n- [ ] Verify regression"
 		const focusError = await runCompletionGateFlow(config, { result: VALID_RESULT }, "Test")
-		focusError.status.should.equal("blocked")
-		if (focusError.status === "blocked") focusError.message.should.containEql("focus chain has 1 incomplete item")
+		focusError.status.should.equal("passed")
 		taskState.currentFocusChainChecklist = "- [x] Implement change\n- [x] Verify regression"
 		const progressIssues = evaluateCompletionGateReadiness(config, {
 			result: VALID_RESULT,

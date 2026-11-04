@@ -60,7 +60,6 @@ describe("file write execution receipts", () => {
 	}
 	for (const cancelled of [false, true]) {
 		it(`returns committed work when tracking ${cancelled ? "outlives cancellation" : "never responds"} without a late reset`, async () => {
-			const clock = sinon.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
 			const { config, provider, tracker, handler, block } = prepare()
 			let entered!: () => void
 			const tracking = new Promise<void>((resolve) => {
@@ -77,7 +76,6 @@ describe("file write execution receipts", () => {
 			await tracking
 			assert.equal(provider.isEditing, false, "Owned cleanup finishes before optional tracking")
 			if (cancelled) config.taskState.abort = true
-			else await clock.tickAsync(1001)
 			const result = await pending
 			assert.equal(isToolFailure(result), false)
 			assert.match(String(result), /successfully saved/)
@@ -90,7 +88,7 @@ describe("file write execution receipts", () => {
 				await provider.update("next edit", true)
 			}
 			release()
-			await clock.tickAsync(0)
+			await new Promise((resolve) => setImmediate(resolve))
 			if (!cancelled) {
 				assert.equal(provider.isEditing, true, "Late tracking must not reset the next edit")
 				assert.equal((await provider.saveChanges()).finalContent, "next edit")

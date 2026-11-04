@@ -1,7 +1,7 @@
 [
   {
     "name": "execute_command",
-    "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. When chaining commands, use the shell operator && (not the HTML entity &amp;&amp;). If using search/grep commands, be careful to not use vague search terms that may return thousands of results. When in PLAN MODE, you may use the execute_command tool, but only in a non-destructive manner and in a way that does not alter any files.",
+    "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. When chaining commands, use the shell operator && (not the HTML entity &amp;&amp;). If using search/grep commands, be careful to not use vague search terms that may return thousands of results. When in PLAN MODE, you may use the execute_command tool, but only in a non-destructive manner and in a way that does not alter any files. Do not use this tool to read files (use read_file) or create files via heredocs (use write_to_file).",
     "parameters": {
       "type": "OBJECT",
       "properties": {
@@ -385,33 +385,6 @@
       "required": [
         "title",
         "from_ref"
-      ]
-    }
-  },
-  {
-    "name": "use_subagents",
-    "description": "Run up to five focused in-process subagents in parallel for independent investigation, implementation, debugging, or verification. Each helper can use its exposed tools to read and edit files, execute commands, and check results within the assigned scope and configured permissions. Give each helper a concrete deliverable and useful context. Use one or more helpers when delegation materially accelerates the task; reconcile their evidence and continue execution without peer-approval ceremonies.",
-    "parameters": {
-      "type": "OBJECT",
-      "properties": {
-        "prompt_1": {
-          "type": "STRING"
-        },
-        "prompt_2": {
-          "type": "STRING"
-        },
-        "prompt_3": {
-          "type": "STRING"
-        },
-        "prompt_4": {
-          "type": "STRING"
-        },
-        "prompt_5": {
-          "type": "STRING"
-        }
-      },
-      "required": [
-        "prompt_1"
       ]
     }
   },

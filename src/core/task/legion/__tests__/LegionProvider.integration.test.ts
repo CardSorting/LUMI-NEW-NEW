@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
+import { gunzipSync } from "node:zlib"
 import { OpenAiHandler } from "@core/api/providers/openai"
 import { expect } from "chai"
 import type { SpawnedLegionMember } from "@/infrastructure/ai/LegionCoordinator"
@@ -14,12 +15,14 @@ describe("Legion native provider integration", () => {
 	it("executes a multi-turn native tool conversation through the OpenAI-compatible provider", async function () {
 		const requests: any[] = []
 		server = createServer((req, res) => {
-			let body = ""
+			const chunks: Buffer[] = []
 			req.on("data", (chunk) => {
-				body += chunk
+				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
 			})
 			req.on("end", () => {
-				requests.push(JSON.parse(body))
+				const buf = Buffer.concat(chunks)
+				const raw = req.headers["content-encoding"] === "gzip" ? gunzipSync(buf).toString("utf8") : buf.toString("utf8")
+				requests.push(JSON.parse(raw))
 				const first = requests.length === 1
 				res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" })
 				const delta = first

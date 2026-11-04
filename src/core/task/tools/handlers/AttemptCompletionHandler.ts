@@ -289,7 +289,9 @@ export class AttemptCompletionHandler implements IToolHandler, IPartialBlockHand
 			criticalReviewReport?.executed &&
 			(criticalReviewReport.decision === "REMEDIATE" || criticalReviewReport.decision === "ESCALATE")
 		) {
-			config.taskState.consecutiveMistakeCount++
+			if (criticalReviewReport.decision !== "REMEDIATE") {
+				config.taskState.consecutiveMistakeCount++
+			}
 			const blockCount = recordCompletionGateBlockEvent(config, "audit_gate", { result })
 			emitCompletionGateBlockTelemetry(config, "audit_gate", blockCount)
 			return formatCompletionToolError(criticalReviewReport.coordinatorFinalReportMarkdown, config, { result })

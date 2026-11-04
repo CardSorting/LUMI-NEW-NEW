@@ -3,6 +3,8 @@ import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import * as hooks from "@/core/hooks/hooks-utils"
 import type { StateManager } from "@/core/storage/StateManager"
+import { resolveEffectiveAgentSwarmState } from "@/infrastructure/ai/AgentSwarmConfig"
+import type { CriticalCompletionReviewReport } from "@/infrastructure/ai/CriticalCompletionReview"
 import { DEFAULT_AUTO_APPROVAL_SETTINGS } from "@/shared/AutoApprovalSettings"
 import * as auditGatePolicy from "@/shared/audit/auditGatePolicyLoader"
 import type { DietCodeMessage } from "@/shared/ExtensionMessage"
@@ -71,7 +73,11 @@ describe("completion command execution", () => {
 		const block = {
 			type: "tool_use" as const,
 			name: DietCodeDefaultTool.ATTEMPT,
-			params: { result: "The requested work is complete.", command: "npm test" },
+			params: {
+				result: "The requested work is complete.",
+				command: "npm test",
+				task_progress: undefined as string | undefined,
+			},
 			partial: false,
 		}
 		return { handler: new AttemptCompletionHandler(), config, callbacks, block, proactiveGuidance, readinessHint, auditGate }
@@ -118,24 +124,26 @@ describe("completion command execution", () => {
 			},
 		)
 	}
-	it("shows readable notices after an incomplete focus chain is completed", async () => {
+	it("shows readable notices after incomplete task progress is completed", async () => {
 		const { handler, config, callbacks, block, readinessHint, auditGate } = fixture(true, true, false)
 		readinessHint.callThrough()
 		auditGate.resetBehavior()
 		auditGate.callThrough()
 		const clock = sinon.useFakeTimers({ now: Date.now() })
 		config.taskState.currentFocusChainChecklist = "- [x] Implement change\n- [ ] Verify regression"
+		block.params.task_progress = "- [ ] Verify regression"
 		block.params.command = ""
 
 		const blockedResult = String(await handler.execute(config, block))
-		assert.match(blockedResult, /focus chain has 1 incomplete item/)
+		assert.match(blockedResult, /task_progress has 1 incomplete item/)
 		assert.match(blockedResult, /<completion_gate_envelope/)
-		assert.equal(config.taskState.lastCompletionBlockReason, "focus_chain_incomplete")
+		assert.equal(config.taskState.lastCompletionBlockReason, "task_progress_incomplete")
 		let reasonAtCompletion: string | undefined = config.taskState.lastCompletionBlockReason
 		callbacks.say.callsFake(async (kind) => {
 			if (kind === "completion_result") reasonAtCompletion = config.taskState.lastCompletionBlockReason
 		})
 		config.taskState.currentFocusChainChecklist = "- [x] Implement change\n- [x] Verify regression"
+		block.params.task_progress = "- [x] Verify regression"
 		clock.tick(3000)
 		assert.match(String(await handler.execute(config, block)), /Result: Done/)
 
@@ -165,7 +173,8 @@ describe("completion command execution", () => {
 		}
 		config.messageState.saveDietCodeMessagesAndUpdateHistory = sinon.stub().resolves()
 		config.taskState.currentFocusChainChecklist = "- [ ] Verify regression"
-		assert.match(String(await handler.execute(config, block)), /focus chain has 1 incomplete item/)
+		block.params.task_progress = "- [ ] Verify regression"
+		assert.match(String(await handler.execute(config, block)), /task_progress has 1 incomplete item/)
 		assert.deepEqual(messages, [completed, notice])
 	})
 	it("renders audit readiness and the passing score as text while retaining internal diagnostics", async () => {
@@ -203,12 +212,14 @@ describe("completion command execution", () => {
 	it("keeps structured recovery details out of proactive chat notices", async () => {
 		const { handler, config, callbacks, block, proactiveGuidance } = fixture(true, true, false)
 		proactiveGuidance.returns(true)
-		completion.recordCompletionGateBlockEvent(config, "focus_chain_incomplete")
+		completion.recordCompletionGateBlockEvent(config, "task_progress_incomplete")
+		config.taskState.lastCompletionAttemptAt = Date.now() - 3000
+		block.params.task_progress = "- [ ] Verify regression"
 		config.taskState.currentFocusChainChecklist = "- [ ] Verify regression"
 		block.params.command = ""
-		assert.match(String(await handler.execute(config, block)), /focus chain has 1 incomplete item/)
+		assert.match(String(await handler.execute(config, block)), /task_progress has 1 incomplete item/)
 		const notices = callbacks.say.getCalls().filter((call) => call.args[0] === "info")
-		assert.match(notices[0].args[1], /focus chain/)
+		assert.match(notices[0].args[1], /task_progress/)
 		for (const notice of notices) assert.doesNotMatch(notice.args[1], /<\/?completion_gate\w*\b/)
 	})
 	for (const result of ["Fixed.", "Verified the requested fix.\n- [x] Regression test passed"]) {
@@ -216,7 +227,7 @@ describe("completion command execution", () => {
 			const { handler, config, callbacks, block, readinessHint } = fixture(true, true, false)
 			readinessHint.callThrough()
 			config.taskState.currentFocusChainChecklist = "- [x] Implement change\n- [x] Verify regression"
-			block.params = { result, command: "" }
+			block.params = { result, command: "", task_progress: undefined }
 			assert.match(String(await handler.execute(config, block)), /Result: Done/)
 			const completionMessages = callbacks.say.getCalls().filter((call) => call.args[0] === "completion_result")
 			assert.equal(completionMessages.length, 1)
@@ -265,5 +276,59 @@ describe("completion command execution", () => {
 			callbacks.ask.getCalls().map((call) => call.args[0]),
 			["completion_result"],
 		)
+	})
+
+	function createMockReviewReport(
+		decision: CriticalCompletionReviewReport["decision"],
+		coordinatorFinalReportMarkdown: string,
+	): CriticalCompletionReviewReport {
+		return {
+			reviewId: "test-review-id",
+			completionEventId: "test-completion-id",
+			streamId: "test-stream-id",
+			executed: true,
+			featureState: resolveEffectiveAgentSwarmState(),
+			passType: "initial_adversarial_review",
+			decision,
+			decisionJustification: `Test decision: ${decision}`,
+			confirmedDefects: [],
+			unverifiedRisksAndAssumptions: [],
+			optionalAndSubjectiveItems: [],
+			prioritizedCorrectiveTasks: [],
+			cycleState: {
+				completionEventId: "test-completion-id",
+				streamId: "test-stream-id",
+				initialReviewsUsed: 1,
+				maxInitialReviews: 2,
+				correctivePassesUsed: 0,
+				maxCorrectivePasses: 2,
+				remediationAuthorized: true,
+				updatedAt: Date.now(),
+			},
+			coordinatorFinalReportMarkdown,
+			timestamp: Date.now(),
+		}
+	}
+
+	it("does not increment consecutiveMistakeCount when review decision is REMEDIATE", async () => {
+		const { handler, config, block } = fixture()
+		sinon
+			.stub(pipeline, "evaluateOptionalCriticalCompletionReview")
+			.resolves(createMockReviewReport("REMEDIATE", "Remediation required for discovered defect."))
+		config.taskState.consecutiveMistakeCount = 0
+		const res = await handler.execute(config, block)
+		assert.match(String(res), /Remediation required/)
+		assert.equal(config.taskState.consecutiveMistakeCount, 0)
+	})
+
+	it("increments consecutiveMistakeCount when review decision is ESCALATE", async () => {
+		const { handler, config, block } = fixture()
+		sinon
+			.stub(pipeline, "evaluateOptionalCriticalCompletionReview")
+			.resolves(createMockReviewReport("ESCALATE", "Escalation required."))
+		config.taskState.consecutiveMistakeCount = 0
+		const res = await handler.execute(config, block)
+		assert.match(String(res), /Escalation required/)
+		assert.equal(config.taskState.consecutiveMistakeCount, 1)
 	})
 })

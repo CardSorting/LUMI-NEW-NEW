@@ -5,11 +5,11 @@
 	"version": "26.4.0",
 	"icon": "assets/icons/icon.png",
 	"workspaces": [
-		".",
 		"broccolidb"
 	],
 	"engines": {
-		"vscode": "^1.101.0"
+		"vscode": "^1.101.0",
+		"node": "^22.15.0 || ^24.0.0"
 	},
 	"author": {
 		"name": "DietCode Inc."
@@ -18,7 +18,7 @@
 	"publisher": "CardSorting",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/CardSorting/DietCodeMarie"
+		"url": "git+https://github.com/CardSorting/DietCodeMarie.git"
 	},
 	"homepage": "https://dietcode.io",
 	"categories": [
@@ -548,12 +548,13 @@
 		"format": "biome format --changed --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error",
 		"format:fix": "biome check --changed --no-errors-on-unmatched --files-ignore-unknown=true --write",
 		"fix:all": "biome check --no-errors-on-unmatched --files-ignore-unknown=true --write --diagnostic-level=error --unsafe",
-		"ci:check-all": "npx npm-run-all -p check-types lint format roadmap:audit docs:check-agent-links docs:check-agent-branding docs:check-root-readme docs:check-root-readme-links docs:check-docs-readme docs:check-readme-metrics doctor:ci test:doctor",
+		"ci:check-all": "npx npm-run-all -p check-types lint format roadmap:audit docs:check-agent-links docs:check-agent-branding docs:check-agentswarm docs:check-root-readme docs:check-root-readme-links docs:check-docs-readme docs:check-readme-metrics doctor:ci test:doctor",
 		"ci:build": "npm run protos && npm run build:webview && node esbuild.mjs && npm run compile-tests",
 		"pretest": "npm run compile && npm run compile-tests && npm run lint",
 		"test": "npx npm-run-all test:unit test:integration",
 		"test:integration": "vscode-test",
 		"test:unit": "cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha",
+		"test:swarm": "cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --exit --no-config --timeout 20000 -r ts-node/register -r tsconfig-paths/register -r ./src/test/requires.cjs src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts src/infrastructure/ai/__tests__/Orchestrator.test.ts \"src/core/task/legion/__tests__/*.test.ts\" src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts src/shared/storage/__tests__/state-keys.test.ts src/core/api/__tests__/openai-codex.streaming.test.ts src/core/task/__tests__/StreamResponseHandler.test.ts src/integrations/terminal/__tests__/heredocPolicy.test.ts src/integrations/terminal/__tests__/terminalFileReadPolicy.test.ts src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts src/hosts/vscode/terminal/TerminalOutputDecoder.test.ts src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts",
 		"test:execution": "node scripts/test-execution-reliability.cjs",
 		"test:unit:update-snapshots": "cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json UPDATE_SNAPSHOTS=true mocha",
 		"roadmap:audit": "npx ts-node -P tsconfig.unit-test.json -r tsconfig-paths/register scripts/roadmap_audit.ts",
@@ -591,9 +592,10 @@
 		"docs:check-links": "cd docs && npm run check",
 		"docs:check-agent-links": "node scripts/check-agent-docs-links.mjs",
 		"docs:check-agent-branding": "node scripts/check-agent-docs-branding.mjs",
+		"docs:check-agentswarm": "node scripts/check-agentswarm-docs.mjs",
 		"docs:check-root-readme": "node scripts/check-root-readme.mjs",
 		"docs:check-docs-readme": "node scripts/check-docs-readme.mjs",
-		"docs:check-all": "npx npm-run-all docs:check-agent-links docs:check-agent-branding docs:check-root-readme docs:check-root-readme-links docs:check-docs-readme docs:check-readme-metrics docs:check-links",
+		"docs:check-all": "npx npm-run-all docs:check-agent-links docs:check-agent-branding docs:check-agentswarm docs:check-root-readme docs:check-root-readme-links docs:check-docs-readme docs:check-readme-metrics docs:check-links",
 		"docs:check-readme-metrics": "node scripts/check-readme-metrics.mjs",
 		"docs:check-root-readme-links": "node scripts/check-root-readme-links.mjs",
 		"docs:tag-legacy-providers": "node scripts/tag-legacy-provider-docs.mjs",
@@ -635,7 +637,7 @@
 		"@vscode/test-cli": "^0.0.10",
 		"@vscode/test-electron": "^2.5.2",
 		"@vscode/vsce": "^3.6.0",
-		"c8": "^10.1.3",
+		"c8": "^9.1.0",
 		"chai": "^4.3.10",
 		"chalk": "^5.6.2",
 		"cross-env": "^10.1.0",
@@ -651,9 +653,9 @@
 		"rimraf": "^6.0.1",
 		"semver": "^7.7.4",
 		"should": "^13.2.3",
-		"sinon": "^19.0.2",
+		"sinon": "^22.1.0",
 		"tree-kill": "^1.2.2",
-		"ts-morph": "^27.0.2",
+		"ts-morph": "^17.0.1",
 		"ts-node": "^10.9.2",
 		"ts-proto": "^2.6.1",
 		"tsconfig-paths": "^4.2.0",
@@ -675,25 +677,24 @@
 		"@grpc/reflection": "^1.0.4",
 		"@mistralai/mistralai": "^1.5.0",
 		"@modelcontextprotocol/sdk": "^1.25.1",
-		"@noorm/broccolidb": "workspace:*",
-		"@opentelemetry/api": "^1.9.0",
-		"@opentelemetry/core": "^2.1.0",
-		"@opentelemetry/exporter-logs-otlp-grpc": "^0.56.0",
-		"@opentelemetry/exporter-logs-otlp-http": "^0.56.0",
-		"@opentelemetry/exporter-logs-otlp-proto": "^0.56.0",
-		"@opentelemetry/exporter-metrics-otlp-grpc": "^0.56.0",
-		"@opentelemetry/exporter-metrics-otlp-http": "^0.56.0",
-		"@opentelemetry/exporter-metrics-otlp-proto": "^0.56.0",
-		"@opentelemetry/exporter-prometheus": "^0.56.0",
-		"@opentelemetry/exporter-trace-otlp-http": "^0.56.0",
-		"@opentelemetry/instrumentation": "^0.205.0",
-		"@opentelemetry/instrumentation-http": "^0.205.0",
-		"@opentelemetry/resources": "^1.30.1",
-		"@opentelemetry/sdk-logs": "^0.56.0",
-		"@opentelemetry/sdk-metrics": "^1.30.1",
-		"@opentelemetry/sdk-node": "^0.56.0",
-		"@opentelemetry/sdk-trace-base": "^2.1.0",
-		"@opentelemetry/sdk-trace-node": "^1.30.1",
+		"@noorm/broccolidb": "file:broccolidb",
+		"@opentelemetry/api": "^1.10.0",
+		"@opentelemetry/api-logs": "^0.223.0",
+		"@opentelemetry/core": "^3.0.0",
+		"@opentelemetry/exporter-logs-otlp-grpc": "^0.300.0",
+		"@opentelemetry/exporter-logs-otlp-http": "^0.300.0",
+		"@opentelemetry/exporter-logs-otlp-proto": "^0.300.0",
+		"@opentelemetry/exporter-metrics-otlp-grpc": "^0.300.0",
+		"@opentelemetry/exporter-metrics-otlp-http": "^0.300.0",
+		"@opentelemetry/exporter-metrics-otlp-proto": "^0.300.0",
+		"@opentelemetry/exporter-prometheus": "^0.300.0",
+		"@opentelemetry/exporter-trace-otlp-http": "^0.300.0",
+		"@opentelemetry/instrumentation": "^0.300.0",
+		"@opentelemetry/instrumentation-http": "^0.300.0",
+		"@opentelemetry/resources": "^3.0.0",
+		"@opentelemetry/sdk-logs": "^3.0.0",
+		"@opentelemetry/sdk-metrics": "^3.0.0",
+		"@opentelemetry/sdk-node": "^0.300.0",
 		"@opentelemetry/semantic-conventions": "^1.37.0",
 		"@playwright/test": "^1.55.1",
 		"@sap-ai-sdk/ai-api": "^2.7.0",
@@ -703,7 +704,6 @@
 		"@tailwindcss/vite": "^4.1.14",
 		"@types/uuid": "^10.0.0",
 		"@vscode/codicons": "^0.0.36",
-		"archiver": "^7.0.1",
 		"aws4fetch": "^1.0.20",
 		"axios": "^1.12.0",
 		"better-sqlite3": "^13.0.3",
@@ -728,6 +728,7 @@
 		"isbinaryfile": "^5.0.2",
 		"jschardet": "^3.1.4",
 		"json5": "^2.2.3",
+		"jwt-decode": "^4.0.0",
 		"kysely": "^0.28.11",
 		"mammoth": "^1.11.0",
 		"nanoid": "^5.1.6",
@@ -745,12 +746,12 @@
 		"pdf-parse": "^1.1.1",
 		"picomatch": "^4.0.3",
 		"posthog-node": "^5.8.0",
-		"puppeteer-chromium-resolver": "^23.0.0",
-		"puppeteer-core": "^23.4.0",
+		"puppeteer-chromium-resolver": "^25.0.0",
+		"puppeteer-core": "^25.16.0",
 		"reconnecting-eventsource": "^1.6.4",
 		"serialize-error": "^11.0.3",
 		"shell-quote": "^1.8.3",
-		"simple-git": "^3.33.0",
+		"simple-git": "^4.0.2",
 		"strip-ansi": "^7.1.2",
 		"tailwindcss": "^4.1.14",
 		"tree-sitter-wasms": "^0.1.11",
@@ -767,7 +768,31 @@
 		"tar-fs": ">=3.1.1",
 		"tar": "^7.5.2",
 		"vite": "^7.1.11",
-		"js-yaml": "^4.1.1"
+		"js-yaml": "^4.1.1",
+		"exceljs": {
+			"tmp": "^0.2.6",
+			"uuid": "^11.1.1"
+		},
+		"gaxios": {
+			"uuid": "^11.1.1"
+		},
+		"mocha": {
+			"serialize-javascript": "^7.1.3"
+		},
+		"@typescript-eslint/typescript-estree": {
+			"minimatch": "^11.0.4"
+		},
+		"@vscode/test-cli": {
+			"glob": "^14.0.3",
+			"minimatch": "^11.0.4"
+		},
+		"@vscode/vsce": {
+			"glob": "^14.0.3",
+			"minimatch": "^11.0.4"
+		},
+		"istanbul-lib-processinfo": {
+			"uuid": "^11.1.1"
+		}
 	},
 	"c8": {
 		"reporter": [

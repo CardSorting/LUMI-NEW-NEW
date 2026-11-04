@@ -51,20 +51,35 @@ export class EnvironmentIntegrity {
 	private probePromise: Promise<EnvironmentLease> | null = null
 	private readonly LEASE_DURATION = 1000 * 60 * 60 // 1 hour lease
 
-	private static readonly PROJECT_MARKERS: Record<string, { manifest: string; binary: string; args: string[] }> = {
+	private static readonly activeInstances = new Set<EnvironmentIntegrity>()
+
+	public static readonly PROJECT_MARKERS: Record<string, { manifest: string; binary: string; args: string[] }> = {
 		node: { manifest: "package.json", binary: "node", args: ["-v"] },
 		python: { manifest: "requirements.txt", binary: "python3", args: ["--version"] },
 		rust: { manifest: "Cargo.toml", binary: "cargo", args: ["--version"] },
 		go: { manifest: "go.mod", binary: "go", args: ["version"] },
 		dart: { manifest: "pubspec.yaml", binary: "dart", args: ["--version"] },
 		ruby: { manifest: "Gemfile", binary: "ruby", args: ["-v"] },
+		cmake: { manifest: "CMakeLists.txt", binary: "cmake", args: ["--version"] },
+		c_cpp: { manifest: "Makefile", binary: "make", args: ["--version"] },
+		meson: { manifest: "meson.build", binary: "meson", args: ["--version"] },
+		gradle: { manifest: "build.gradle", binary: "gradle", args: ["--version"] },
+		maven: { manifest: "pom.xml", binary: "mvn", args: ["--version"] },
+	}
+
+	public static invalidateCache(): void {
+		for (const instance of EnvironmentIntegrity.activeInstances) {
+			instance.revokeLease()
+		}
 	}
 
 	constructor(
 		private readonly cwd: string,
 		private readonly stateManager?: StateManager,
 		private readonly runCommand = probeCommand,
-	) {}
+	) {
+		EnvironmentIntegrity.activeInstances.add(this)
+	}
 
 	public getFingerprint(): string {
 		const env = process.env
@@ -102,6 +117,7 @@ export class EnvironmentIntegrity {
 
 	public revokeLease(): void {
 		this.lease = null
+		this.probePromise = null
 		if (this.stateManager) {
 			this.stateManager.setGlobalState("environmentalLease", undefined)
 		}

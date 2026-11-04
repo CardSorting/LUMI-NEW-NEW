@@ -6,7 +6,7 @@ import {
 	CLAUDE_SUBSCRIPTION_DIRECTSDK_DEFAULT_MODEL,
 	CLAUDE_SUBSCRIPTION_DIRECTSDK_MODELS,
 	CLAUDE_SUBSCRIPTION_DIRECTSDK_PROVIDER,
-} from "../../core/providers/provider-ids.js"
+} from "../../core/providers/provider-ids"
 
 export {
 	CLAUDE_SUBSCRIPTION_DIRECTSDK_DEFAULT_MODEL,

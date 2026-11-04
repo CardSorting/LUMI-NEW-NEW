@@ -232,7 +232,11 @@ describe("LegionAgentHost", () => {
 		const pending = host.execute(member, { handoff: [], signal: controller.signal })
 		await ready
 		controller.abort()
-		expect((await pending).status).to.equal("failed")
+		const result = await pending
+		expect(result.status).to.equal("cancelled")
+		if (result.status === "cancelled") {
+			expect(result.safeToRetry).to.equal(false)
+		}
 	})
 
 	it("requires a running command to settle before accepting completion", async () => {

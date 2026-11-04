@@ -2,7 +2,7 @@ import type { IController as Controller } from "@core/controller/types"
 import { MergeWorktreeRequest, MergeWorktreeResult } from "@shared/proto/dietcode/worktree"
 import { listWorktrees } from "@utils/git-worktree"
 import { getWorkspacePath } from "@utils/path"
-import simpleGit from "simple-git"
+import { simpleGit } from "simple-git"
 import { telemetryService } from "@/services/telemetry"
 
 /**

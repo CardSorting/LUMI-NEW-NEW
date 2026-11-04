@@ -33,14 +33,14 @@
     "type": "function",
     "function": {
       "name": "execute_command",
-      "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task.",
+      "description": "Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. Do not use this tool to read files (use read_file) or write files via heredocs (use write_to_file).",
       "strict": false,
       "parameters": {
         "type": "object",
         "properties": {
           "command": {
             "type": "string",
-            "description": "The CLI command to execute. This should be valid for the current operating system. Do not use the ~ character or $HOME to refer to the home directory. Always use absolute paths. The command will be executed from the current workspace, you do not need to cd to the workspace."
+            "description": "The CLI command to execute. This should be valid for the current operating system. Do not use the ~ character or $HOME to refer to the home directory. Always use absolute paths. The command will be executed from the current workspace, you do not need to cd to the workspace. Do not use cat to read files or heredocs to write files."
           },
           "requires_approval": {
             "type": "boolean",
@@ -557,43 +557,6 @@
   {
     "type": "function",
     "function": {
-      "name": "use_subagents",
-      "description": "Run up to five focused in-process subagents in parallel for independent investigation, implementation, debugging, or verification. Each helper can use its exposed tools to read and edit files, execute commands, and check results within the assigned scope and configured permissions. Give each helper a concrete deliverable and useful context. Use one or more helpers when delegation materially accelerates the task; reconcile their evidence and continue execution without peer-approval ceremonies.",
-      "strict": false,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "prompt_1": {
-            "type": "string",
-            "description": "First subagent prompt."
-          },
-          "prompt_2": {
-            "type": "string",
-            "description": "Optional second subagent prompt."
-          },
-          "prompt_3": {
-            "type": "string",
-            "description": "Optional third subagent prompt."
-          },
-          "prompt_4": {
-            "type": "string",
-            "description": "Optional fourth subagent prompt."
-          },
-          "prompt_5": {
-            "type": "string",
-            "description": "Optional fifth subagent prompt."
-          }
-        },
-        "required": [
-          "prompt_1"
-        ],
-        "additionalProperties": false
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
       "name": "read_command_output",
       "description": "Read bounded output and authoritative status for an existing execute_command execution in this task. Never starts, restarts, or stops a command. Use its execution_id after a foreground timeout instead of running the command again. Completed receipts remain available for the latest 64 runs in this session. Exit code 0 confirms success; unknown or missing exit codes do not. After unchanged output, do independent work or diagnose the blocker; do not poll indefinitely.",
       "strict": false,
@@ -627,7 +590,7 @@
         "properties": {
           "execution_id": {
             "type": "string",
-            "description": "Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Command results include their read_command_output handle. Expired or other-task IDs are rejected."
+            "description": "Omit for the shared inventory and queue state. Provide a command or action execution ID to inspect that same operation, including retained results older than the recent summary. Helper receipts include structured helper_handoff with committed paths and pending command IDs, including late results after a batch stops waiting. Command results include their read_command_output handle. After a host restart, historical receipts have recovery.authority=none: inspect their evidence without assuming a live owner or replaying unfinished work. Recovery issues are reported explicitly. Expired or other-task IDs are rejected."
           }
         },
         "required": [],

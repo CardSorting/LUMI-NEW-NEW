@@ -62,6 +62,7 @@ export type WriteOp = {
 	// Level 6: Pre-calculated Metadata
 	hasIncrements?: boolean
 	dedupKey?: string
+	opSeq?: number
 }
 
 const LAYER_PRIORITY: Record<DbLayer, number> = {
@@ -107,6 +108,7 @@ export class BufferedDbPool {
 	private warmedIndices = new Set<string>() // Level 9: Authoritative Memory Indices
 	private started = false
 	private stopped = false
+	private nextOpSeq = 0
 
 	constructor() {
 		// Timers are started lazily on first use so importing this singleton cannot
@@ -139,6 +141,8 @@ export class BufferedDbPool {
 			this.flushTimeout = null
 			try {
 				await this.flush()
+			} catch (flushErr) {
+				Logger.error("[DbPool] Background scheduled flush error:", flushErr)
 			} finally {
 				const release = await this.stateMutex.acquire()
 				try {
@@ -157,6 +161,7 @@ export class BufferedDbPool {
 				}
 			}
 		}, delay)
+		this.flushTimeout?.unref?.()
 	}
 
 	private cleanupInterval: NodeJS.Timeout | null = null
@@ -178,16 +183,35 @@ export class BufferedDbPool {
 
 	private async cleanupShadows() {
 		const release = await this.stateMutex.acquire()
+		let shadowAgentIds: string[] = []
 		try {
-			const now = Date.now()
-			const SHADOW_EXPIRATION = 5 * 60 * 1000
-			for (const [agentId, shadow] of this.agentShadows.entries()) {
-				if (now - shadow.lastUpdated > SHADOW_EXPIRATION) {
-					this.agentShadows.delete(agentId)
-				}
-			}
+			if (this.agentShadows.size === 0) return
+			shadowAgentIds = Array.from(this.agentShadows.keys())
 		} finally {
 			release()
+		}
+
+		try {
+			const db = await this.ensureDb()
+			const terminated = await db
+				.selectFrom("agent_streams")
+				.select(["id", "status"])
+				.where("id", "in", shadowAgentIds)
+				.where("status", "in", ["completed", "failed"])
+				.execute()
+
+			if (terminated.length > 0) {
+				const releaseClean = await this.stateMutex.acquire()
+				try {
+					for (const row of terminated) {
+						this.agentShadows.delete(row.id)
+					}
+				} finally {
+					releaseClean()
+				}
+			}
+		} catch {
+			// Database may not be ready or tables may not exist yet
 		}
 	}
 
@@ -287,6 +311,9 @@ export class BufferedDbPool {
 		let currentBufferLength = 0
 
 		for (const op of ops) {
+			if (op.opSeq === undefined) {
+				op.opSeq = ++this.nextOpSeq
+			}
 			if (agentId) op.agentId = agentId
 			this.detectMetadata(op)
 
@@ -385,7 +412,7 @@ export class BufferedDbPool {
 		}
 	}
 
-	public async rollbackWork(agentId: string, _reason?: string) {
+	public async clearShadow(agentId: string) {
 		this.ensureStarted()
 		const release = await this.stateMutex.acquire()
 		try {
@@ -393,6 +420,10 @@ export class BufferedDbPool {
 		} finally {
 			release()
 		}
+	}
+
+	public async rollbackWork(agentId: string, _reason?: string) {
+		return this.clearShadow(agentId)
 	}
 
 	public async runTransaction<T>(callback: (agentId: string) => Promise<T>): Promise<T> {
@@ -462,7 +493,7 @@ export class BufferedDbPool {
 							const pB = LAYER_PRIORITY[b.layer ?? "plumbing"]
 							if (pA !== pB) return pA - pB
 							if (a.table !== b.table) return (a.table as string).localeCompare(b.table as string)
-							return (a.type as string).localeCompare(b.type as string)
+							return (a.opSeq ?? 0) - (b.opSeq ?? 0)
 						})
 				} else if (this.inFlightOps.size > 0) {
 					opsToFlush = Array.from(this.inFlightOps.values()).flat()
@@ -534,6 +565,10 @@ export class BufferedDbPool {
 				err.message?.includes("interrupted") ||
 				err.message?.includes("Library used incorrectly")
 
+			if (!isRetryable) {
+				Logger.error("[DbPool] Non-retryable flush failure:", err)
+			}
+
 			const releaseStateFail = await this.stateMutex.acquire()
 			try {
 				if (isRetryable) {
@@ -556,7 +591,7 @@ export class BufferedDbPool {
 			} finally {
 				releaseStateFail()
 			}
-			if (isRetryable) throw e
+			throw e
 		} finally {
 			releaseFlush()
 		}

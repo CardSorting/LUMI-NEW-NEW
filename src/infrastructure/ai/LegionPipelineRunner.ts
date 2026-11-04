@@ -11,7 +11,8 @@ import { orchestrator } from "./Orchestrator"
 export type LegionExecutionResult =
 	| { status: "completed"; summary: string }
 	| { status: "failed"; reason: string; safeToRetry?: boolean }
-	| { status: "unresolved"; reason: string }
+	| { status: "unresolved"; reason: string; safeToRetry?: boolean }
+	| { status: "cancelled"; safeToRetry?: false; reason?: string }
 
 export interface LegionExecutionHost {
 	/** Must settle only after its execution has stopped, including on cancellation. */

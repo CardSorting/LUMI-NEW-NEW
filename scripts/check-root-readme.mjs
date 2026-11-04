@@ -112,7 +112,7 @@ const requiredLinks = [
 	"LICENSE",
 	"SECURITY.md",
 	"assets/docs/demo.gif",
-	"changelogv3.md",
+	"CHANGELOG.md",
 	"docs/customization/hooks.mdx",
 	"docs/features/roadmap-steering.mdx",
 	"docs/core-workflows/working-with-files.mdx",

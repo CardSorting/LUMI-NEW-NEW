@@ -1,11 +1,15 @@
 import type { ApiHandler } from "@core/api"
 import { expect } from "chai"
+import sinon from "sinon"
 import { LegionAgentHost } from "@/core/task/legion/LegionAgentHost"
 import { createLegionToolAdapter } from "@/core/task/legion/LegionToolAdapter"
 import { TaskState } from "@/core/task/TaskState"
+import * as completionPipeline from "@/core/task/tools/completionGatePipeline"
 import { evaluateOptionalCriticalCompletionReview, runCompletionGateFlow } from "@/core/task/tools/completionGatePipeline"
 import { ToolExecutorCoordinator } from "@/core/task/tools/ToolExecutorCoordinator"
 import type { TaskConfig } from "@/core/task/tools/types/TaskConfig"
+import { Logger } from "@/shared/services/Logger"
+import { DietCodeDefaultTool } from "@/shared/tools"
 import { dbPool } from "../../db/BufferedDbPool"
 import {
 	getAgentSwarmConfig,
@@ -408,6 +412,41 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			expect(manualReport).to.not.equal(null)
 			expect(manualReport?.executed).to.equal(true)
 			expect(manualReport?.decision).to.equal("ACCEPT")
+
+			// 4. Critical review REMEDIATE decision does NOT increment consecutiveMistakeCount
+			const { AttemptCompletionHandler } = await import("@/core/task/tools/handlers/AttemptCompletionHandler")
+			const completionHandler = new AttemptCompletionHandler()
+			const testTaskConfig: any = {
+				cwd: "/test",
+				ulid: "test-ulid",
+				taskId: "test-task",
+				mode: "act",
+				taskState: new TaskState(),
+				api: { getModel: () => ({ id: "test-model" }) },
+				messageState: { getDietCodeMessages: () => [] },
+				services: { browserSession: { closeBrowser: async () => {} } },
+				coordinator: { getHandler: () => null },
+			}
+			testTaskConfig.taskState.consecutiveMistakeCount = 0
+
+			const reviewStub = sinon.stub(completionPipeline, "evaluateOptionalCriticalCompletionReview").resolves({
+				executed: true,
+				decision: "REMEDIATE",
+				coordinatorFinalReportMarkdown: "Found 1 defect needing remediation.",
+			} as any)
+
+			try {
+				const toolResult = await completionHandler.execute(testTaskConfig, {
+					type: "tool_use",
+					name: DietCodeDefaultTool.ATTEMPT,
+					params: { result: "Done" },
+					partial: false,
+				})
+				expect(String(toolResult)).to.include("Found 1 defect needing remediation")
+				expect(testTaskConfig.taskState.consecutiveMistakeCount).to.equal(0)
+			} finally {
+				reviewStub.restore()
+			}
 		})
 	})
 
@@ -928,6 +967,100 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 
 				const after = await orchestrator.getDeferredPipelineStatus(root.id)
 				expect(after?.phase).to.equal("suspended")
+			})
+		})
+
+		it("executes operations in strict causal opSeq order: upsert followed by delete in same batch deletes record", async () => {
+			await withRealSqlite(async (file) => {
+				const stream = await orchestrator.createStream("Causal stream")
+				await dbPool.flush()
+				// Push upsert then delete for same composite key in active buffer
+				await dbPool.push({
+					type: "upsert",
+					table: "agent_memory",
+					conflictTarget: ["streamId", "key"],
+					where: [
+						{ column: "streamId", value: stream.id },
+						{ column: "key", value: "causal_test_key" },
+					],
+					values: { streamId: stream.id, key: "causal_test_key", value: "alive", updatedAt: Date.now() },
+					layer: "domain",
+				})
+				await dbPool.push({
+					type: "delete",
+					table: "agent_memory",
+					where: [
+						{ column: "streamId", value: stream.id },
+						{ column: "key", value: "causal_test_key" },
+					],
+					layer: "domain",
+				})
+				await dbPool.flush()
+
+				const Database = (await import("better-sqlite3")).default
+				const raw = new Database(file, { readonly: true })
+				try {
+					const row = raw
+						.prepare("select value from agent_memory where streamId = ? and key = 'causal_test_key'")
+						.get(stream.id)
+					expect(row).to.equal(undefined)
+				} finally {
+					raw.close()
+				}
+			})
+		})
+
+		it("throws on non-retryable flush errors and logs structured failure without swallowing", async () => {
+			await withRealSqlite(async () => {
+				const logSpy = sinon.spy(Logger, "error")
+				try {
+					await dbPool.push({
+						type: "insert",
+						table: "agent_tasks",
+						values: {
+							id: "bad-task",
+							streamId: "non-existent-stream-fk-fail",
+							description: "broken",
+							status: "invalid-status-type",
+							createdAt: Date.now(),
+						},
+						layer: "plumbing",
+					})
+					let errorThrown: unknown = null
+					try {
+						await dbPool.flush()
+					} catch (e) {
+						errorThrown = e
+					}
+					expect(errorThrown).to.not.equal(null)
+					expect(logSpy.calledWithMatch(sinon.match(/\[DbPool\] Non-retryable flush failure:/))).to.equal(true)
+				} finally {
+					logSpy.restore()
+				}
+			})
+		})
+
+		it("retains shadow buffers and explicitly clears them on clearShadow", async () => {
+			await withRealSqlite(async () => {
+				const testAgentId = "agent-shadow-test-1"
+				await dbPool.beginWork(testAgentId)
+				await dbPool.push(
+					{
+						type: "insert",
+						table: "agent_tasks",
+						values: {
+							id: "task-shadow-1",
+							streamId: "stream-shadow-1",
+							description: "shadow task",
+							status: "pending",
+							createdAt: Date.now(),
+						},
+					},
+					testAgentId,
+				)
+				expect((dbPool as any).agentShadows.has(testAgentId)).to.equal(true)
+				await dbPool.clearShadow(testAgentId)
+				expect((dbPool as any).agentShadows.has(testAgentId)).to.equal(false)
 			})
 		})
 	})

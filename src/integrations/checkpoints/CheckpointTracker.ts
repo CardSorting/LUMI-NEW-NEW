@@ -2,7 +2,7 @@ import { sendCheckpointEvent } from "@core/controller/checkpoints/subscribeToChe
 import fs from "fs/promises"
 import { isBinaryFile } from "isbinaryfile"
 import * as path from "path"
-import simpleGit from "simple-git"
+import { simpleGit } from "simple-git"
 import type { FolderLockWithRetryResult } from "@/core/locks/types"
 import { telemetryService } from "@/services/telemetry"
 import { Logger } from "@/shared/services/Logger"

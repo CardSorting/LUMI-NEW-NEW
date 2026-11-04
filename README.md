@@ -18,11 +18,11 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/version-26.0.0-green" alt="Version" /></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/version-26.4.0-green" alt="Version" /></a>
   <img src="https://img.shields.io/badge/VS%20Code-%5E1.84.0-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code" />
   <img src="https://img.shields.io/badge/extension-CardSorting.lumi--vscode-purple" alt="VS Marketplace ID" />
   <img src="https://img.shields.io/badge/Open%20VSX-CardSorting.lumi-blue" alt="Open VSX ID" />
-  <img src="https://img.shields.io/badge/tools-63-orange" alt="Tools" />
+  <img src="https://img.shields.io/badge/tools-64-orange" alt="Tools" />
   <img src="https://img.shields.io/badge/providers-7-blue" alt="Providers" />
   <a href="https://github.com/CardSorting/DietCodeMarie"><img src="https://img.shields.io/github/stars/CardSorting/DietCodeMarie?style=social" alt="GitHub" /></a>
 </p>
@@ -99,31 +99,31 @@ npm run package:vsix && code --install-extension dist/*.vsix
 
 Task history and cognitive memory use **BroccoliDB** (`@noorm/broccolidb`) locally. The sidebar UX is designed for **long sessions** without alert fatigue.
 
-| | |
-|---|---|
-| **Publisher** | CardSorting |
-| **Extension ID (VS Marketplace)** | `CardSorting.lumi-vscode` |
-| **Extension ID (Open VSX)** | `CardSorting.lumi` |
-| **License** | [Apache-2.0](LICENSE) |
-| **Repository** | [github.com/CardSorting/DietCodeMarie](https://github.com/CardSorting/DietCodeMarie) |
-| **Homepage** | [dietcode.io](https://dietcode.io) |
-| **Changelog** | [changelogv3.md](changelogv3.md) |
-| **Monorepo** | npm workspaces: root extension + `broccolidb/` package |
-| **Marketplace** | VS Marketplace: **CardSorting.lumi-vscode** · Open VSX: **CardSorting.lumi** (search **LUMI**) |
-| **Enterprise** | [docs/ENTERPRISE_DEPLOYMENT.md](docs/ENTERPRISE_DEPLOYMENT.md) — on-prem / self-hosted |
+|                                   |                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------- |
+| **Publisher**                     | CardSorting                                                                                    |
+| **Extension ID (VS Marketplace)** | `CardSorting.lumi-vscode`                                                                      |
+| **Extension ID (Open VSX)**       | `CardSorting.lumi`                                                                             |
+| **License**                       | [Apache-2.0](LICENSE)                                                                          |
+| **Repository**                    | [github.com/CardSorting/DietCodeMarie](https://github.com/CardSorting/DietCodeMarie)           |
+| **Homepage**                      | [dietcode.io](https://dietcode.io)                                                             |
+| **Changelog**                     | [CHANGELOG.md](CHANGELOG.md)                                                                   |
+| **Monorepo**                      | npm workspaces: root extension + `broccolidb/` package                                         |
+| **Marketplace**                   | VS Marketplace: **CardSorting.lumi-vscode** · Open VSX: **CardSorting.lumi** (search **LUMI**) |
+| **Enterprise**                    | [docs/ENTERPRISE_DEPLOYMENT.md](docs/ENTERPRISE_DEPLOYMENT.md) — on-prem / self-hosted         |
 
 Workspace-verified metrics: [docs/papers/companion-brief.md](docs/papers/companion-brief.md).
 
 ### By the numbers
 
-| Metric | Value |
-|--------|-------|
-| Typed tools | **63** (`src/shared/tools.ts`) |
-| Read-only tools | **13** (`READ_ONLY_TOOLS`) |
-| Wired providers | **7** (`providers.json`) |
-| Slash commands | **10** |
-| Hook kinds | **8** |
-| Agent modes | **plan** · **act** |
+| Metric          | Value                          |
+| --------------- | ------------------------------ |
+| Typed tools     | **64** (`src/shared/tools.ts`) |
+| Read-only tools | **13** (`READ_ONLY_TOOLS`)     |
+| Wired providers | **7** (`providers.json`)       |
+| Slash commands  | **10**                         |
+| Hook kinds      | **8**                          |
+| Agent modes     | **plan** · **act**             |
 
 ---
 
@@ -131,12 +131,12 @@ Workspace-verified metrics: [docs/papers/companion-brief.md](docs/papers/compani
 
 Four design pillars — each maps to code, not marketing copy. Full treatment: [docs/papers/philosophy.md](docs/papers/philosophy.md).
 
-| Pillar | What it means in practice |
-|--------|---------------------------|
-| **Calm agency** | Sidebar stays readable; you approve mutating work on your schedule |
-| **Typed tools** | 63 enum values in `src/shared/tools.ts` → dedicated handlers — no ad-hoc shell |
-| **Plan before mutate** | Plan mode + `plan_mode_respond` before Act mode file changes |
-| **Provable finish** | `attempt_completion` runs through `completionGatePipeline.ts` — “done” is gated |
+| Pillar                 | What it means in practice                                                       |
+| ---------------------- | ------------------------------------------------------------------------------- |
+| **Calm agency**        | Sidebar stays readable; you approve mutating work on your schedule              |
+| **Typed tools**        | 64 enum values in `src/shared/tools.ts` → dedicated handlers — no ad-hoc shell  |
+| **Plan before mutate** | Plan mode + `plan_mode_respond` before Act mode file changes                    |
+| **Provable finish**    | `attempt_completion` runs through `completionGatePipeline.ts` — “done” is gated |
 
 BroccoliDB handles **substrate truth** (structure, snapshots, Spider). LUMI handles **the human session** (chat, diffs, terminal, MCP). Do not confuse the two: [docs/AGENT_STACK.md](docs/AGENT_STACK.md).
 
@@ -144,13 +144,13 @@ BroccoliDB handles **substrate truth** (structure, snapshots, Spider). LUMI hand
 
 ## Who LUMI is for
 
-| Persona | LUMI fit |
-|---------|----------|
-| **Solo developer** | Autonomous implementation in-editor with configurable approvals and checkpoints |
-| **Tech lead** | Roadmap steering, hooks, `.dietcoderules/` for team guardrails |
-| **Agent integrator** | MCP servers, subagents, typed tool surface to extend |
+| Persona                | LUMI fit                                                                              |
+| ---------------------- | ------------------------------------------------------------------------------------- |
+| **Solo developer**     | Autonomous implementation in-editor with configurable approvals and checkpoints       |
+| **Tech lead**          | Roadmap steering, hooks, `.dietcoderules/` for team guardrails                        |
+| **Agent integrator**   | MCP servers, subagents, typed tool surface to extend                                  |
 | **Substrate engineer** | BroccoliDB package for durable context — [broccolidb/README.md](broccolidb/README.md) |
-| **Doc contributor** | Measured papers + [docs/MAINTAINER.md](docs/MAINTAINER.md) CI guardrails |
+| **Doc contributor**    | Measured papers + [docs/MAINTAINER.md](docs/MAINTAINER.md) CI guardrails              |
 
 Choose automatic execution or selective approvals in settings. Existing user selections are preserved; the agent continues authorized work without repeated confirmation.
 
@@ -158,26 +158,26 @@ Choose automatic execution or selective approvals in settings. Existing user sel
 
 ## How LUMI differs
 
-| Typical autonomous agent | LUMI |
-|--------------------------|------|
-| Runs until stopped | **Verified outcome** defines when to finish; Stop remains available |
-| Opaque file changes | **Diff view** before write lands |
-| Hard to undo | **Checkpoints** — shadow Git after each tool use |
+| Typical autonomous agent  | LUMI                                                                              |
+| ------------------------- | --------------------------------------------------------------------------------- |
+| Runs until stopped        | **Verified outcome** defines when to finish; Stop remains available               |
+| Opaque file changes       | **Diff view** before write lands                                                  |
+| Hard to undo              | **Checkpoints** — shadow Git after each tool use                                  |
 | “Done” when model says so | **Relevant verification**, unfinished-work checks, and optional completion audits |
-| Generic shell access | **64 typed tools** with dedicated handlers |
-| External memory app | **BroccoliDB** integrated locally |
+| Generic shell access      | **64 typed tools** with dedicated handlers                                        |
+| External memory app       | **BroccoliDB** integrated locally                                                 |
 
 ---
 
 ## Local-first & data
 
-| Data | Location | Notes |
-|------|----------|-------|
-| **Settings & task refs** | `~/.dietcode/data/` | `globalState.json`, per-workspace state (`createStorageContext`) |
-| **API keys / secrets** | `~/.dietcode/data/secrets.json` | Mode `0600` — owner read/write only |
-| **BroccoliDB SQLite** | `./dietcode.db` (workspace cwd) | Local cognitive memory / runtime graph |
-| **Checkpoints** | VS Code `globalStorage/checkpoints/` | Shadow Git — not your project `.git/` |
-| **LLM requests** | Your chosen provider | Code context sent to OpenRouter, OpenAI, NousResearch, or Cloudflare when you run a task |
+| Data                     | Location                             | Notes                                                                                    |
+| ------------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------- |
+| **Settings & task refs** | `~/.dietcode/data/`                  | `globalState.json`, per-workspace state (`createStorageContext`)                         |
+| **API keys / secrets**   | `~/.dietcode/data/secrets.json`      | Mode `0600` — owner read/write only                                                      |
+| **BroccoliDB SQLite**    | `./dietcode.db` (workspace cwd)      | Local cognitive memory / runtime graph                                                   |
+| **Checkpoints**          | VS Code `globalStorage/checkpoints/` | Shadow Git — not your project `.git/`                                                    |
+| **LLM requests**         | Your chosen provider                 | Code context sent to OpenRouter, OpenAI, NousResearch, or Cloudflare when you run a task |
 
 Override storage root: `DIETCODE_DIR` or `CLINE_DIR` env var. Details: [docs/SECURITY_BEST_PRACTICES.md](docs/SECURITY_BEST_PRACTICES.md).
 
@@ -185,13 +185,13 @@ Override storage root: `DIETCODE_DIR` or `CLINE_DIR` env var. Details: [docs/SEC
 
 ## Compatibility
 
-| Environment | Support | Notes |
-|-------------|---------|-------|
-| **VS Code 1.84+** | Full | Primary target (`package.json` `engines.vscode`) |
-| **Cursor** | VSIX / marketplace | VS Code–compatible; install `CardSorting.lumi` (Open VSX) or `CardSorting.lumi-vscode` (VS Marketplace) |
-| **Git** | Required for checkpoints | Shadow Git repo in extension global storage |
-| **Node.js 20+** | Development only | Not required for end users installing from marketplace |
-| **git-lfs** | Clone only | Required when cloning this repository |
+| Environment              | Support                  | Notes                                                                                                   |
+| ------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| **VS Code 1.84+**        | Full                     | Primary target (`package.json` `engines.vscode`)                                                        |
+| **Cursor**               | VSIX / marketplace       | VS Code–compatible; install `CardSorting.lumi` (Open VSX) or `CardSorting.lumi-vscode` (VS Marketplace) |
+| **Git**                  | Required for checkpoints | Shadow Git repo in extension global storage                                                             |
+| **Node.js 22.15+ or 24** | Development only         | Use Node 22 or 24; not required for marketplace installations                                           |
+| **git-lfs**              | Clone only               | Required when cloning this repository                                                                   |
 
 **Conflict:** Disable other DietCode forks (`dreambeesai.dietcode`, `dietcode.dietcode`) to avoid activity bar collisions.
 
@@ -207,11 +207,11 @@ Override storage root: `DIETCODE_DIR` or `CLINE_DIR` env var. Details: [docs/SEC
 
 ### Methods
 
-| Method | Command / action |
-|--------|------------------|
+| Method          | Command / action                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------------- |
 | **Marketplace** | Extensions → search **LUMI** → **CardSorting.lumi-vscode** (VS Code) or **CardSorting.lumi** (Open VSX) |
-| **VSIX** | `npm run package:vsix` → `code --install-extension dist/lumi-vscode-<version>.vsix` |
-| **From source** | See [Development](#development) → press **F5** in VS Code |
+| **VSIX**        | `npm run package:vsix` → `code --install-extension dist/lumi-vscode-<version>.vsix`                     |
+| **From source** | See [Development](#development) → press **F5** in VS Code                                               |
 
 Provider setup: [docs/provider-config/README.mdx](docs/provider-config/README.mdx) · Full walkthrough: [docs/getting-started/quick-start.mdx](docs/getting-started/quick-start.mdx).
 
@@ -236,13 +236,13 @@ Provider setup: [docs/provider-config/README.mdx](docs/provider-config/README.md
 
 Per-project files LUMI reads from your workspace (primary root in multi-root setups):
 
-| File / directory | Purpose |
-|------------------|---------|
-| [`.dietcoderules/`](docs/customization/dietcode-rules.mdx) | Project rules — loaded into every request |
-| [`.dietcoderules/hooks/`](docs/customization/hooks.mdx) | Lifecycle hook scripts (`TaskStart`, `PreToolUse`, …) |
-| [`.dietcodeignore`](docs/customization/dietcodeignore.mdx) | Exclude paths from agent scanning |
-| `.dietcodeworkflows/` | Custom slash-command workflows |
-| `ROADMAP.md` | Advisory roadmap context and maintenance ([settings](#key-vs-code-settings)) |
+| File / directory                                           | Purpose                                                                      |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [`.dietcoderules/`](docs/customization/dietcode-rules.mdx) | Project rules — loaded into every request                                    |
+| [`.dietcoderules/hooks/`](docs/customization/hooks.mdx)    | Lifecycle hook scripts (`TaskStart`, `PreToolUse`, …)                        |
+| [`.dietcodeignore`](docs/customization/dietcodeignore.mdx) | Exclude paths from agent scanning                                            |
+| `.dietcodeworkflows/`                                      | Custom slash-command workflows                                               |
+| `ROADMAP.md`                                               | Advisory roadmap context and maintenance ([settings](#key-vs-code-settings)) |
 
 **First setup:** add `.dietcodeignore` early — largest impact on speed and focus. Tutorial: [your-first-project](docs/getting-started/your-first-project.mdx).
 
@@ -266,15 +266,15 @@ coverage/
 
 Type `@` in chat to attach context without copy-paste. Full guide: [working-with-files](docs/core-workflows/working-with-files.mdx).
 
-| Mention | Example | Brings in |
-|---------|---------|-----------|
-| File | `@/src/index.ts` | Full file content |
-| Folder | `@/src/components/` | Directory tree + files (trailing `/`) |
-| Problems | `@problems` | Workspace errors/warnings |
-| Terminal | `@terminal` | Recent terminal output |
-| Git diff | `@git-changes` | Uncommitted changes |
-| Commit | `@a1b2c3d` | Specific commit diff |
-| URL | `@https://react.dev/...` | Fetched page content |
+| Mention  | Example                  | Brings in                             |
+| -------- | ------------------------ | ------------------------------------- |
+| File     | `@/src/index.ts`         | Full file content                     |
+| Folder   | `@/src/components/`      | Directory tree + files (trailing `/`) |
+| Problems | `@problems`              | Workspace errors/warnings             |
+| Terminal | `@terminal`              | Recent terminal output                |
+| Git diff | `@git-changes`           | Uncommitted changes                   |
+| Commit   | `@a1b2c3d`               | Specific commit diff                  |
+| URL      | `@https://react.dev/...` | Fetched page content                  |
 
 Multi-root: `@workspace-name:/path/to/file`
 
@@ -282,14 +282,14 @@ Multi-root: `@workspace-name:/path/to/file`
 
 ## Recommended workflows
 
-| Goal | Workflow |
-|------|----------|
-| **Safe exploration** | Plan mode → approve reads → Act when ready; checkpoints on |
-| **Fast iteration** | Auto-approve reads + edits in workspace; restore checkpoint if wrong |
-| **Large refactor** | `/deep-planning` → `ROADMAP.md` steering → `/explain-changes` before commit |
-| **Team guardrails** | `.dietcoderules/` + `PreToolUse` hooks + `.dietcodeignore` |
-| **External tools** | MCP server → approve once → optional per-tool auto-approve |
-| **Long session** | `/compact` when context grows; memory tools for cross-task recall |
+| Goal                 | Workflow                                                                    |
+| -------------------- | --------------------------------------------------------------------------- |
+| **Safe exploration** | Plan mode → approve reads → Act when ready; checkpoints on                  |
+| **Fast iteration**   | Auto-approve reads + edits in workspace; restore checkpoint if wrong        |
+| **Large refactor**   | `/deep-planning` → `ROADMAP.md` steering → `/explain-changes` before commit |
+| **Team guardrails**  | `.dietcoderules/` + `PreToolUse` hooks + `.dietcodeignore`                  |
+| **External tools**   | MCP server → approve once → optional per-tool auto-approve                  |
+| **Long session**     | `/compact` when context grows; memory tools for cross-task recall           |
 
 ---
 
@@ -297,14 +297,14 @@ Multi-root: `@workspace-name:/path/to/file`
 
 Keep sessions fast and within model context windows:
 
-| Lever | Effect |
-|-------|--------|
-| [`.dietcodeignore`](docs/customization/dietcodeignore.mdx) | Exclude `node_modules/`, build output — largest token savings |
-| **Plan mode first** | Read-only exploration before mutating writes |
-| **`/compact`** | Condense history when context grows |
-| **Smaller models for reads** | Different Plan vs Act providers in settings |
-| **Scoped @ mentions** | Attach files/folders you need — not the whole repo |
-| **Checkpoints off** | On huge repos if shadow Git is slow (trade rollback for speed) |
+| Lever                                                      | Effect                                                         |
+| ---------------------------------------------------------- | -------------------------------------------------------------- |
+| [`.dietcodeignore`](docs/customization/dietcodeignore.mdx) | Exclude `node_modules/`, build output — largest token savings  |
+| **Plan mode first**                                        | Read-only exploration before mutating writes                   |
+| **`/compact`**                                             | Condense history when context grows                            |
+| **Smaller models for reads**                               | Different Plan vs Act providers in settings                    |
+| **Scoped @ mentions**                                      | Attach files/folders you need — not the whole repo             |
+| **Checkpoints off**                                        | On huge repos if shadow Git is slow (trade rollback for speed) |
 
 Guide: [model selection](docs/core-features/model-selection-guide.mdx) · [memory & reasoning](docs/MEMORY_AND_REASONING.md)
 
@@ -314,10 +314,10 @@ Guide: [model selection](docs/core-features/model-selection-guide.mdx) · [memor
 
 From `package.json` `contributes.keybindings`:
 
-| Shortcut (macOS) | Shortcut (Win/Linux) | Action |
-|------------------|----------------------|--------|
-| `Cmd+'` | `Ctrl+'` | Add selection to chat (`lumi.addToChat`) when text selected |
-| `Cmd+'` | `Ctrl+'` | Focus chat input (`lumi.focusChatInput`) when nothing selected |
+| Shortcut (macOS) | Shortcut (Win/Linux) | Action                                                         |
+| ---------------- | -------------------- | -------------------------------------------------------------- |
+| `Cmd+'`          | `Ctrl+'`             | Add selection to chat (`lumi.addToChat`) when text selected    |
+| `Cmd+'`          | `Ctrl+'`             | Focus chat input (`lumi.focusChatInput`) when nothing selected |
 
 Context menu: right-click editor → **Add to LUMI** · Terminal → **Add to LUMI**.
 
@@ -325,15 +325,15 @@ Context menu: right-click editor → **Add to LUMI** · Terminal → **Add to LU
 
 Registered under `lumi.*` in `package.json` (selection):
 
-| Command | Trigger |
-|---------|---------|
-| `lumi.focusChatInput` | Focus chat (`Cmd/Ctrl+'` when no selection) |
-| `lumi.addToChat` | Add selection to chat |
-| `lumi.addTerminalOutputToChat` | Terminal context menu |
-| `lumi.generateGitCommitMessage` | SCM input — AI commit message |
-| `lumi.explainCode` / `lumi.improveCode` | Editor context menu |
-| `lumi.openWalkthrough` | First-run walkthrough |
-| `lumi.mcpButtonClicked` | MCP panel in sidebar |
+| Command                                 | Trigger                                     |
+| --------------------------------------- | ------------------------------------------- |
+| `lumi.focusChatInput`                   | Focus chat (`Cmd/Ctrl+'` when no selection) |
+| `lumi.addToChat`                        | Add selection to chat                       |
+| `lumi.addTerminalOutputToChat`          | Terminal context menu                       |
+| `lumi.generateGitCommitMessage`         | SCM input — AI commit message               |
+| `lumi.explainCode` / `lumi.improveCode` | Editor context menu                         |
+| `lumi.openWalkthrough`                  | First-run walkthrough                       |
+| `lumi.mcpButtonClicked`                 | MCP panel in sidebar                        |
 
 ---
 
@@ -341,12 +341,12 @@ Registered under `lumi.*` in `package.json` (selection):
 
 Only **four** providers are wired in this build (`src/shared/providers/providers.json` → `buildApiHandler`). Other handler files in the repo are reference-only.
 
-| Provider key | UI label | Doc |
-|--------------|----------|-----|
-| `openrouter` | OpenRouter | [openrouter.mdx](docs/provider-config/openrouter.mdx) |
-| `openai-codex` | ChatGPT Subscription | [openai-codex.mdx](docs/provider-config/openai-codex.mdx) |
-| `nousResearch` | NousResearch | [nousresearch.mdx](docs/provider-config/nousresearch.mdx) |
-| `cloudflare` | Cloudflare Workers AI | [cloudflare.mdx](docs/provider-config/cloudflare.mdx) |
+| Provider key   | UI label              | Doc                                                       |
+| -------------- | --------------------- | --------------------------------------------------------- |
+| `openrouter`   | OpenRouter            | [openrouter.mdx](docs/provider-config/openrouter.mdx)     |
+| `openai-codex` | ChatGPT Subscription  | [openai-codex.mdx](docs/provider-config/openai-codex.mdx) |
+| `nousResearch` | NousResearch          | [nousresearch.mdx](docs/provider-config/nousresearch.mdx) |
+| `cloudflare`   | Cloudflare Workers AI | [cloudflare.mdx](docs/provider-config/cloudflare.mdx)     |
 
 Model selection guide: [docs/core-features/model-selection-guide.mdx](docs/core-features/model-selection-guide.mdx).
 
@@ -354,18 +354,18 @@ Model selection guide: [docs/core-features/model-selection-guide.mdx](docs/core-
 
 ## Capabilities
 
-| Capability | Detail |
-|------------|--------|
-| **64 typed tools** | `DietCodeDefaultTool` enum → `ToolExecutorCoordinator` handlers |
-| **Plan & Act modes** | Act executes by default; Plan supports focused exploration before implementation |
-| **Checkpoints** | Shadow Git snapshot after each tool use — compare or restore |
-| **10 slash commands** | `/compact`, `/newtask`, `/roadmap`, … — see below |
-| **MCP** | External tool servers via `McpHub` (`src/services/mcp/`) |
-| **Subagents** | Parallel delegation via dynamic subagent tools |
-| **8 hook kinds** | Lifecycle scripts — see [Lifecycle hooks](#lifecycle-hooks) |
-| **Project rules** | `.dietcoderules/` loaded into every request |
-| **Roadmap steering** | Advisory `ROADMAP.md` context and explicit maintenance tools |
-| **BroccoliDB memory** | Cognitive memory tools + Spider structural audit |
+| Capability              | Detail                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **64 typed tools**      | `DietCodeDefaultTool` enum → `ToolExecutorCoordinator` handlers                                                    |
+| **Plan & Act modes**    | Act executes by default; Plan supports focused exploration before implementation                                   |
+| **Checkpoints**         | Shadow Git snapshot after each tool use — compare or restore                                                       |
+| **10 slash commands**   | `/compact`, `/newtask`, `/roadmap`, … — see below                                                                  |
+| **MCP**                 | External tool servers via `McpHub` (`src/services/mcp/`)                                                           |
+| **Subagents**           | Parallel delegation via dynamic subagent tools                                                                     |
+| **8 hook kinds**        | Lifecycle scripts — see [Lifecycle hooks](#lifecycle-hooks)                                                        |
+| **Project rules**       | `.dietcoderules/` loaded into every request                                                                        |
+| **Roadmap steering**    | Advisory `ROADMAP.md` context and explicit maintenance tools                                                       |
+| **BroccoliDB memory**   | Cognitive memory tools + Spider structural audit                                                                   |
 | **Spider policy layer** | Forensic audit via `src/core/policy/spider/` — [architecture doc](docs/architecture/spider-v20-forensic-engine.md) |
 
 Tool reference: [docs/tools-reference/all-dietcode-tools.mdx](docs/tools-reference/all-dietcode-tools.mdx).
@@ -376,10 +376,10 @@ Tool reference: [docs/tools-reference/all-dietcode-tools.mdx](docs/tools-referen
 
 LUMI runs in **`plan`** or **`act`** mode (`src/shared/storage/types.ts`). Each mode can use a **different provider and model**.
 
-| Mode | Response tool | Behavior |
-|------|---------------|----------|
-| **Plan** | `plan_mode_respond` | Strategy, exploration, read-only tools |
-| **Act** | `act_mode_respond` | Implementation and verification within configured authority |
+| Mode     | Response tool       | Behavior                                                    |
+| -------- | ------------------- | ----------------------------------------------------------- |
+| **Plan** | `plan_mode_respond` | Strategy, exploration, read-only tools                      |
+| **Act**  | `act_mode_respond`  | Implementation and verification within configured authority |
 
 New configurations start in Act. Inspect the relevant context, implement, observe results, repair failures, and verify before `attempt_completion`. When using Plan, `plan_mode_respond` automatically transitions to Act; no scratchpad audit or mandatory planning artifact is required.
 
@@ -391,18 +391,18 @@ Configure independently in **LUMI Settings → API Configuration** (Plan / Act t
 
 Typed at the start of a message (`/command`). Source: `SUPPORTED_DEFAULT_COMMANDS` in `src/core/slash-commands/index.ts`.
 
-| Command | Purpose |
-|---------|---------|
-| `/newtask` | Start a fresh task context |
-| `/compact` | Condense conversation history |
-| `/smol` | Shorter context mode |
-| `/newrule` | Create a project rule |
-| `/reportbug` | Structured bug report flow |
-| `/deep-planning` | Extended planning pass |
-| `/replan` | Revisit plan after new information |
-| `/explain-changes` | Summarize what changed |
-| `/document` | Generate documentation for changes |
-| `/roadmap` | Roadmap steering actions |
+| Command            | Purpose                            |
+| ------------------ | ---------------------------------- |
+| `/newtask`         | Start a fresh task context         |
+| `/compact`         | Condense conversation history      |
+| `/smol`            | Shorter context mode               |
+| `/newrule`         | Create a project rule              |
+| `/reportbug`       | Structured bug report flow         |
+| `/deep-planning`   | Extended planning pass             |
+| `/replan`          | Revisit plan after new information |
+| `/explain-changes` | Summarize what changed             |
+| `/document`        | Generate documentation for changes |
+| `/roadmap`         | Roadmap steering actions           |
 
 Custom workflows: `.dietcodeworkflows/` · MCP prompts: `/mcp:<server>:<prompt>` · Details: [docs/core-workflows/using-commands.mdx](docs/core-workflows/using-commands.mdx).
 
@@ -412,16 +412,16 @@ Custom workflows: `.dietcodeworkflows/` · MCP prompts: `/mcp:<server>:<prompt>`
 
 Eight hook kinds in `VALID_HOOK_TYPES` (`src/core/hooks/utils.ts`). Scripts live under **`.dietcoderules/hooks/`** (workspace or global hooks dir).
 
-| Hook | Fires when |
-|------|------------|
-| `TaskStart` | Task begins |
-| `TaskResume` | Task resumes from history |
-| `TaskCancel` | Task cancelled |
-| `TaskComplete` | Task completes |
-| `PreToolUse` | Before a tool executes (can cancel) |
-| `PostToolUse` | After a tool executes |
-| `UserPromptSubmit` | User sends a message |
-| `PreCompact` | Before context compaction |
+| Hook               | Fires when                          |
+| ------------------ | ----------------------------------- |
+| `TaskStart`        | Task begins                         |
+| `TaskResume`       | Task resumes from history           |
+| `TaskCancel`       | Task cancelled                      |
+| `TaskComplete`     | Task completes                      |
+| `PreToolUse`       | Before a tool executes (can cancel) |
+| `PostToolUse`      | After a tool executes               |
+| `UserPromptSubmit` | User sends a message                |
+| `PreCompact`       | Before context compaction           |
 
 Guide: [docs/customization/hooks.mdx](docs/customization/hooks.mdx).
 
@@ -431,13 +431,13 @@ Guide: [docs/customization/hooks.mdx](docs/customization/hooks.mdx).
 
 Published under **LUMI** in VS Code Settings (`package.json` `contributes.configuration`):
 
-| Setting | Default | Purpose |
-|---------|---------|---------|
-| `lumi.roadmap.enabled` | `true` | Master switch for ROADMAP.md steering |
-| `lumi.roadmap.autoBootstrap` | `true` | Allow explicit bootstrap to create `ROADMAP.md` from evidence |
-| `lumi.roadmap.autoBootstrapFill` | `true` | Autofill roadmap after bootstrap |
-| `lumi.roadmap.blockKanbanOnValidationPending` | `false` | Retired; roadmap validation never blocks completion |
-| `lumi.roadmap.failClosedCompletionGates` | `false` | Retired; unavailable diagnostics never block completion |
+| Setting                                       | Default | Purpose                                                       |
+| --------------------------------------------- | ------- | ------------------------------------------------------------- |
+| `lumi.roadmap.enabled`                        | `true`  | Master switch for ROADMAP.md steering                         |
+| `lumi.roadmap.autoBootstrap`                  | `true`  | Allow explicit bootstrap to create `ROADMAP.md` from evidence |
+| `lumi.roadmap.autoBootstrapFill`              | `true`  | Autofill roadmap after bootstrap                              |
+| `lumi.roadmap.blockKanbanOnValidationPending` | `false` | Retired; roadmap validation never blocks completion           |
+| `lumi.roadmap.failClosedCompletionGates`      | `false` | Retired; unavailable diagnostics never block completion       |
 
 Details: [docs/features/roadmap-steering.mdx](docs/features/roadmap-steering.mdx).
 
@@ -551,10 +551,10 @@ flowchart TB
 
 ## Monorepo packages
 
-| Package | Path | npm | Role |
-|---------|------|-----|------|
-| **LUMI extension** | repo root | `lumi-vscode` | VS Code agent — `CardSorting.lumi-vscode` / `CardSorting.lumi` |
-| **BroccoliDB** | `broccolidb/` | `@noorm/broccolidb` | Context store, runtime, Spider |
+| Package            | Path          | npm                 | Role                                                           |
+| ------------------ | ------------- | ------------------- | -------------------------------------------------------------- |
+| **LUMI extension** | repo root     | `lumi-vscode`       | VS Code agent — `CardSorting.lumi-vscode` / `CardSorting.lumi` |
+| **BroccoliDB**     | `broccolidb/` | `@noorm/broccolidb` | Context store, runtime, Spider                                 |
 
 npm workspaces in root `package.json`: `"."` and `"broccolidb"`. Install BroccoliDB standalone: [broccolidb/README.md](broccolidb/README.md).
 
@@ -562,38 +562,38 @@ npm workspaces in root `package.json`: `"."` and `"broccolidb"`. Install Broccol
 
 ## Tech stack
 
-| Layer | Technology |
-|-------|------------|
-| Extension host | TypeScript, VS Code Extension API, esbuild |
-| Webview UI | React, Vite |
-| IPC | Protobuf / gRPC host bridge (`proto/`) |
-| LLM routing | `buildApiHandler` — 4 wired providers |
-| Local store | BroccoliDB (`better-sqlite3`), shadow Git checkpoints |
-| Lint / format | Biome |
-| Tests | Mocha (unit), `@vscode/test-electron` (integration), Playwright (e2e) |
-| Docs site | Mintlify (`docs/`) |
+| Layer          | Technology                                                            |
+| -------------- | --------------------------------------------------------------------- |
+| Extension host | TypeScript, VS Code Extension API, esbuild                            |
+| Webview UI     | React, Vite                                                           |
+| IPC            | Protobuf / gRPC host bridge (`proto/`)                                |
+| LLM routing    | `buildApiHandler` — 4 wired providers                                 |
+| Local store    | BroccoliDB (`better-sqlite3`), shadow Git checkpoints                 |
+| Lint / format  | Biome                                                                 |
+| Tests          | Mocha (unit), `@vscode/test-electron` (integration), Playwright (e2e) |
+| Docs site      | Mintlify (`docs/`)                                                    |
 
 ---
 
 ## Documentation
 
-| Doc | Description |
-|-----|-------------|
-| **[docs/README.md](docs/README.md)** | **Documentation hub** — reading paths by audience |
-| [Quick start](docs/getting-started/quick-start.mdx) | Install, provider, first task |
-| [What is LUMI?](docs/getting-started/what-is-dietcode.mdx) | Product overview |
-| [All tools](docs/tools-reference/all-dietcode-tools.mdx) | Full tool enum reference |
-| [Agent stack](docs/AGENT_STACK.md) | LUMI session + BroccoliDB substrate |
-| [Architecture (current)](docs/architecture/current.md) | Module map and request flow |
-| [Project map](docs/PROJECT_MAP.md) | 1-to-1 `src/` directory guide |
-| [Code ↔ docs](docs/CODE_TO_DOC_MAP.md) | Source path → documentation lookup |
-| [Security practices](docs/SECURITY_BEST_PRACTICES.md) | Approval gates, ignore files, MCP |
-| [Maintainer guide](docs/MAINTAINER.md) | Doc CI, branding, update checklist |
-| [Companion brief](docs/papers/companion-brief.md) | Executive summary · measured metrics |
-| [Philosophy](docs/papers/philosophy.md) | Design values |
-| [Whitepaper](docs/papers/whitepaper.md) | Full technical architecture |
-| [BroccoliDB docs](broccolidb/docs/README.md) | Context store (separate package) |
-| [Runtime API index](docs/api/README.md) | Agent-facing BroccoliDB capabilities |
+| Doc                                                        | Description                                       |
+| ---------------------------------------------------------- | ------------------------------------------------- |
+| **[docs/README.md](docs/README.md)**                       | **Documentation hub** — reading paths by audience |
+| [Quick start](docs/getting-started/quick-start.mdx)        | Install, provider, first task                     |
+| [What is LUMI?](docs/getting-started/what-is-dietcode.mdx) | Product overview                                  |
+| [All tools](docs/tools-reference/all-dietcode-tools.mdx)   | Full tool enum reference                          |
+| [Agent stack](docs/AGENT_STACK.md)                         | LUMI session + BroccoliDB substrate               |
+| [Architecture (current)](docs/architecture/current.md)     | Module map and request flow                       |
+| [Project map](docs/PROJECT_MAP.md)                         | 1-to-1 `src/` directory guide                     |
+| [Code ↔ docs](docs/CODE_TO_DOC_MAP.md)                     | Source path → documentation lookup                |
+| [Security practices](docs/SECURITY_BEST_PRACTICES.md)      | Approval gates, ignore files, MCP                 |
+| [Maintainer guide](docs/MAINTAINER.md)                     | Doc CI, branding, update checklist                |
+| [Companion brief](docs/papers/companion-brief.md)          | Executive summary · measured metrics              |
+| [Philosophy](docs/papers/philosophy.md)                    | Design values                                     |
+| [Whitepaper](docs/papers/whitepaper.md)                    | Full technical architecture                       |
+| [BroccoliDB docs](broccolidb/docs/README.md)               | Context store (separate package)                  |
+| [Runtime API index](docs/api/README.md)                    | Agent-facing BroccoliDB capabilities              |
 
 **Mintlify preview:** `cd docs && npm install && npm run dev`
 
@@ -603,11 +603,11 @@ npm workspaces in root `package.json`: `"."` and `"broccolidb"`. Install Broccol
 
 Read in order for depth on **why** and **how** LUMI is built ([full index](docs/papers/README.md)):
 
-| # | Doc | Audience | Time |
-|---|-----|----------|------|
-| 1 | [Companion brief](docs/papers/companion-brief.md) | Leads, evaluators | ~5 min |
-| 2 | [Philosophy](docs/papers/philosophy.md) | Designers, tech leads | ~15 min |
-| 3 | [Whitepaper](docs/papers/whitepaper.md) | Engineers | ~45 min |
+| #   | Doc                                               | Audience              | Time    |
+| --- | ------------------------------------------------- | --------------------- | ------- |
+| 1   | [Companion brief](docs/papers/companion-brief.md) | Leads, evaluators     | ~5 min  |
+| 2   | [Philosophy](docs/papers/philosophy.md)           | Designers, tech leads | ~15 min |
+| 3   | [Whitepaper](docs/papers/whitepaper.md)           | Engineers             | ~45 min |
 
 Substrate papers: [broccolidb/docs/papers/](broccolidb/docs/papers/) — separate narrative.
 
@@ -615,20 +615,20 @@ Substrate papers: [broccolidb/docs/papers/](broccolidb/docs/papers/) — separat
 
 ## Repository layout
 
-| Path | Role |
-|------|------|
-| `src/extension.ts` | VS Code activation entry |
-| `src/core/controller/` | `Controller` — task lifecycle, state, MCP, auth |
-| `src/core/task/` | Agent loop (~4k lines), message state, tools |
-| `src/core/api/` | `buildApiHandler` + 4 wired provider handlers |
-| `src/core/task/tools/` | `ToolExecutorCoordinator` + 55 handler files |
-| `src/integrations/checkpoints/` | Shadow Git checkpoint system |
-| `src/services/mcp/McpHub.ts` | MCP server connections |
-| `src/shared/tools.ts` | `DietCodeDefaultTool` enum (63 values) |
-| `webview-ui/` | React sidebar — chat, settings, diffs |
-| `broccolidb/` | BroccoliDB package (`@noorm/broccolidb`) |
-| `docs/` | LUMI user and architecture documentation |
-| `proto/` | Protobuf schemas (state, host bridge, hooks) |
+| Path                            | Role                                            |
+| ------------------------------- | ----------------------------------------------- |
+| `src/extension.ts`              | VS Code activation entry                        |
+| `src/core/controller/`          | `Controller` — task lifecycle, state, MCP, auth |
+| `src/core/task/`                | Agent loop (~4k lines), message state, tools    |
+| `src/core/api/`                 | `buildApiHandler` + 4 wired provider handlers   |
+| `src/core/task/tools/`          | `ToolExecutorCoordinator` + 55 handler files    |
+| `src/integrations/checkpoints/` | Shadow Git checkpoint system                    |
+| `src/services/mcp/McpHub.ts`    | MCP server connections                          |
+| `src/shared/tools.ts`           | `DietCodeDefaultTool` enum (64 values)          |
+| `webview-ui/`                   | React sidebar — chat, settings, diffs           |
+| `broccolidb/`                   | BroccoliDB package (`@noorm/broccolidb`)        |
+| `docs/`                         | LUMI user and architecture documentation        |
+| `proto/`                        | Protobuf schemas (state, host bridge, hooks)    |
 
 Full map: [docs/PROJECT_MAP.md](docs/PROJECT_MAP.md).
 
@@ -653,37 +653,37 @@ Package VSIX: `npm run package` → install `dist/*.vsix`.
 
 ### Scripts reference
 
-| Script | Purpose |
-|--------|---------|
-| `npm run check-types` | TypeScript — extension + webview |
-| `npm run lint` | Biome + proto lint |
-| `npm test` | Unit + integration tests |
-| `npm run ci:check-all` | Types, lint, format, roadmap audit, **doc guardrails** |
-| `npm run docs:check-agent-links` | Required docs + relative link resolution |
-| `npm run docs:check-agent-branding` | No stale user-facing DietCode in core dirs |
-| `npm run docs:check-all` | All doc guardrails + Mintlify links |
-| `npm run docs:check-root-readme` | README parity + live metrics from codebase |
-| `npm run docs:check-root-readme-links` | Root README relative link resolution |
-| `npm run docs:check-readme-metrics` | README + companion-brief vs live codebase |
-| `npm run docs:check-links` | Mintlify broken-link pass |
-| `npm run e2e` | Playwright end-to-end tests |
+| Script                                 | Purpose                                                |
+| -------------------------------------- | ------------------------------------------------------ |
+| `npm run check-types`                  | TypeScript — extension + webview                       |
+| `npm run lint`                         | Biome + proto lint                                     |
+| `npm test`                             | Unit + integration tests                               |
+| `npm run ci:check-all`                 | Types, lint, format, roadmap audit, **doc guardrails** |
+| `npm run docs:check-agent-links`       | Required docs + relative link resolution               |
+| `npm run docs:check-agent-branding`    | No stale user-facing DietCode in core dirs             |
+| `npm run docs:check-all`               | All doc guardrails + Mintlify links                    |
+| `npm run docs:check-root-readme`       | README parity + live metrics from codebase             |
+| `npm run docs:check-root-readme-links` | Root README relative link resolution                   |
+| `npm run docs:check-readme-metrics`    | README + companion-brief vs live codebase              |
+| `npm run docs:check-links`             | Mintlify broken-link pass                              |
+| `npm run e2e`                          | Playwright end-to-end tests                            |
 
 ### Quality gates
 
 `npm run ci:check-all` runs these **in parallel**:
 
-| Gate | Script | Validates |
-|------|--------|-----------|
-| Types | `check-types` | TypeScript — extension + webview |
-| Lint | `lint` | Biome + proto lint |
-| Format | `format` | Biome format on changed files |
-| Roadmap | `roadmap:audit` | ROADMAP.md consistency |
-| Doc links | `docs:check-agent-links` | 24 required docs + link resolution |
-| Doc branding | `docs:check-agent-branding` | No stale user-facing DietCode |
-| Root README | `docs:check-root-readme` | Parity + live metrics from codebase |
-| README links | `docs:check-root-readme-links` | All relative links in README resolve |
-| README metrics | `docs:check-readme-metrics` | README + companion-brief vs codebase |
-| Docs hub | `docs:check-docs-readme` | `docs/README.md` structure |
+| Gate           | Script                         | Validates                            |
+| -------------- | ------------------------------ | ------------------------------------ |
+| Types          | `check-types`                  | TypeScript — extension + webview     |
+| Lint           | `lint`                         | Biome + proto lint                   |
+| Format         | `format`                       | Biome format on changed files        |
+| Roadmap        | `roadmap:audit`                | ROADMAP.md consistency               |
+| Doc links      | `docs:check-agent-links`       | 24 required docs + link resolution   |
+| Doc branding   | `docs:check-agent-branding`    | No stale user-facing DietCode        |
+| Root README    | `docs:check-root-readme`       | Parity + live metrics from codebase  |
+| README links   | `docs:check-root-readme-links` | All relative links in README resolve |
+| README metrics | `docs:check-readme-metrics`    | README + companion-brief vs codebase |
+| Docs hub       | `docs:check-docs-readme`       | `docs/README.md` structure           |
 
 Run all doc checks: **`npm run docs:check-all`** (includes Mintlify link pass).
 
@@ -697,44 +697,44 @@ Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Extension missing from sidebar | Install **CardSorting.lumi-vscode** or **CardSorting.lumi**; disable DietCode forks; `Developer: Reload Window` |
-| Checkpoints fail / “Git must be installed” | Install Git; ensure `git` is on `PATH` |
-| Slow on large repos | Add [`.dietcodeignore`](docs/customization/dietcodeignore.mdx); disable checkpoints temporarily |
-| Provider auth errors | Re-open LUMI Settings → re-enter API key or re-auth OAuth provider |
-| MCP server won't connect | Check [MCP config](docs/mcp/adding-and-configuring-servers.mdx); verify server logs in Output panel |
-| Completion blocked unexpectedly | Inspect reported unfinished work, active executions, or enabled completion audits; roadmap findings are advisory |
-| Build fails from source | Run `npm run protos` before first `npm run dev`; use Node **20+** |
-| Reset extension state | Close VS Code; remove `~/.dietcode/data/` (backs up secrets/settings); reload window |
-| Uninstall cleanly | Uninstall extension; optionally delete `~/.dietcode/data/` and workspace `dietcode.db` |
+| Symptom                                    | Fix                                                                                                              |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Extension missing from sidebar             | Install **CardSorting.lumi-vscode** or **CardSorting.lumi**; disable DietCode forks; `Developer: Reload Window`  |
+| Checkpoints fail / “Git must be installed” | Install Git; ensure `git` is on `PATH`                                                                           |
+| Slow on large repos                        | Add [`.dietcodeignore`](docs/customization/dietcodeignore.mdx); disable checkpoints temporarily                  |
+| Provider auth errors                       | Re-open LUMI Settings → re-enter API key or re-auth OAuth provider                                               |
+| MCP server won't connect                   | Check [MCP config](docs/mcp/adding-and-configuring-servers.mdx); verify server logs in Output panel              |
+| Completion blocked unexpectedly            | Inspect reported unfinished work, active executions, or enabled completion audits; roadmap findings are advisory |
+| Build fails from source                    | Run `npm run protos` before first `npm run dev`; use Node **20+**                                                |
+| Reset extension state                      | Close VS Code; remove `~/.dietcode/data/` (backs up secrets/settings); reload window                             |
+| Uninstall cleanly                          | Uninstall extension; optionally delete `~/.dietcode/data/` and workspace `dietcode.db`                           |
 
 ---
 
 ## Getting help
 
-| Channel | Link |
-|---------|------|
-| **Documentation hub** | [docs/README.md](docs/README.md) |
-| **Glossary** | [docs/getting-started/glossary.mdx](docs/getting-started/glossary.mdx) |
-| **Bug reports** | [GitHub Issues](https://github.com/CardSorting/DietCodeMarie/issues) |
-| **Security (private)** | [SECURITY.md](SECURITY.md) → security@dietcode.bot |
-| **Walkthrough** | Command palette → `LUMI: Open Walkthrough` (`lumi.openWalkthrough`) |
+| Channel                | Link                                                                   |
+| ---------------------- | ---------------------------------------------------------------------- |
+| **Documentation hub**  | [docs/README.md](docs/README.md)                                       |
+| **Glossary**           | [docs/getting-started/glossary.mdx](docs/getting-started/glossary.mdx) |
+| **Bug reports**        | [GitHub Issues](https://github.com/CardSorting/DietCodeMarie/issues)   |
+| **Security (private)** | [SECURITY.md](SECURITY.md) → security@dietcode.bot                     |
+| **Walkthrough**        | Command palette → `LUMI: Open Walkthrough` (`lumi.openWalkthrough`)    |
 
-Include VS Code version, LUMI **26.0.0**, provider used, and steps to reproduce.
+Include VS Code version, LUMI **26.4.0**, provider used, and steps to reproduce.
 
 ---
 
 ## Security & trust
 
-| Boundary | Enforcement |
-|----------|-------------|
+| Boundary                | Enforcement                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------- |
 | **Execution authority** | Configured auto-approval, trusted tools, and explicit approvals when required |
-| **Scoped context** | `.dietcodeignore` → `DietCodeIgnoreController` |
-| **Completion checks** | Required result and unfinished-work checks; completion audits are opt-in |
-| **Hook interception** | 8 lifecycle hook kinds on tool/session events |
-| **MCP isolation** | Per-server credentials; per-tool auto-approve lists |
-| **User control** | Explicit denials and Stop remain authoritative during autonomous execution |
+| **Scoped context**      | `.dietcodeignore` → `DietCodeIgnoreController`                                |
+| **Completion checks**   | Required result and unfinished-work checks; completion audits are opt-in      |
+| **Hook interception**   | 8 lifecycle hook kinds on tool/session events                                 |
+| **MCP isolation**       | Per-server credentials; per-tool auto-approve lists                           |
+| **User control**        | Explicit denials and Stop remain authoritative during autonomous execution    |
 
 Details: [docs/SECURITY_BEST_PRACTICES.md](docs/SECURITY_BEST_PRACTICES.md) · Report vulnerabilities: [SECURITY.md](SECURITY.md) → security@dietcode.bot
 
@@ -787,13 +787,13 @@ Search for **CardSorting.lumi-vscode** (VS Marketplace) or **CardSorting.lumi** 
 
 We welcome bug fixes, features, and documentation improvements.
 
-| Resource | Link |
-|----------|------|
-| Contributing guide | [CONTRIBUTING.md](CONTRIBUTING.md) |
-| Doc maintainer guide | [docs/MAINTAINER.md](docs/MAINTAINER.md) |
-| Documentation map | [docs/DOCS_GUIDE.md](docs/DOCS_GUIDE.md) |
-| Code of conduct | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
-| Issues | [GitHub Issues](https://github.com/CardSorting/DietCodeMarie/issues) |
+| Resource             | Link                                                                 |
+| -------------------- | -------------------------------------------------------------------- |
+| Contributing guide   | [CONTRIBUTING.md](CONTRIBUTING.md)                                   |
+| Doc maintainer guide | [docs/MAINTAINER.md](docs/MAINTAINER.md)                             |
+| Documentation map    | [docs/DOCS_GUIDE.md](docs/DOCS_GUIDE.md)                             |
+| Code of conduct      | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)                             |
+| Issues               | [GitHub Issues](https://github.com/CardSorting/DietCodeMarie/issues) |
 
 Before a feature PR: open an issue or discussion for maintainer approval. Run `npm run ci:check-all` locally.
 

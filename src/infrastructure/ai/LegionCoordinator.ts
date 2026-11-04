@@ -163,6 +163,7 @@ export interface LegionStageProgressionStatus {
 	priorStageHandoffContext: string[]
 	allStagesCompleted: boolean
 	hasFailures: boolean
+	swarmBlackboard?: string[]
 }
 
 export interface LegionSynthesisReport {
@@ -206,6 +207,7 @@ export interface LegionFormationManifest {
 	stageProgression?: LegionStageProgressionStatus
 	createdAt: number
 	updatedAt: number
+	swarmBlackboard?: string[]
 }
 
 export interface FormLegionOptions extends LegionClassificationInput {
@@ -215,6 +217,8 @@ export interface FormLegionOptions extends LegionClassificationInput {
 	forceEnable?: boolean
 	/** Optional pre-resolved feature state. */
 	resolvedFeatureState?: EffectiveAgentSwarmFeatureState
+	/** Cross-turn blackboard heuristics to seed the formation. */
+	swarmBlackboard?: string[]
 }
 
 const UX_SPECIALIST_DESCRIPTOR_BASE: Omit<LegionSpecialistDescriptor, "role"> = {
@@ -273,13 +277,14 @@ export const LEGION_SPECIALIST_REGISTRY: Record<LegionSpecialistRole, LegionSpec
 		codename: "CENTURION-ARCH",
 		subagentType: "researcher",
 		description:
-			"Designs cross-layer contracts, protobuf/schema definitions, module boundaries, and structural refactoring plans.",
+			"Designs system architecture, module boundaries, cross-layer contracts, interface schemas, protocol specifications, and structural refactoring plans across language ecosystems.",
 		capabilities: [
 			"contract_design",
 			"schema_evolution",
 			"layer_boundary_enforcement",
 			"dependency_decomposition",
 			"roadmap_synthesis",
+			"system_modularization",
 		],
 		preferredLayers: ["domain", "core", "infrastructure"],
 		defaultExecutionBoundary: "before_turn",
@@ -300,15 +305,28 @@ export const LEGION_SPECIALIST_REGISTRY: Record<LegionSpecialistRole, LegionSpec
 					"orchestrat",
 					"coordinator",
 					"topology",
+					"system design",
+					"modular",
 				],
 				weight: 3.0,
 			},
 			{
-				terms: ["refactor", "restructure", "modular", "layer", "joy-zoning", "decouple", "system", "spec"],
+				terms: [
+					"refactor",
+					"restructure",
+					"modular",
+					"layer",
+					"joy-zoning",
+					"decouple",
+					"system",
+					"spec",
+					"header",
+					"module decomposition",
+				],
 				weight: 2.0,
 			},
 		],
-		filePatterns: [/\.proto$/i, /types\.ts$/i, /schema/i, /orchestrat/i, /coordinator/i, /config\.ts$/i],
+		filePatterns: [/\.proto$/i, /types\.ts$/i, /schema/i, /orchestrat/i, /coordinator/i, /config\.ts$/i, /\.h$/i, /\.hpp$/i],
 	},
 	legion_implementer: {
 		role: "legion_implementer",
@@ -419,13 +437,14 @@ export const LEGION_SPECIALIST_REGISTRY: Record<LegionSpecialistRole, LegionSpec
 		codename: "SENTINEL-QA",
 		subagentType: "verifier",
 		description:
-			"Executes unit/integration test suites, designs edge-case regression tests, and performs evidence-backed post-completion verification.",
+			"Executes multi-language unit/integration test suites, designs edge-case regression tests, and performs evidence-backed post-completion verification across various testing frameworks.",
 		capabilities: [
 			"unit_test_authoring",
 			"edge_case_verification",
 			"adversarial_completion_review",
 			"regression_validation",
 			"coverage_auditing",
+			"multi_language_test_execution",
 		],
 		preferredLayers: ["core", "infrastructure", "ui"],
 		defaultExecutionBoundary: "before_turn",
@@ -445,16 +464,32 @@ export const LEGION_SPECIALIST_REGISTRY: Record<LegionSpecialistRole, LegionSpec
 					"mocha",
 					"vitest",
 					"chai",
+					"pytest",
+					"ctest",
+					"cargo test",
 					"review",
 				],
 				weight: 3.2,
 			},
 			{
-				terms: ["regression", "edge case", "coverage", "audit", "check", "lint", "typecheck", "smoke", "prove"],
+				terms: [
+					"regression",
+					"edge case",
+					"coverage",
+					"audit",
+					"check",
+					"lint",
+					"typecheck",
+					"smoke",
+					"prove",
+					"make test",
+					"junit",
+					"test runner",
+				],
 				weight: 2.2,
 			},
 		],
-		filePatterns: [/\.test\.ts$/i, /\.test\.tsx$/i, /\.spec\.ts$/i, /__tests__\//i, /Review\.ts$/i],
+		filePatterns: [/\.test\./i, /\.spec\./i, /__tests__\//i, /Review\.ts$/i, /test_/i, /_test\./i],
 	},
 	legion_researcher: {
 		role: "legion_researcher",
@@ -503,8 +538,11 @@ export const LEGION_SPECIALIST_REGISTRY: Record<LegionSpecialistRole, LegionSpec
 		codename: "KEEPER-STATE",
 		subagentType: "worker",
 		description:
-			"Manages SQLite buffered pools, durable checkpoints, state-keys synchronization, migrations, and cross-session storage integrity.",
+			"Manages persistence, data models, state integrity, durable storage checkpoints, database pools, file serialization, and schema migrations across project domains.",
 		capabilities: [
+			"data_persistence",
+			"file_serialization",
+			"state_integrity",
 			"sqlite_buffered_persistence",
 			"state_manager_sync",
 			"checkpoint_serialization",
@@ -529,15 +567,29 @@ export const LEGION_SPECIALIST_REGISTRY: Record<LegionSpecialistRole, LegionSpec
 					"persistence",
 					"checkpoint",
 					"memory",
+					"serialization",
+					"savegame",
 				],
 				weight: 3.2,
 			},
 			{
-				terms: ["upsert", "table", "query", "cache", "flush", "transaction", "migration", "state"],
+				terms: [
+					"upsert",
+					"table",
+					"query",
+					"cache",
+					"flush",
+					"transaction",
+					"migration",
+					"state",
+					"serde",
+					"file io",
+					"storage models",
+				],
 				weight: 2.0,
 			},
 		],
-		filePatterns: [/db\//i, /storage\//i, /state-keys\.ts$/i, /StateManager\.ts$/i, /Pool\.ts$/i],
+		filePatterns: [/db\//i, /storage\//i, /state-keys\.ts$/i, /StateManager\.ts$/i, /Pool\.ts$/i, /\.sql$/i, /persist/i],
 	},
 }
 
@@ -999,6 +1051,28 @@ export class LegionCoordinator {
 		)
 	}
 
+	public extractLearnedHeuristics(text: string): string[] {
+		if (!text) return []
+		const extracted: string[] = []
+		const match = text.match(/<learned_heuristics>([\s\S]*?)<\/learned_heuristics>/i)
+		if (match) {
+			const lines = match[1]
+				.split("\n")
+				.map((l) => l.replace(/^[\s*-]+/, "").trim())
+				.filter(Boolean)
+			extracted.push(...lines)
+		}
+		const lines = text.split("\n")
+		for (const line of lines) {
+			const trimmed = line.trim()
+			if (/^(?:Heuristic|Learned fact|Learning):\s*(.+)/i.test(trimmed)) {
+				const item = trimmed.replace(/^(?:Heuristic|Learned fact|Learning):\s*/i, "").trim()
+				if (item && !extracted.includes(item)) extracted.push(item)
+			}
+		}
+		return extracted
+	}
+
 	/**
 	 * Maps a confirmed defect from `CriticalCompletionReview` to the appropriate
 	 * remedial Legion specialist role.
@@ -1104,15 +1178,37 @@ export class LegionCoordinator {
 		])
 		const readyToExecuteMembers = manifest.members.filter((m) => readyIds.has(m.streamId))
 
+		const formatHandoff = (m: SpawnedLegionMember) => {
+			const statusTag = m.status === "completed" ? "Completed" : `Partial/Failed: ${m.failureReason || "incompleted"}`
+			return `[${m.assignment.codename} (${m.assignment.role}) - ${statusTag}]: ${m.resultSummary || "Partial work performed; check modified artifacts."}`
+		}
+
 		const leadAndReconHandOffContext = membersByStage.leadAndRecon
-			.filter((m) => m.status === "completed" && m.resultSummary)
-			.map((m) => `[${m.assignment.codename} (${m.assignment.role})]: ${m.resultSummary}`)
+			.filter((m) => m.resultSummary || m.failureReason)
+			.map(formatHandoff)
 		const activeStageIndex = stageNames.indexOf(currentActiveStage as LegionExecutionStageName)
-		const priorStageHandoffContext = stageNames
+		const priorStagesMembers = stageNames
 			.slice(0, activeStageIndex < 0 ? stageNames.length : activeStageIndex)
 			.flatMap((stage) => membersByStage[stage])
-			.filter((m) => m.status === "completed" && m.resultSummary)
-			.map((m) => `[${m.assignment.codename} (${m.assignment.role})]: ${m.resultSummary}`)
+
+		// Progressive intra-stage handoff: include sibling specialists from current active stage who already finished
+		const currentStageFinishedMembers =
+			activeStageIndex >= 0
+				? membersByStage[stageNames[activeStageIndex]].filter(
+						(m) =>
+							(m.status === "completed" || m.status === "failed" || m.status === "rerouted") &&
+							(m.resultSummary || m.failureReason),
+					)
+				: []
+
+		const candidateMembers = [...priorStagesMembers, ...currentStageFinishedMembers]
+		const priorStageHandoffContext = candidateMembers.filter((m) => m.resultSummary || m.failureReason).map(formatHandoff)
+
+		if (manifest.swarmBlackboard && manifest.swarmBlackboard.length > 0) {
+			priorStageHandoffContext.push(
+				`<learned_heuristics>\n${manifest.swarmBlackboard.map((h) => `  - ${h}`).join("\n")}\n</learned_heuristics>`,
+			)
+		}
 
 		const allStagesCompleted = manifest.members.length > 0 && manifest.members.every((m) => isTerminalResolved(m))
 		const hasFailures = manifest.members.some((m) => isFailedUnrerouted(m))
@@ -1126,6 +1222,7 @@ export class LegionCoordinator {
 			priorStageHandoffContext,
 			allStagesCompleted,
 			hasFailures,
+			swarmBlackboard: manifest.swarmBlackboard,
 		}
 	}
 
@@ -1299,6 +1396,7 @@ export class LegionCoordinator {
 			status: "active",
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
+			swarmBlackboard: options.swarmBlackboard ? [...options.swarmBlackboard] : [],
 		}
 		manifest.stageProgression = this.evaluateStageProgression(manifest)
 
@@ -1549,6 +1647,19 @@ export class LegionCoordinator {
 			...(outcome.status === "completed" || outcome.status === "failed" ? { completedAt: now } : {}),
 		}
 		manifest.members[memberIdx] = updatedMember
+
+		// F06: Extract learned heuristics and append to swarmBlackboard
+		if (outcome.summary) {
+			const heuristics = this.extractLearnedHeuristics(outcome.summary)
+			if (heuristics.length > 0) {
+				manifest.swarmBlackboard = manifest.swarmBlackboard || []
+				for (const h of heuristics) {
+					if (!manifest.swarmBlackboard.includes(h)) {
+						manifest.swarmBlackboard.push(h)
+					}
+				}
+			}
+		}
 
 		// Also update the specialist's task in `agent_tasks` if transitioning to completed/failed
 		if (outcome.status === "completed" || outcome.status === "failed") {

@@ -1,4 +1,4 @@
-import { credentials as grpcCredentials } from "@grpc/grpc-js"
+import { credentials as grpcCredentials, Metadata } from "@grpc/grpc-js"
 import { OTLPLogExporter as OTLPLogExporterGRPC } from "@opentelemetry/exporter-logs-otlp-grpc"
 import { OTLPLogExporter as OTLPLogExporterHTTP } from "@opentelemetry/exporter-logs-otlp-http"
 import { OTLPLogExporter as OTLPLogExporterProto } from "@opentelemetry/exporter-logs-otlp-proto"
@@ -51,11 +51,13 @@ export function createOTLPLogExporter(
 			case "grpc": {
 				const grpcEndpoint = endpoint.replace(/^https?:\/\//, "")
 				const credentials = insecure ? grpcCredentials.createInsecure() : grpcCredentials.createSsl()
+				const metadata = new Metadata()
+				for (const [key, value] of Object.entries(headers ?? {})) metadata.set(key, value)
 
 				exporter = new OTLPLogExporterGRPC({
 					url: grpcEndpoint,
 					credentials: credentials,
-					headers,
+					metadata,
 				})
 				break
 			}
@@ -117,11 +119,13 @@ export function createOTLPMetricReader(
 			case "grpc": {
 				const grpcEndpoint = endpoint.replace(/^https?:\/\//, "")
 				const credentials = insecure ? grpcCredentials.createInsecure() : grpcCredentials.createSsl()
+				const metadata = new Metadata()
+				for (const [key, value] of Object.entries(headers ?? {})) metadata.set(key, value)
 
 				exporter = new OTLPMetricExporterGRPC({
 					url: grpcEndpoint,
 					credentials: credentials,
-					headers,
+					metadata,
 				})
 				break
 			}

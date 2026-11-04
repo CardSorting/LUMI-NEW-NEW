@@ -804,9 +804,9 @@ export class AgentOrchestrator {
 		for (const file of files) {
 			const normalizedPath = normalizeReservationPath(file)
 			if (!normalizedPath) continue
-			const found = await dbPool.selectOne("agent_memory", { column: "key", value: `file_res:${normalizedPath}` })
-			if (found) {
-				const ownerStreamId = found.streamId
+			const reservations = await dbPool.selectWhere("agent_memory", { column: "key", value: `file_res:${normalizedPath}` })
+			for (const res of reservations) {
+				const ownerStreamId = res.streamId
 				if (ownerStreamId !== streamId && activeStreamIds.has(ownerStreamId)) {
 					return {
 						reserved: false,
@@ -1135,6 +1135,7 @@ export class AgentOrchestrator {
 
 		// Auto-release all file reservations for this stream
 		await this.releaseAllReservations(streamId)
+		await dbPool.clearShadow(streamId).catch(() => null)
 
 		await hierarchicalDeferCoordinator.reconcileAfterStreamFailure(streamId).catch(() => null)
 		await this.settleLegionSpecialist(streamId, { status: "failed", failureReason: reason }, options)
@@ -1254,9 +1255,9 @@ export class AgentOrchestrator {
 		for (const file of files) {
 			const normalizedPath = normalizeReservationPath(file)
 			if (!normalizedPath) continue
-			const found = await dbPool.selectOne("agent_memory", { column: "key", value: `file_res:${normalizedPath}` })
-			if (found) {
-				const ownerStreamId = found.streamId
+			const reservations = await dbPool.selectWhere("agent_memory", { column: "key", value: `file_res:${normalizedPath}` })
+			for (const res of reservations) {
+				const ownerStreamId = res.streamId
 				if (ownerStreamId !== requestingStreamId && activeStreamIds.has(ownerStreamId)) {
 					return `Collision detected: File '${path.basename(file)}' is reserved by active Stream ${ownerStreamId.slice(0, 8)}.`
 				}
@@ -1264,6 +1265,10 @@ export class AgentOrchestrator {
 		}
 
 		return null
+	}
+
+	public async detectFileCollisions(requestingStreamId: string, files: string[]): Promise<string | null> {
+		return this.checkCollision(requestingStreamId, files)
 	}
 
 	/**
@@ -1392,12 +1397,65 @@ export class AgentOrchestrator {
 	}
 
 	/**
+	 * Reconciles orphaned child streams left active across host restarts or crashes.
+	 * Marks stale active child streams as failed with "Host terminated during execution"
+	 * so pipelines and formations do not become trapped in 'needs_reconciliation'.
+	 */
+	public async reconcileOrphanedStreams(reason = "Host terminated during execution"): Promise<number> {
+		const allStreams = await dbPool.selectAllFrom("agent_streams")
+		const staleChildStreams = allStreams.filter(
+			(s) => s.parentId !== null && s.parentId !== undefined && s.status === "active",
+		)
+
+		if (staleChildStreams.length === 0) return 0
+
+		Logger.info(`[Orchestrator] Reconciling ${staleChildStreams.length} orphaned child stream(s) from prior session.`)
+		let reconciledCount = 0
+		for (const stream of staleChildStreams) {
+			try {
+				const tasks = await this.getStreamTasks(stream.id)
+				for (const task of tasks) {
+					if (task.status === "running" || task.status === "pending") {
+						await this.updateTaskStatus(task.id, "failed", reason)
+					}
+				}
+				await this.failStream(stream.id, reason, { skipFailover: true })
+				await dbPool.clearShadow(stream.id).catch(() => null)
+				reconciledCount++
+			} catch (err) {
+				Logger.warn(
+					`[Orchestrator] Failed to reconcile orphaned stream ${stream.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
+				)
+			}
+		}
+		await dbPool.flush()
+		return reconciledCount
+	}
+
+	/**
+	 * Initializes the orchestrator and performs startup recovery and warmup.
+	 */
+	public async initialize(): Promise<void> {
+		await this.reconcileOrphanedStreams().catch((err) => {
+			Logger.warn(
+				`[Orchestrator] Orphaned stream reconciliation failed during initialize: ${err instanceof Error ? err.message : String(err)}`,
+			)
+		})
+		await this.warmup()
+	}
+
+	/**
 	 * Level 9: Sovereign Recovery (Warmup)
 	 * Reconstitutes the agent's "Brain" (RAM) from the "Notebook" (Disk)
 	 * by populating Level 7 indices for all active workflows.
 	 */
 	public async warmup(): Promise<void> {
 		const start = performance.now()
+		await this.reconcileOrphanedStreams().catch((err) => {
+			Logger.warn(
+				`[Orchestrator] Orphaned stream reconciliation failed during warmup: ${err instanceof Error ? err.message : String(err)}`,
+			)
+		})
 		const activeStreams = await dbPool.selectAllFrom("agent_streams")
 		const activeIds = activeStreams.filter((s) => s.status === "active").map((s) => s.id)
 
