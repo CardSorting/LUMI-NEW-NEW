@@ -2,6 +2,8 @@
  * [LAYER: CORE]
  */
 
+import { detectHeredocFileRedirection } from "@integrations/terminal/commandPolicy"
+import { DietCodeDefaultTool } from "@shared/tools"
 import { PlanModeEnforcer } from "@/core/policy/PlanModeEnforcer"
 import { ToolUse } from "../assistant-message"
 import { StateManager } from "../storage/StateManager"
@@ -62,6 +64,16 @@ export class UniversalGuard {
 	 * Single "Execute" call that performs all pre-flight audits.
 	 */
 	public async guardPreExecution(block: ToolUse): Promise<PolicyResult> {
+		const rawCmd = block.params?.command
+		if (block.name === DietCodeDefaultTool.BASH && typeof rawCmd === "string") {
+			const heredocCheck = detectHeredocFileRedirection(rawCmd)
+			if (heredocCheck.isHeredocFileWrite) {
+				return {
+					success: false,
+					error: heredocCheck.reason,
+				}
+			}
+		}
 		return this.engine.validatePreExecution(block)
 	}
 

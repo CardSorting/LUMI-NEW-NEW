@@ -12,6 +12,7 @@
 | Child `failed`/`completed` but pipeline still waiting | Reconcile hook missed | Call `completeStream`/`failStream` (they reconcile), or `hierarchicalDeferCoordinator.reconcileAfterStreamFailure(childId)` |
 | Intermediate node `waiting_for_children` while all its children are `deferred` | Barrier not re-evaluated | Trigger reconcile via any child yield/finish; confirm the ancestor walk reaches the stream owning `deferred_pipeline_status` with the same `pipelineId` |
 | `pipelineId` differs between streams | Two overlapping defers | Resume the older pipeline first; avoid nested `deferPipeline` on the same tree |
+| Child in `execute_command` running heredoc | Shell integration stalled on non-interactive stdin | Intercepted by policy; if encountered, fail the stream and inspect terminal circuit-breaker fallback ([ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)) |
 
 ## Verify
 Pipeline `phase` becomes `suspended`; every `agentStatuses[*].state === "deferred"`.

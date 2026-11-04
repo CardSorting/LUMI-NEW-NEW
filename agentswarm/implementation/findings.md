@@ -1,7 +1,7 @@
 # Implementation Details & Findings
 
 ## What was built (short)
-Three independently toggleable capabilities over existing infrastructure — see [how-it-works](../architecture/how-it-works.md). Counts at Phase 8: 190 tests passing (49 auxiliary, 54 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys, 15 codex streaming, 15 stream response handler); core engines and handlers total ~6,500 lines.
+Three independently toggleable capabilities over existing infrastructure — see [how-it-works](../architecture/how-it-works.md). Counts at Phase 9: 291 tests passing (49 auxiliary, 54 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys, 15 codex streaming, 15 stream response handler, 33 heredoc policy, 27 command approval & interception, 39 terminal process lifecycle & decoding, 5 policy pre-execution); core engines, policies and handlers total ~7,200 lines.
 
 ## Key findings
 
@@ -19,6 +19,7 @@ Three independently toggleable capabilities over existing infrastructure — see
 12. **Snapshot test isolation requires conditional tool suppression.** Dynamically registering new tools alters system prompt token streams and snapshot assertions. Gating tool variants on `!context.isTesting` protects regression test baselines while enabling full capabilities in production.
 13. **Failover must distinguish retryable errors from toxic errors.** Indiscriminately retrying exhausted budgets or disallowed tools creates infinite loops. Categorizing `safeToRetry` ensures failover only reroutes recoverable failures.
 14. **Streaming transport hygiene & circuit breaking.** Model endpoints yield divergent delta/snapshot contracts (deltas followed by full argument snapshots, or interleaved call IDs). Deduplicating snapshots at the provider level, self-healing duplicate complete JSON roots in `StreamResponseHandler`, and circuit-breaking transport decoding errors with `safeToRetry: false` in `LegionAgentHost` prevents futile specialist failover loops and token waste ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
+15. **Multi-tier terminal heredoc defense & prompt parity.** Models instructed to perform complex file updates frequently default to terminal heredocs (`cat <<'EOF' > file`, `tee`), which freeze and deadlock non-interactive VS Code shell integration and bypass file tracking and reservation safety. A defense-in-depth architecture across specialist system prompts (`LEGION_CORE_RULES`), pre-execution interception and UI approval suppression (`ExecuteCommandToolHandler`, `UniversalGuard`, `ToolValidator`), shell policy parser (`heredocPolicy`), and terminal process circuit-breakers (`VscodeTerminalProcess`, `VscodeTerminalManager`) completely neutralizes this deadlock vector while providing actionable guidance to use `write_to_file` ([ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)).
 
 ## Known limits and open questions
 

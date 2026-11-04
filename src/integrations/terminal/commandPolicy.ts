@@ -44,3 +44,5 @@ export function resolveCommandTimeoutSeconds(command: string, timeout?: string |
 	}
 	return isLikelyLongRunningCommand(command) ? MAX_COMMAND_WAIT_SECONDS : DEFAULT_COMMAND_WAIT_SECONDS
 }
+
+export * from "./heredocPolicy"

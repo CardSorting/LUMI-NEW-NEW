@@ -82,16 +82,19 @@ Roster = top-*k* positive scores (k by strategy, ≤ `maxSpecialists` ≤ 8), wi
 | I15 | Streaming progress cards deliver real-time markdown notifications | `formatLegionProgressMessage`, `TaskLegion.test.ts` |
 | I16 | Provider tool argument snapshot slicing & interleaved tool identity tracking | `openai-codex.streaming.test.ts` |
 | I17 | State-machine JSON root parser self-heals duplicate roots; transport errors circuit-break with `safeToRetry: false` | `StreamResponseHandler.test.ts`, `LegionAgentHost.test.ts` |
+| I18 | Specialist prompt parity with conductor rules (`LEGION_CORE_RULES`) | `LegionAgentHost.test.ts` |
+| I19 | Multi-tier terminal heredoc defense, pre-execution interception & shell integration circuit-breaking | `heredocPolicy.test.ts`, `ExecuteCommandToolHandler.approval.test.ts`, `VscodeTerminalProcess.test.ts` |
 
 ## 5. Correctness arguments (sketch)
 - **I2:** phase `suspended` is assigned only in `evaluateAndPersistPipelineState` when `pending = ∅` after deferring all descendants; `pending` is recomputed from durable statuses, so a late-finishing child cannot be missed (re-triggered by its own completion/failure).
 - **I8/I12:** every manifest mutation occurs inside `withFormationLock(formationId)`; the first branch of the reconcile body returns when the member is already terminal, so replays are no-ops.
 - **I7:** `nextAttempt = attempt + 1 > 2` short-circuits before any insert.
 - **I16/I17:** done snapshots are sliced against accumulated deltas; `extractJsonRoots` self-heals identical duplicate JSON roots without throwing, while transport errors set `safeToRetry: false` stopping runaway failovers.
+- **I18/I19:** specialist prompts strictly mandate `write_to_file` and forbid heredocs; pre-execution interception prevents unexecutable heredocs from triggering UI approval stalls or reaching process dispatch; `VscodeTerminalProcess` circuit-breaks interactive shell integration deadlocks.
 - **Progress:** each loop is bounded (I5, I7, inbox cap) ⇒ termination or explicit escalation.
 
 ## 6. Evaluation
-Automated: 190 backend unit tests passing (49 auxiliary, 54 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys, 15 codex streaming, 15 stream response handler); 7 component tests; multiple tests flush to a real SQLite file with foreign keys on. Defects found by evaluation are in [post-mortems](../postmortems/README.md); seven were persistence/phase/stream-decoding semantic and invisible to standard mocks. **Not evaluated:** performance under extreme concurrency, live-host extension host network drops.
+Automated: 291 backend unit tests passing (49 auxiliary, 54 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys, 15 codex streaming, 15 stream response handler, 33 heredoc policy, 27 command approval & interception, 39 terminal process lifecycle & decoding, 5 policy pre-execution); 7 component tests; multiple tests flush to a real SQLite file with foreign keys on. Defects found by evaluation are in [post-mortems](../postmortems/README.md); eight were persistence/phase/stream-decoding/terminal semantic and invisible to standard mocks. **Not evaluated:** performance under extreme concurrency, live-host extension host network drops.
 
 **Overhead when off:** one config resolution per entry point (30 s cache) and one profile lookup in `settleLegionSpecialist`.
 
@@ -99,4 +102,4 @@ Automated: 190 backend unit tests passing (49 auxiliary, 54 legion host/adapter/
 1. In-process locks only (single extension host). 2. No mid-turn restoration. 3. Heuristic classification. 4. Review engine consumes findings; it does not generate them with a model. 5. File reservation is check-then-act (L11). 6. Other modules were not audited for stranded shadow-overlay writes (L12; the in-scope instances are fixed — PM-011). 7. Specialist execution host runner (L2) is implemented via `LegionAgentHost` / `LegionToolAdapter` in Phase 6/7. Full list: [findings](../implementation/findings.md#known-limits-and-open-questions).
 
 ## 8. Related decisions and further reading
-[ADR-0001 … 0014](../adr/README.md) · [Data model](../architecture/data-model.md) · [Configuration](../architecture/configuration.md) · [Philosophy](01-philosophy.md) · [Stakeholder hand-off](02-stakeholder-handoff.md)
+[ADR-0001 … 0015](../adr/README.md) · [Data model](../architecture/data-model.md) · [Configuration](../architecture/configuration.md) · [Philosophy](01-philosophy.md) · [Stakeholder hand-off](02-stakeholder-handoff.md)

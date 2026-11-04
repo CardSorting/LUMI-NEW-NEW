@@ -129,7 +129,7 @@ grep -rn 'reconcileAfterStreamFailure\|settleSpecialistStream\|evaluateOptionalC
 # 4. Run both TypeScript compilers (Extension Host + Webview UI)
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 
-# 5. Run the full real-SQLite + unit test verification block (190 tests)
+# 5. Run the full real-SQLite + unit test verification block (291 tests)
 npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
   --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
   src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
@@ -139,7 +139,12 @@ npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --time
   src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
   src/shared/storage/__tests__/state-keys.test.ts \
   src/core/api/__tests__/openai-codex.streaming.test.ts \
-  src/core/task/__tests__/StreamResponseHandler.test.ts
+  src/core/task/__tests__/StreamResponseHandler.test.ts \
+  src/integrations/terminal/__tests__/heredocPolicy.test.ts \
+  src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts \
+  src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts \
+  src/hosts/vscode/terminal/TerminalOutputDecoder.test.ts \
+  src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts
 ```
 
 ---
@@ -178,4 +183,29 @@ or `SyntaxError: Unexpected non-whitespace character after JSON`.
    - Check that `safeToRetry` is `false`. When stream decoding or JSON syntax fails, `LegionAgentHost` prevents `LegionCoordinator` from triggering an automatic failover replacement. Retrying the same model with the same transport would hit the exact same decoding bug.
 3. **Verify Provider Offset Tracking:**
    - If a new streaming provider is added, verify that its stream response generator uses `toolCallDelta(callId, args, snapshot)` to slice terminal done snapshots against accumulated deltas.
+
+---
+
+## Drill 8 — Diagnosing Terminal Heredoc Deadlocks & File Modification Interception (PM-016, ADR-0015)
+
+### When to Use
+A specialist agent or parent conductor command appears stuck in `execute_command`, or returns `command_permission_denied` with:
+```text
+Terminal heredoc file creation detected for '<filename>'. Writing files through terminal heredocs deadlocks interactive shell integration and bypasses file tracking. Use the 'write_to_file' tool directly to create or overwrite each file instead.
+```
+
+### Symptom
+- **Normal Interception:** The command fails immediately with a `command_permission_denied` tool error, no terminal processes hang, and the model self-corrects using `write_to_file`.
+- **Unhandled Deadlock (if guards were bypassed):** The task spins indefinitely waiting for `onDidEndTerminalShellExecution`; terminal output stays empty or stalled; no exit code is received.
+
+### Root-Cause Checklist ([PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md), [ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md))
+1. **Check Specialist System Prompt Parity:**
+   - Verify `LEGION_CORE_RULES` is present in the specialist's system prompt in `LegionAgentHost.ts`. If prompt parity is broken, the specialist may believe terminal heredocs (`cat <<'EOF'`) are an acceptable method for file creation.
+2. **Verify Pre-Execution Interception & Approval Suppression:**
+   - Ensure `ExecuteCommandToolHandler.ts` suppresses UI approval prompting and intercepts the command via `detectHeredocFileRedirection`. The user should not be prompted to manually approve an unexecutable heredoc command.
+   - Verify `UniversalGuard.guardPreExecution` and `FluidPolicyEngine.validatePreExecution` reject the command before execution starts.
+3. **Inspect Terminal Process Circuit-Breaker:**
+   - If a multiline heredoc slipped past handlers, check `VscodeTerminalProcess.ts`: `isMultilineHeredocCommand` must route the command to `runManaged` fallback or throw `Command execution blocked: multiline heredoc commands cannot be safely executed via interactive shell integration without deadlocking`.
+4. **Resolution:**
+   - Ensure the agent receives the error message instructing it to use `write_to_file`. Verify the agent calls `write_to_file` on the subsequent turn.
 

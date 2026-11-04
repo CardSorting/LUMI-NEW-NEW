@@ -2,7 +2,7 @@ import type { ApiHandler } from "@core/api"
 import { expect } from "chai"
 import sinon from "sinon"
 import type { SpawnedLegionMember } from "@/infrastructure/ai/LegionCoordinator"
-import { LegionAgentHost } from "../LegionAgentHost"
+import { LEGION_CORE_RULES, LegionAgentHost } from "../LegionAgentHost"
 
 const member = { assignment: { title: "Researcher", focusObjective: "Inspect the code" } } as SpawnedLegionMember
 
@@ -616,5 +616,51 @@ describe("LegionAgentHost", () => {
 		if (result.status === "completed") {
 			expect(result.summary).to.equal("Healed work")
 		}
+	})
+
+	it("LEGION_CORE_RULES defines file creation mandates, heredoc prohibitions, and non-interactive requirements", () => {
+		expect(LEGION_CORE_RULES).to.include("write_to_file")
+		expect(LEGION_CORE_RULES).to.include("replace_in_file")
+		expect(LEGION_CORE_RULES).to.include("cat <<'EOF'")
+		expect(LEGION_CORE_RULES).to.include("cat > file")
+		expect(LEGION_CORE_RULES).to.include("tee")
+		expect(LEGION_CORE_RULES).to.include("echo >")
+		expect(LEGION_CORE_RULES).to.include("non-interactive")
+		expect(LEGION_CORE_RULES).to.include("deadlock shell integration")
+	})
+
+	it("injects LEGION_CORE_RULES into the specialist system prompt on execute", async () => {
+		let capturedSystem = ""
+		const api = {
+			createMessage: (system: string) => {
+				capturedSystem = system
+				return (async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: "done",
+								name: "attempt_completion",
+								arguments: '{"result":"All finished"}',
+							},
+						},
+					}
+				})()
+			},
+		} as unknown as ApiHandler
+
+		const host = new LegionAgentHost({
+			systemContext: "Parent Context Objective",
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+		})
+
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("completed")
+		expect(capturedSystem).to.include("Parent Context Objective")
+		expect(capturedSystem).to.include("Researcher")
+		expect(capturedSystem).to.include(LEGION_CORE_RULES)
+		expect(capturedSystem).to.include("write_to_file")
+		expect(capturedSystem).to.include("cat <<'EOF'")
 	})
 })

@@ -81,6 +81,20 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | `components/settings/utils/settingsHandlers.ts` | Mod | `updateSettingsBatch` (atomic presets) |
 | `context/ExtensionStateContext.tsx` | Mod | State defaults/types |
 
+## Terminal Execution & Command Policy Defense
+| File | Status | Change |
+|---|---|---|
+| `src/integrations/terminal/heredocPolicy.ts` (+ `__tests__/heredocPolicy.test.ts`) | New | Shell-token parser `findTopLevelHeredocs`, `detectHeredocFileRedirection`, `isMultilineHeredocCommand`, and 33 unit tests |
+| `src/integrations/terminal/commandPolicy.ts` | Mod | Re-exports `heredocPolicy` helpers |
+| `src/integrations/terminal/index.ts` | Mod | Public exports of heredoc detection functions and types |
+| `src/core/task/legion/LegionAgentHost.ts` (+ `__tests__/LegionAgentHost.test.ts`) | Mod | `LEGION_CORE_RULES` export and specialist system prompt injection for prompt parity |
+| `src/core/task/tools/handlers/ExecuteCommandToolHandler.ts` (+ `__tests__/ExecuteCommandToolHandler.approval.test.ts`) | Mod | Pre-execution interception of heredoc file writes and approval prompt suppression |
+| `src/core/policy/UniversalGuard.ts` | Mod | Pre-execution heredoc file write rejection in `guardPreExecution` |
+| `src/core/policy/FluidPolicyEngine.ts` (+ `__tests__/FluidPolicyEngine.execution.test.ts`) | Mod | Heredoc file write rejection in `validatePreExecution` |
+| `src/core/task/tools/ToolValidator.ts` | Mod | Command parameter validation blocking heredoc file writes |
+| `src/hosts/vscode/terminal/VscodeTerminalProcess.ts` (+ `.test.ts`) | Mod | Multiline heredoc shell integration circuit-breaker with managed fallback and safe refusal |
+| `src/hosts/vscode/terminal/VscodeTerminalManager.ts` | Mod | Fast-path microtask deferral for multiline heredocs |
+
 ## Docs
 `agentswarm/` — original specs (`agentswarm.md`…`agentswarm4.md`, untouched) + this wiki.
 
@@ -100,3 +114,4 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | [ADR-0012](../adr/ADR-0012-automatic-legion-default.md) | Automatic Legion execution host & sandboxed tools | `LegionAgentHost`, `LegionToolAdapter`, `Task.ts`, `LegionPipelineRunner` |
 | [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | Orchestrator Conductor tool, streaming cards, auto-approval & gating heuristics | `engage_swarm.ts`, `EngageSwarmHandler.ts`, `autoApprove.ts`, `joy_zoning.ts`, `formatLegionProgressMessage` |
 | [ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md) | Tool argument stream deduplication, self-healing JSON parser & transport circuit-breaking | `StreamResponseHandler.ts`, `openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`, `LegionAgentHost.ts` — see ADR-0014, PM-015 |
+| [ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md) | Multi-tier terminal heredoc defense, specialist prompt parity & shell integration circuit-breaking | `heredocPolicy.ts`, `LegionAgentHost.ts`, `ExecuteCommandToolHandler.ts`, `UniversalGuard.ts`, `VscodeTerminalProcess.ts` — see ADR-0015, PM-016 |

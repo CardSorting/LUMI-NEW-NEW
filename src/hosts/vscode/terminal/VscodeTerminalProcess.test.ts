@@ -107,6 +107,53 @@ describe("TerminalProcess output and capability handling", () => {
 			;(emitSpy as sinon.SinonSpy).calledWith("completed").should.be.false()
 			;(emitSpy as sinon.SinonSpy).calledWith("continue").should.be.true()
 		})
+
+		it("safely falls back to managed terminal when a multiline heredoc command is run", async () => {
+			const terminal = TerminalRegistry.createTerminal().terminal
+			createdTerminals.push(terminal)
+
+			const mockExecuteCommand = sandbox.stub()
+			sandbox.stub(terminal, "shellIntegration").get(() => ({
+				executeCommand: mockExecuteCommand,
+			}))
+
+			const managedExecution = { terminate: sandbox.stub().resolves() }
+			const mockManagedTerminal = {
+				terminal: TerminalRegistry.createTerminal().terminal,
+				run: sandbox.stub().returns(managedExecution),
+			}
+			createdTerminals.push(mockManagedTerminal.terminal)
+
+			const fallback = sandbox.stub().returns(mockManagedTerminal)
+			const multilineHeredoc = "cat > game.c <<'EOF'\n#include <stdio.h>\nint main(){ return 0; }\nEOF"
+
+			await process.run(terminal, multilineHeredoc, fallback as any)
+
+			fallback.calledOnce.should.be.true()
+			mockManagedTerminal.run.calledOnce.should.be.true()
+			mockManagedTerminal.run.firstCall.args[0].should.equal(multilineHeredoc)
+			mockExecuteCommand.called.should.be.false()
+		})
+
+		it("safely refuses multiline heredocs without fallback to prevent shell integration deadlock", async () => {
+			const terminal = TerminalRegistry.createTerminal().terminal
+			createdTerminals.push(terminal)
+
+			const mockExecuteCommand = sandbox.stub()
+			sandbox.stub(terminal, "shellIntegration").get(() => ({
+				executeCommand: mockExecuteCommand,
+			}))
+
+			const onError = sandbox.spy()
+			process.on("error", onError)
+
+			const multilineHeredoc = "cat > game.c <<'EOF'\n#include <stdio.h>\nEOF"
+			await process.run(terminal, multilineHeredoc)
+
+			onError.calledOnce.should.be.true()
+			onError.firstCall.args[0].message.should.match(/multiline heredoc commands cannot be safely executed/)
+			mockExecuteCommand.called.should.be.false()
+		})
 	})
 
 	// Tests with controlled output

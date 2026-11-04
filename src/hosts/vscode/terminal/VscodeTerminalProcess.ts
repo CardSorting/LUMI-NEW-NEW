@@ -1,6 +1,6 @@
 import { EventEmitter } from "events"
 import * as vscode from "vscode"
-import { boundCommandOutput } from "@/integrations/terminal/commandPolicy"
+import { boundCommandOutput, isMultilineHeredocCommand } from "@/integrations/terminal/commandPolicy"
 import {
 	isCompilingOutput,
 	MAX_FULL_OUTPUT_SIZE,
@@ -189,11 +189,20 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		if (this.stopped || this.stopRequested || this.dispatched) return
 		this.watchTerminal(terminal)
 		try {
+			const isHeredoc = isMultilineHeredocCommand(command)
 			if (
 				!terminal.shellIntegration?.executeCommand ||
-				!(vscode.window as typeof vscode.window & ShellEvents).onDidEndTerminalShellExecution
+				!(vscode.window as typeof vscode.window & ShellEvents).onDidEndTerminalShellExecution ||
+				isHeredoc
 			) {
-				if (!fallback) throw new Error("Command did not start: no observable shell transport is available.")
+				if (!fallback) {
+					if (isHeredoc) {
+						throw new Error(
+							"Command execution blocked: multiline heredoc commands cannot be safely executed via interactive shell integration without deadlocking. Use write_to_file or configure a supervised shell fallback.",
+						)
+					}
+					throw new Error("Command did not start: no observable shell transport is available.")
+				}
 				// Transport selection is only allowed before dispatch. Never replay an uncertain command.
 				this.disposeObservers()
 				await this.runManaged(fallback(), command)

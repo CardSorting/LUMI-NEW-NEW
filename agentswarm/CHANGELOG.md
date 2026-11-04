@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 | Phase / Milestone | Date | Focus | Key Post-Mortems / ADRs | Test Count (`AgentSwarmAuxiliary.test.ts` + Legion) |
 |---|---|---|---|---|
+| **[Phase 9 — Multi-Tier Terminal Heredoc Defense, Specialist Prompt Parity & Shell Integration Circuit-Breaking](#phase-9--multi-tier-terminal-heredoc-defense-specialist-prompt-parity--shell-integration-circuit-breaking-2026-11-04)** | 2026-11-04 | Specialist prompt parity via `LEGION_CORE_RULES` (`LegionAgentHost.ts`), shell token-aware parser `findTopLevelHeredocs` and file redirection detector `detectHeredocFileRedirection` (`heredocPolicy.ts`), pre-execution interception and UI approval prompt suppression (`ExecuteCommandToolHandler.ts`, `UniversalGuard.ts`, `FluidPolicyEngine.ts`, `ToolValidator.ts`), multiline shell integration circuit breaker in `VscodeTerminalProcess.ts`, and microtask deferral in `VscodeTerminalManager.ts` | [ADR-0015](adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md) | **291 passing** (all 291 unit tests across Agent Swarm, Legion Host, Tool Handlers, Terminal, and Policy; 0 TypeScript errors, 0 Biome lint errors) |
 | **[Phase 8 — Tool Argument Stream Deduplication, Self-Healing Parser & Transport Circuit-Breaking](#phase-8--tool-argument-stream-deduplication-self-healing-parser--transport-circuit-breaking-2026-11-04)** | 2026-11-04 | Tool call argument offset tracking and snapshot slicing (`openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`), interleaved tool call name tracking, `extractJsonRoots` state-machine parser in `StreamResponseHandler.ts`, self-healing across identical duplicate JSON roots (including nested objects and string literals with braces), typed `ToolArgumentError` diagnostics, and transport error circuit-breaking in `LegionAgentHost.ts` (`safeToRetry: false`) | [ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md) | **190 passing** (49 auxiliary + 54 legion host/tool + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys + 15 codex streaming + 15 stream response handler); 50 passing in streaming & host suite |
 | **[Phase 7 — Orchestrator Conductor Tool, Progress Streaming & Hardened Gating](#phase-7--orchestrator-conductor-tool-progress-streaming--hardened-gating-2026-11-03)** | 2026-11-03 | Conductor tool `engage_swarm`, auto-approval (`autoApprove.ts`), streaming progress cards (`formatLegionProgressMessage`), prompt conductor injection (`joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`), relaxed gating heuristics (tactical strikes, test projects), conversation history fallback, file attachment preservation, fallback `attempt_completion`, token/cost budget enforcement, categorized `safeToRetry` failover | [ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | **158 passing** (49 auxiliary + 52 legion + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys) |
 | **[Phase 6 — Automatic Legion Execution, Sandboxed Tool Host & Steering Hardening](#phase-6--automatic-legion-execution-sandboxed-tool-host--steering-hardening-2026-11-03)** | 2026-11-03 | Automatic Legion default ([ADR-0012](adr/ADR-0012-automatic-legion-default.md)), `LegionAgentHost` native tool loop, `LegionToolAdapter` sandboxing, `activeLegionController` steering abort, objective handoff pinning, SQLite flush barriers, path reservation boundaries | [PM-013](postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md), [PM-014](postmortems/PM-014-composite-command-settlement-and-reservation-boundary.md), [ADR-0012](adr/ADR-0012-automatic-legion-default.md) | **104 passing** (49 auxiliary + 44 legion + 7 stream + 4 metrics) |
@@ -25,7 +26,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased / Active Working Tree]
 
-> **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–8 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/infrastructure/ai/`, `src/core/task/`, and `agentswarm/`). Verify `git log` when cutting a tagged release.
+> **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–9 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/integrations/terminal/`, `src/core/task/`, `src/hosts/vscode/terminal/`, and `agentswarm/`). Verify `git log` when cutting a tagged release.
+
+---
+
+## Phase 9 — Multi-Tier Terminal Heredoc Defense, Specialist Prompt Parity & Shell Integration Circuit-Breaking (2026-11-04)
+
+### Added
+- **Specialist Prompt Parity (`LEGION_CORE_RULES` in `src/core/task/legion/LegionAgentHost.ts`, [ADR-0015](adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md)):**
+  - Exported `LEGION_CORE_RULES` mandating `write_to_file` and `replace_in_file` for all file creations and edits.
+  - Strictly forbade terminal heredocs (`cat <<'EOF'`, `cat > file`, `tee`, `echo >`) and interactive stdin redirection, explaining that non-interactive terminal sessions deadlock on heredocs.
+  - Injected `LEGION_CORE_RULES` into every specialist system prompt upon execution, establishing 1:1 prompt parity between parent conductor and child specialists.
+- **Shell Token-Aware Policy Parser (`src/integrations/terminal/heredocPolicy.ts`):**
+  - `findTopLevelHeredocs(command: string)`: State-machine character scanner tracking quotes, backslash escapes, and arithmetic expansions (`$((...))` / `((...))`). Accurately detects top-level heredocs while skipping bitwise arithmetic shifts and string literals.
+  - `detectHeredocFileRedirection(command: string)`: Detects file creation across all shell variations: redirection before delimiter (`cat > file << 'EOF'`), tee before delimiter (`tee file << 'EOF'`, `sudo tee`), redirection on delimiter line (`cat << 'EOF' > file`), piped heredocs (`cat << 'EOF' | sudo tee file`), and delimiter line redirection (`EOF > file`). Handles quoted filenames and filters `/dev/null`. Returns `{ isHeredocFileWrite, targetFiles, reason }` directing the model to `write_to_file`.
+  - `isMultilineHeredocCommand(command: string)`: Detects multiline commands with heredocs (including interpreters like `python3 << 'EOF'` or unclosed delimiters) that threaten interactive shell integration with deadlock.
+- **Pre-Execution Interception & Approval Suppression:**
+  - `src/core/task/tools/handlers/ExecuteCommandToolHandler.ts`: Suppressed interactive UI approval prompting when `detectHeredocFileRedirection(command).isHeredocFileWrite` is true; intercepted heredoc file writes before execution, emitted a `command_permission_denied` notice, and returned a structured tool error directing the agent to `write_to_file`.
+  - `src/core/policy/UniversalGuard.ts` & `src/core/policy/FluidPolicyEngine.ts`: Pre-flight rejection of heredoc file writes during `guardPreExecution` and `validatePreExecution`.
+  - `src/core/task/tools/ToolValidator.ts`: Added validation rejecting heredoc file creation in `validateExecuteCommandParams`.
+- **Terminal Shell Integration Circuit-Breaker:**
+  - `src/hosts/vscode/terminal/VscodeTerminalProcess.ts`: Detected `isMultilineHeredocCommand(command)` before dispatch. If interactive shell integration is active without fallback, safely threw an error refusing execution to prevent terminal deadlock. If a managed terminal fallback is provided, switched to managed transport before dispatch.
+  - `src/hosts/vscode/terminal/VscodeTerminalManager.ts`: Deferred microtask dispatch for multiline heredoc commands so output and completion observers attach prior to execution.
+- **Comprehensive Unit Tests:**
+  - `src/integrations/terminal/__tests__/heredocPolicy.test.ts`: 33 unit tests covering chained heredocs, quoted targets, single/double quotes, bitwise shift expressions, sudo tee, tab-indented syntax, and unclosed heredocs.
+  - `src/core/task/legion/__tests__/LegionAgentHost.test.ts`: Asserted `LEGION_CORE_RULES` content and system prompt injection.
+  - `src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts`: Verified pre-approval interception and tool error guidance.
+  - `src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts`: Verified fallback to managed terminal and safe refusal without fallback.
+  - `src/core/policy/__tests__/FluidPolicyEngine.execution.test.ts`: Verified rejection during `validatePreExecution`.
+
+### Changed
+- Re-exported heredoc policy functions and types in `src/integrations/terminal/commandPolicy.ts` and `src/integrations/terminal/index.ts`.
+
+### Fixed
+- **Terminal Shell Integration Deadlock ([PM-016](postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)):** Prevented terminal command hangs caused by non-interactive shells waiting indefinitely for stdin on multiline heredocs.
+- **Workspace State & File Reservation Bypass ([PM-016](postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)):** Prevented file creation and edits from bypassing `write_to_file`, dirty buffer tracking, and Legion file reservations.
 
 ---
 

@@ -1,5 +1,6 @@
 import { ToolParamName, ToolUse } from "@core/assistant-message"
 import { DietCodeIgnoreController } from "@core/ignore/DietCodeIgnoreController"
+import { detectHeredocFileRedirection } from "@integrations/terminal/commandPolicy"
 import { DietCodeDefaultTool } from "@shared/tools"
 import { UniversalGuard } from "../../policy/UniversalGuard"
 
@@ -73,6 +74,15 @@ export class ToolValidator {
 			return {
 				ok: false,
 				error: `Command attempts to access RESTRICTED file: '${ignoredFile}'`,
+			}
+		}
+		const heredocCheck = detectHeredocFileRedirection(command)
+		if (heredocCheck.isHeredocFileWrite) {
+			return {
+				ok: false,
+				error:
+					heredocCheck.reason ??
+					"Multiline heredoc file creation is prohibited in execute_command. Use the write_to_file tool instead.",
 			}
 		}
 		return { ok: true }

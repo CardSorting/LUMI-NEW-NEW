@@ -23,6 +23,7 @@ Read this fully before modifying anything under `src/infrastructure/ai/`, `src/i
 6. **Fix root causes, not symptoms.** No monkey patches (e.g. don't mutate test mocks to hide a real-pool bug).
 7. **Never claim done without evidence.** "Done" = a command you ran and its output. Reports from other agents are *claims*, not evidence.
 8. **Streaming hygiene & circuit-breaking.** Provider streaming handlers slice done snapshots against accumulated deltas; `StreamResponseHandler` self-heals identical duplicate JSON roots; transport decoding errors circuit-break with `safeToRetry: false` ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
+9. **Terminal safety & prompt parity.** Never create or edit files via terminal heredoc redirection (`cat <<'EOF' > file`, `tee`, `echo >`). Use `write_to_file` or `replace_in_file` directly. Terminal commands run non-interactively without stdin; heredocs deadlock VS Code shell integration and are intercepted before execution ([ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)).
 
 ## 2. Persistence rules (the #1 source of past bugs)
 
@@ -43,7 +44,7 @@ Background: [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md)
 
 ## 4. After you edit — verification protocol
 
-Run all of these and **paste/keep the output** in your report:
+Run all of these and **paste/keep the output** in your report (expect **291 passing tests**):
 
 ```bash
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
@@ -56,7 +57,12 @@ npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --time
   src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
   src/shared/storage/__tests__/state-keys.test.ts \
   src/core/api/__tests__/openai-codex.streaming.test.ts \
-  src/core/task/__tests__/StreamResponseHandler.test.ts
+  src/core/task/__tests__/StreamResponseHandler.test.ts \
+  src/integrations/terminal/__tests__/heredocPolicy.test.ts \
+  src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts \
+  src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts \
+  src/hosts/vscode/terminal/TerminalOutputDecoder.test.ts \
+  src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts
 (cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 npx biome lint --diagnostic-level=error <touched files>
 ```

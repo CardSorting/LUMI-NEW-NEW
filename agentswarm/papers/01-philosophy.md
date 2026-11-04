@@ -34,6 +34,9 @@ Claims are labelled **verified** or **unverified**. A green test run is evidence
 ### 9. Stream hygiene over futile retries
 Transport stream decoding errors (such as concatenated snapshots or syntax corruption) are not transient logical failures. Retrying them against the same provider stream is futile and wastes token quotas. We slice snapshots at the source, self-heal unambiguous duplicates, and circuit-break transport errors with `safeToRetry: false`.
 
+### 10. Native tool discipline & terminal safety
+File modifications belong in tracked, discrete tool operations (`write_to_file`, `replace_in_file`), never hidden inside terminal heredocs (`cat <<'EOF'`, `tee`). Terminal environments are non-interactive pipes where stdin prompts freeze shell integration. We enforce specialist prompt parity, pre-execution interception, and terminal process circuit-breakers to protect developer sessions from deadlocks ([ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)).
+
 ## What agentswarm refuses to be
 - A replacement for the host's agent engine or UI.
 - A framework that needs a model call to decide anything it can decide deterministically.

@@ -211,11 +211,36 @@ With [ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-heal
    - If true, the specialist returns `status: "failed"` with `safeToRetry: false`.
    - Under [ADR-0009](../adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), `LegionCoordinator` respects `safeToRetry: false` and does **not** spawn a replacement specialist, stopping futile failover loops on transport corruption and preserving user budget.
 
+### 5.7 Multi-Tier Terminal Heredoc Defense, Specialist Prompt Parity & Shell Integration Circuit-Breaking (`heredocPolicy.ts`, `LegionAgentHost.ts`, `ExecuteCommandToolHandler.ts`, `UniversalGuard.ts`, `VscodeTerminalProcess.ts`)
+
+With [ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md) and [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md), LUMI establishes defense-in-depth against terminal heredoc deadlocks and enforces specialist prompt parity:
+
+1. **Specialist Prompt Parity (`LEGION_CORE_RULES` in `LegionAgentHost.ts`):**
+   - Injects `LEGION_CORE_RULES` into every specialist system prompt upon execution.
+   - Mandates `write_to_file` and `replace_in_file` for all file creations and modifications.
+   - Strictly forbids multiline heredocs (`cat <<'EOF'`, `cat > file`, `tee`, `echo >`) and interactive stdin redirection, explaining that non-interactive terminal sessions deadlock on heredocs.
+   - Restricts `execute_command` to non-interactive tasks (compilation, tests, linters, environment checks).
+
+2. **Shell Token-Aware Policy Parser (`src/integrations/terminal/heredocPolicy.ts`):**
+   - `findTopLevelHeredocs(command)`: Character-by-character scanner tracking single quotes, double quotes, escape characters, and arithmetic expansions (`$((...))` / `((...))`). Detects valid top-level heredocs while ignoring arithmetic shifts and string literals.
+   - `detectHeredocFileRedirection(command)`: Detects file creation across all shell syntaxes (before/after delimiter, piped to `tee`/`sudo tee`/`cat`, tab-indented delimiters `<<-EOF`, quoted filenames). Returns `{ isHeredocFileWrite: true, targetFiles, reason }` directing the model to `write_to_file`.
+   - `isMultilineHeredocCommand(command)`: Detects multiline commands with heredoc syntax (including interpreters or unclosed heredocs) that would deadlock interactive shell integration.
+
+3. **Pre-Execution Interception & Approval Suppression (`ExecuteCommandToolHandler.ts`, `UniversalGuard.ts`, `FluidPolicyEngine.ts`, `ToolValidator.ts`):**
+   - In `ExecuteCommandToolHandler`: detects heredoc file writes before UI approval prompting (`shouldAutoApprove || detectHeredocFileRedirection(command).isHeredocFileWrite`), preventing unnecessary interactive UI prompts. Intercepts the command before execution, emits `command_permission_denied`, and returns actionable guidance.
+   - In `UniversalGuard` and `FluidPolicyEngine`: `guardPreExecution` and `validatePreExecution` reject heredoc file writes with structured policy errors.
+   - In `ToolValidator`: `validateExecuteCommandParams` blocks heredoc file redirection.
+
+4. **Shell Integration Circuit-Breaker (`VscodeTerminalProcess.ts` & `VscodeTerminalManager.ts`):**
+   - In `VscodeTerminalProcess.run`: checks `isMultilineHeredocCommand(command)`. If interactive shell integration is active, safely switches to managed terminal fallback if available, or throws an explicit error refusing execution to prevent terminal deadlock.
+   - In `VscodeTerminalManager.ts`: defers microtask dispatch for multiline heredoc commands so output and completion observers attach before execution.
+
 ## 6. What this design deliberately does *not* do
 
 - It does not interrupt running child tools mid-operation to pretend to be suspended (all defer/cancellation points are cooperative or cleanly cancelled via process group signals).
 - It does not share transcripts or conversational memory directly between agents (context is passed via structured summaries and receipts).
 - It does not make an LLM call to classify tasks (deterministic scoring ensures instant and predictable roster selection).
 - It does not retry specialists on transport decoding or stream syntax errors (`safeToRetry: false` ensures broken provider streams fail fast without churn).
+- It does not permit file creation or edits via terminal heredocs or stdin redirection; all workspace modifications must flow through structured tools (`write_to_file`, `replace_in_file`) to ensure dirty buffer tracking, reservation exclusivity, and shell integration reliability.
 
 

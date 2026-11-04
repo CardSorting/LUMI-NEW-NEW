@@ -65,4 +65,14 @@ describe("execution policy observations", () => {
 			await rm(dir, { recursive: true, force: true })
 		}
 	})
+	it("rejects heredoc file writes during validatePreExecution with actionable guidance", async () => {
+		const engine = fixture()
+		const result = await engine.validatePreExecution({
+			name: DietCodeDefaultTool.BASH,
+			params: { command: "cat > game.c <<'EOF'\nint main(){}\nEOF" },
+		})
+		assert.equal(result.success, false)
+		assert.match(result.error!, /Terminal heredoc file creation detected/)
+		assert.match(result.error!, /write_to_file/)
+	})
 })

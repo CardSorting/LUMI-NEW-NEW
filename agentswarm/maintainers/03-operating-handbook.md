@@ -69,6 +69,8 @@ When viewing the **LUMI** output channel or Extension Host console logs, filter 
 | `[Orchestrator]` | `Orchestrator.ts` | Stream creation/completion/failure, task dispatch blocks on suspended streams, reservation releases |
 | `[DbPool]` | `BufferedDbPool.ts` | Shadow commit/rollback, expired shadow cleanup, and any SQLite transaction error on `flush()` |
 | `[Config]` | `src/infrastructure/db/Config.ts` | SQLite initialization path, WAL mode confirmation, or `.corrupt.<timestamp>` recovery |
+| `[ExecuteCommand]` | `ExecuteCommandToolHandler.ts` | Terminal command execution, approval checks, and heredoc file write pre-execution interception (`command_permission_denied`) |
+| `[TerminalProcess]` | `VscodeTerminalProcess.ts` | Shell integration events, multiline heredoc fallback to managed terminal, and circuit-breaker refusals |
 
 ---
 

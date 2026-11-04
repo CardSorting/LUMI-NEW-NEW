@@ -196,6 +196,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 - **`LegionAgentHost.ts`:**
   - Manages independent LLM client conversations for specialists.
   - Implements budget capping (`maxTokens`, `maxCost`) and heuristic token estimation when usage chunks are omitted by providers or return 0 tokens.
+  - Enforces specialist prompt parity: injects `LEGION_CORE_RULES` into each specialist's system prompt upon execution, mandating `write_to_file`/`replace_in_file` for all file creations and edits, strictly prohibiting multiline heredocs (`cat <<'EOF'`, `tee`, `echo >`) and interactive stdin redirection, and explaining that non-interactive terminal sessions deadlock on heredocs ([ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)).
   - Defends UI streaming: wraps `onUsage` in `.catch()` error logging so webview transport disconnections do not fail the execution pipeline.
   - Circuit-breaks transport decoding errors: inspects caught errors with `isTransportError` (identifying `ToolArgumentError(concatenation | syntax)`, `SyntaxError`, or `"Stream decoding failed"`). Emits `[Transport Error] Stream decoding failed: ...` with `safeToRetry: false`, preventing futile specialist failover loops ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
 - **`LegionToolAdapter.ts`:**
@@ -260,6 +261,28 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 - **Streaming Provider Handlers (`src/core/api/providers/` & `src/core/api/utils/`):**
   - `openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`: Stateful argument offset tracking via `toolCallDelta(callId, args, snapshot)`. When terminal snapshot chunks (`output_item.done`, `function_call_arguments.done`) follow deltas, slices unstreamed suffixes and drops duplicate snapshots (`delta = ""`).
   - Interleaved tool identity maps (`toolCallIdByItemId`, `toolCallNameByItemId`, `toolCallNameByCallId`, `functionCallByItemId`) preserving tool call names across interleaved chunk streams.
+
+---
+
+## 11. Multi-Tier Terminal Heredoc Defense & Shell Integration Circuit-Breaking (`src/integrations/terminal/`, `src/core/policy/`, `src/hosts/vscode/terminal/`)
+
+**Purpose:** Defend against VS Code shell integration deadlocks, interactive stdin freezing, and file reservation bypasses caused by models issuing terminal heredoc file creations (`cat <<'EOF'`, `tee`, `echo >`).
+
+### Key Components & Invariants
+- **`heredocPolicy.ts` (`src/integrations/terminal/`):**
+  - `findTopLevelHeredocs(command: string)`: Shell-token scanner tracking single quotes, double quotes, escapes, and arithmetic expansions (`$((...))` / `((...))`). Accurately detects top-level `<<` heredoc operators while ignoring arithmetic bitwise shifts and quoted literals.
+  - `detectHeredocFileRedirection(command: string)`: Detects file creation across all shell variations: redirection before delimiter (`cat > file << 'EOF'`), tee before delimiter (`tee file << 'EOF'`, `sudo tee`), redirection on delimiter line (`cat << 'EOF' > file`), piped heredocs (`cat << 'EOF' | sudo tee file`), and delimiter line redirection (`EOF > file`). Handles quoted filenames and filters `/dev/null`. Returns `{ isHeredocFileWrite, targetFiles, reason }` directing the model to `write_to_file`.
+  - `isMultilineHeredocCommand(command: string)`: Identifies any multiline command containing heredoc syntax that threatens interactive shell integration with input deadlock.
+- **`ExecuteCommandToolHandler.ts` (`src/core/task/tools/handlers/`):**
+  - Approval suppression: suppresses interactive user approval prompts when `detectHeredocFileRedirection(command).isHeredocFileWrite` is true, avoiding interactive prompt stalls on forbidden commands.
+  - Pre-execution interception: intercepts heredoc file write commands before permission validation and execution, emits `command_permission_denied`, and returns `formatResponse.toolError(reason)`.
+- **`UniversalGuard.ts` & `FluidPolicyEngine.ts` (`src/core/policy/`):**
+  - `guardPreExecution` & `validatePreExecution`: Pre-flight checks reject heredoc file redirection with actionable policy errors directing callers to `write_to_file`.
+- **`ToolValidator.ts` (`src/core/task/tools/`):**
+  - `validateExecuteCommandParams`: Blocks heredoc file redirection commands before execution dispatch.
+- **`VscodeTerminalProcess.ts` & `VscodeTerminalManager.ts` (`src/hosts/vscode/terminal/`):**
+  - Multiline shell integration circuit breaker: In `VscodeTerminalProcess.run`, if `isMultilineHeredocCommand(command)` is true under interactive shell integration, safely falls back to a supervised managed terminal if available, or throws an error refusing execution to prevent terminal deadlock.
+  - Fast-path microtask deferral: `VscodeTerminalManager.runCommand` defers dispatch for multiline heredocs to ensure output and completion listeners attach prior to execution.
 
 ---
 

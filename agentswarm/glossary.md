@@ -39,6 +39,11 @@
 | **Self-Healing Tool Arguments** | Dual-tier deduplication in `StreamResponseHandler.ts`: stream-time prefix slicing in `processToolUseDelta`, and terminal-time unification in `assertCompleteToolUses` across multiple identical complete JSON roots (`deepEqual`). |
 | **`ToolArgumentError`** | Typed diagnostic error with `kind` classification (`incomplete`, `concatenation`, `syntax`, `invalid_format`), retaining `toolName` and `rawInput` for precise triage. |
 | **Transport Error Circuit-Breaking** | Catch guard in `LegionAgentHost` (`isTransportError`) returning `safeToRetry: false` on stream decoding, concatenation, or JSON syntax errors, halting futile failovers. |
+| **Terminal Heredoc Redirection** | Shell syntax redirecting file input/output via multiline heredocs (`cat <<'EOF' > file`, `tee`). Prohibited in `execute_command` because non-interactive terminal sessions lack stdin, causing interactive shell integration to deadlock. |
+| **`LEGION_CORE_RULES` (Prompt Parity)** | System prompt instruction block injected into `LegionAgentHost` specialists establishing 1:1 parity with the conductor, strictly mandating `write_to_file` and forbidding multiline terminal heredocs and stdin redirection. |
+| **Shell Token Parser (`findTopLevelHeredocs`)** | Character scanner in `heredocPolicy.ts` that ignores quotes and arithmetic shifts to reliably identify genuine shell heredocs and file redirection targets. |
+| **Heredoc Pre-Execution Interception** | Pre-flight audit in `ExecuteCommandToolHandler`, `UniversalGuard`, and `FluidPolicyEngine` that suppresses UI approval prompts and rejects terminal heredoc file writes before process execution. |
+| **Shell Integration Circuit-Breaker** | Terminal transport safeguard in `VscodeTerminalProcess.ts` that safely routes multiline heredoc commands to managed fallback or rejects them with an explicit error to prevent VS Code shell integration deadlocks. |
 
 ## Specialist codenames
 

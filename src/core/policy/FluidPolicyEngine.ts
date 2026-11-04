@@ -1,3 +1,4 @@
+import { detectHeredocFileRedirection } from "@integrations/terminal/commandPolicy"
 import { DietCodeDefaultTool } from "@shared/tools"
 import * as crypto from "crypto"
 import * as fs from "fs/promises"
@@ -284,6 +285,17 @@ export class FluidPolicyEngine {
 			block.name === DietCodeDefaultTool.NEW_RULE ||
 			block.name === DietCodeDefaultTool.APPLY_PATCH ||
 			block.name === DietCodeDefaultTool.BASH
+
+		const rawCmd = block.params?.command
+		if (block.name === DietCodeDefaultTool.BASH && typeof rawCmd === "string") {
+			const heredocCheck = detectHeredocFileRedirection(rawCmd)
+			if (heredocCheck.isHeredocFileWrite) {
+				return {
+					success: false,
+					error: heredocCheck.reason,
+				}
+			}
+		}
 
 		if (this.mode === "plan" && isModifying && this.stateManager?.getGlobalSettingsKey("strictPlanModeEnabled")) {
 			return {

@@ -91,6 +91,22 @@ interface ExtractedJsonResult {
   roots: ExtractedJsonRoot[]
   remainder: string
 }
+
+// Terminal Heredoc Policy & Prompt Parity Models (ADR-0015, heredocPolicy.ts & LegionAgentHost.ts)
+interface HeredocRedirectionDetection {
+  isHeredocFileWrite: boolean
+  targetFiles: string[]
+  reason?: string
+}
+
+interface TopLevelHeredoc {
+  delimiter: string
+  index: number
+  statementStart: number
+}
+
+// LEGION_CORE_RULES: Core instruction prompt injected into LegionAgentHost system prompts
+// establishing 1:1 parity with conductor rules (mandating write_to_file, forbidding multiline heredocs)
 ```
 
 `SpawnedLegionMember` carries `stage`, `attempt` (1-based), `reroutedToStreamId`, `resultSummary`, `failureReason`, `completedAt`.

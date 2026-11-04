@@ -267,4 +267,44 @@ describe("command approval execution", () => {
 		assert.deepEqual(result[1], image)
 		assert.equal(config.taskState.didRejectTool, true)
 	})
+	it("intercepts multiline heredoc file write commands before approval and returns guidance to use write_to_file", async () => {
+		const { config, callbacks, handler } = fixture()
+		const heredocCommand = [
+			"cat > game.c <<'EOF'",
+			"#include <stdio.h>",
+			"int main() { return 0; }",
+			"EOF",
+			"cat > Makefile <<'EOF'",
+			"all: game",
+			"EOF",
+			"make clean all test",
+		].join("\n")
+
+		const result = await handler.execute(config, {
+			...block,
+			params: { command: heredocCommand, requires_approval: "true" },
+		})
+
+		sinon.assert.notCalled(callbacks.ask)
+		sinon.assert.notCalled(callbacks.executeCommandTool)
+		sinon.assert.calledWithMatch(callbacks.say, "command_permission_denied", sinon.match(/write_to_file/))
+		assert.equal(isToolFailure(result), true)
+		assert.match(String(result), /Terminal heredoc file creation detected for 'game.c', 'Makefile'/)
+		assert.match(String(result), /write_to_file/)
+	})
+	it("intercepts single heredoc file write before execution and directs to write_to_file", async () => {
+		const { config, callbacks, handler } = fixture()
+		const heredocCommand = "cat << 'EOF' > output.txt\nhello world\nEOF"
+
+		const result = await handler.execute(config, {
+			...block,
+			params: { command: heredocCommand, requires_approval: "true" },
+		})
+
+		sinon.assert.notCalled(callbacks.ask)
+		sinon.assert.notCalled(callbacks.executeCommandTool)
+		assert.equal(isToolFailure(result), true)
+		assert.match(String(result), /output\.txt/)
+		assert.match(String(result), /write_to_file/)
+	})
 })

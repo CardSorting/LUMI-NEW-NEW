@@ -19,3 +19,4 @@ To change a decision, add a new ADR that supersedes the old one — never rewrit
 | [0012](ADR-0012-automatic-legion-default.md) | Automatic Legion formation by default | Accepted |
 | [0013](ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | Orchestrator Conductor tool (`engage_swarm`), progress streaming, auto-approval & hardened gating | Accepted |
 | [0014](ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md) | Tool argument stream deduplication, self-healing JSON parser & transport circuit-breaking | Accepted |
+| [0015](ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md) | Multi-tier terminal heredoc defense, specialist prompt parity & shell integration circuit-breaking | Accepted |

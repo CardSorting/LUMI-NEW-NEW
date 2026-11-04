@@ -2,7 +2,7 @@ import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/prompts/responses"
 import { WorkspacePathAdapter } from "@core/workspace/WorkspacePathAdapter"
 import { showSystemNotification } from "@integrations/notifications"
-import { resolveCommandTimeoutSeconds } from "@integrations/terminal/commandPolicy"
+import { detectHeredocFileRedirection, resolveCommandTimeoutSeconds } from "@integrations/terminal/commandPolicy"
 import { normalizeShellCommand } from "@integrations/terminal/normalizeCommand"
 import type { CommandExecutionResult } from "@integrations/terminal/types"
 import {
@@ -43,10 +43,8 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 		// Check if this should be auto-approved to determine UI flow
 		const shouldAutoApprove = uiHelpers.shouldAutoApproveTool(this.name)
 
-		if (shouldAutoApprove) {
-			// For auto-approved commands, we can't partially stream a say prematurely
-			// since it may become an ask based on the requires_approval parameter
-			// So we wait for the complete block
+		if (shouldAutoApprove || (command && detectHeredocFileRedirection(command).isHeredocFileWrite)) {
+			// For auto-approved commands or intercepted heredoc file writes, do not prompt user prematurely
 			return
 		}
 		await uiHelpers
@@ -113,6 +111,16 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 
 		// Hooks inspect the same command that validation, approval, and execution receive.
 		block = { ...block, params: { ...block.params, command: actualCommand } }
+
+		// Intercept multiline heredoc file redirection to prevent shell integration deadlocks
+		const heredocCheck = detectHeredocFileRedirection(actualCommand)
+		if (heredocCheck.isHeredocFileWrite) {
+			const errorMsg =
+				heredocCheck.reason ??
+				"Multiline heredoc file creation is prohibited in execute_command. Use the write_to_file tool instead."
+			await display.observe(() => config.callbacks.say("command_permission_denied", errorMsg))
+			return formatResponse.toolError(errorMsg)
+		}
 
 		// Check command permission validation (CLINE_COMMAND_PERMISSIONS env var)
 		const permissionResult = config.services.commandPermissionController.validateCommand(actualCommand)
