@@ -144,7 +144,7 @@ flowchart LR
 With [ADR-0012](../adr/ADR-0012-automatic-legion-default.md), Legion executes automatically during act-mode tasks when native tool support is active:
 
 1. **Eligibility & Delegation Policy (`delegationPolicy.ts`):** Evaluates whether the user prohibited delegation (`explicitlyProhibitsDelegation`), whether plan mode is active, or if multimodal attachments are present. If permitted, `Task.ts` dispatches `maybeRunAutomaticLegion`.
-2. **Autonomous Tool Loop (`LegionAgentHost.ts`):** Dispatches specialist members through isolated API client conversations without polluting the parent transcript. Tracks `maxTokens` and `maxCost`, and aggregates incremental usage updates to the webview UI via `postStateToWebview()`. Heuristic token estimators step in if providers omit usage metadata.
+2. **Autonomous Tool Loop (`LegionAgentHost.ts`):** Dispatches specialist members through isolated API client conversations without polluting the parent transcript. Tracks `maxTokens` and `maxCost`, and aggregates incremental usage updates to the webview UI via `postStateToWebview()`. Heuristic token estimators step in if providers omit usage metadata. Transport decoding errors are caught and circuit-broken with `safeToRetry: false` ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md)).
 3. **Sandboxed Tool Adapter (`LegionToolAdapter.ts`):**
    - Each specialist operates under an isolated `TaskState` with `executionOwner = legion:<streamId>`.
    - Approval callbacks, user permissions, and universal execution guards are inherited from the parent.
@@ -187,10 +187,35 @@ With [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progre
    - **Fallback Completion Spec:** When specialist tool definitions are assembled, a fallback `attempt_completion` tool specification with a single `result: string` parameter is injected if absent.
    - **Budget Bounds & Categorized Failovers:** `LegionAgentHost` enforces `maxTokens` and `maxCost`. When a specialist fails, `safeToRetry` indicates whether failover rerouting (`orchestrator.failoverLegionSpecialist`) can proceed safely.
 
+### 5.6 Tool Argument Stream Deduplication, Self-Healing Parser & Transport Circuit-Breaking (`StreamResponseHandler.ts`, `openai-codex.ts`, `LegionAgentHost.ts`)
+
+With [ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md) and [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md), LUMI introduces multi-tier streaming defense against provider payload anomalies and failover thrashing:
+
+1. **Provider-Level Offset Tracking & Snapshot Slicing:**
+   - In `openai-codex.ts`, `openai-native.ts`, and `responses_api_support.ts`, `toolCallDelta(callId, args, snapshot = false)` tracks accumulated character counts across streamed deltas.
+   - When a model endpoint follows partial deltas with a full snapshot chunk (`response.output_item.done` or `response.function_call_arguments.done`), the snapshot is checked against `previous`: if it starts with the previously streamed text, only the unstreamed suffix is emitted; identical full snapshots emit an empty delta (`""`), preventing duplicate arguments at the source.
+2. **Interleaved Tool Call Name and ID Tracking:**
+   - Providers track active tool calls via bidirectional lookup maps (`toolCallIdByItemId`, `toolCallNameByItemId`, `toolCallNameByCallId`, `functionCallByItemId`).
+   - When models emit interleaved chunks or drop explicit `name` fields on terminal events, the correct tool name and call ID are preserved rather than defaulting to empty or colliding with adjacent calls.
+3. **State-Machine JSON Root Parser (`extractJsonRoots`):**
+   - Implemented in `StreamResponseHandler.ts` to sequentially extract top-level JSON objects/arrays character by character.
+   - Accurately tracks nested braces, brackets, quotes, escaped backslashes, and string values containing braces (e.g. `awk '{print $1}'` commands).
+   - Returns `{ roots: ExtractedJsonRoot[], remainder: string }` with exact character start/end slices.
+4. **Dual-Layer Self-Healing in `ToolUseHandler`:**
+   - **Stream-Time:** `processToolUseDelta` detects prefix overlap or identical complete duplicate JSON roots (`fast-deep-equal`) and drops redundant deltas before accumulation.
+   - **Terminal-Time:** `assertCompleteToolUses` intercepts `JSON.parse` failures. If `pending.input` contains multiple identical complete JSON roots with no unparsed remainder, it unifies the roots to `roots[0].value` and self-heals the tool input, allowing execution to proceed without failing.
+5. **Diagnostic Typing (`ToolArgumentError`):**
+   - Throws typed `ToolArgumentError` instances with explicit `kind` classifications (`incomplete`, `concatenation`, `syntax`, `invalid_format`), giving upstream callers transparent visibility into stream failures.
+6. **Transport Circuit-Breaking in Specialist Execution:**
+   - In `LegionAgentHost.execute`, caught errors are evaluated for transport decoding and syntax corruption (`isTransportError`).
+   - If true, the specialist returns `status: "failed"` with `safeToRetry: false`.
+   - Under [ADR-0009](../adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), `LegionCoordinator` respects `safeToRetry: false` and does **not** spawn a replacement specialist, stopping futile failover loops on transport corruption and preserving user budget.
+
 ## 6. What this design deliberately does *not* do
 
 - It does not interrupt running child tools mid-operation to pretend to be suspended (all defer/cancellation points are cooperative or cleanly cancelled via process group signals).
 - It does not share transcripts or conversational memory directly between agents (context is passed via structured summaries and receipts).
 - It does not make an LLM call to classify tasks (deterministic scoring ensures instant and predictable roster selection).
+- It does not retry specialists on transport decoding or stream syntax errors (`safeToRetry: false` ensures broken provider streams fail fast without churn).
 
 

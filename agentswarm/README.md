@@ -22,7 +22,7 @@ This directory is both the **original specification set** (`agentswarm.md` … `
 ```
 agentswarm/
 ├── README.md                      ← you are here
-├── CHANGELOG.md                   ← chronological feature changelog (Phases 1–7, fixes, ADRs, PMs)
+├── CHANGELOG.md                   ← chronological feature changelog (Phases 1–8, fixes, ADRs, PMs)
 ├── agentswarm.md … agentswarm4.md ← ORIGINAL SPECS (source of truth for intent; do not edit)
 ├── glossary.md                    ← every term in one place
 ├── reincorporation.md             ← how to re-apply / port / cleanly remove the feature
@@ -39,13 +39,13 @@ agentswarm/
 │   ├── 01-system-from-scratch.md  ← zero-prior-knowledge architecture walkthrough
 │   ├── 02-codebase-tour.md        ← line-by-line ownership map & invariants
 │   ├── 03-operating-handbook.md   ← DB paths, WAL/flush rules, verified SQL queries (Q1–Q8)
-│   └── 04-failure-modes-and-drills.md ← mutation proofs (M1–M4) & recovery drills
+│   └── 04-failure-modes-and-drills.md ← mutation proofs (M1–M5) & recovery drills
 ├── architecture/
 │   ├── how-it-works.md            ← inner workings and *why this is possible*
 │   ├── data-model.md              ← tables, storage keys, state shapes
 │   └── configuration.md           ← every setting, env var, precedence
-├── adr/                           ← Architecture Decision Records (0001–0013)
-├── postmortems/                   ← blameless post-mortems (PM-001–PM-014)
+├── adr/                           ← Architecture Decision Records (0001–0014)
+├── postmortems/                   ← blameless post-mortems (PM-001–PM-015)
 ├── playbooks/                     ← step-by-step operational runbooks (PB-01–PB-08)
 └── implementation/
     ├── file-map.md                ← every file touched and what it owns
@@ -54,12 +54,12 @@ agentswarm/
 
 ## The feature in one paragraph
 
-A parent agent can (1) **suspend** itself and its whole child hierarchy at safe execution boundaries and later **resume** exactly where each stream left off (*Hierarchical Defer*); (2) subject a completed task to **one bounded, evidence-based adversarial review** that must end in a decision (*Critical Completion Review*); and (3) **classify** a task and spawn the right **specialist child agents** that run in dependency-ordered stages, hand context forward, fail over once on failure, and report a synthesized result (*The Legion*). With [ADR-0012](adr/ADR-0012-automatic-legion-default.md) and [ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), the parent model acts as the **Orchestrator Conductor**: Legion runs automatically on suitable tasks, and the conductor can explicitly dispatch specialist teams via `engage_swarm` with auto-approval, stream real-time progress cards into the chat feed, and plan milestone roles in Plan Mode. All swarm state persists through the existing SQLite buffer (`BufferedDbPool`) — no new queue, engine or mailbox.
+A parent agent can (1) **suspend** itself and its whole child hierarchy at safe execution boundaries and later **resume** exactly where each stream left off (*Hierarchical Defer*); (2) subject a completed task to **one bounded, evidence-based adversarial review** that must end in a decision (*Critical Completion Review*); and (3) **classify** a task and spawn the right **specialist child agents** that run in dependency-ordered stages, hand context forward, fail over once on failure, and report a synthesized result (*The Legion*). With [ADR-0012](adr/ADR-0012-automatic-legion-default.md) and [ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), the parent model acts as the **Orchestrator Conductor**: Legion runs automatically on suitable tasks, and the conductor can explicitly dispatch specialist teams via `engage_swarm` with auto-approval, stream real-time progress cards into the chat feed, and plan milestone roles in Plan Mode. With [ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), streaming provider transports slice tool argument snapshots and map interleaved tool identities, `StreamResponseHandler` self-heals identical duplicate JSON roots, and `LegionAgentHost` circuit-breaks transport decoding errors with `safeToRetry: false`. All swarm state persists through the existing SQLite buffer (`BufferedDbPool`) — no new queue, engine or mailbox.
 
 ## Status of this documentation
 
 - Written against the active working tree. Check `git status` and `git log` before assuming it is merged.
-- Verified at authoring time: type-check (root + `webview-ui`), Biome lint on touched files (1,764 files checked with 0 errors), 158 backend unit tests passing (covering Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, Guarded Streams, and State Keys), and 7 webview unit tests passing.
+- Verified at authoring time: type-check (root + `webview-ui`), Biome lint on touched files (1,765 files checked with 0 errors), 190 backend unit tests passing (covering Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, Guarded Streams, State Keys, Codex Streaming deduplication, and StreamResponseHandler self-healing), and 7 webview unit tests passing.
 - **Not verified:** behaviour inside a live VS Code extension host with real remote model network drops. See [implementation/findings.md](implementation/findings.md#known-limits-and-open-questions).
 
 ## Conventions

@@ -502,6 +502,15 @@ export class OpenAiNativeHandler implements ApiHandler {
 		modelInfo: ModelInfo,
 	): ApiStream {
 		const functionCallByItemId = new Map<string, { call_id?: string; name?: string; id?: string }>()
+		const streamedArgs = new Map<string, string>()
+		const emittedCallIds = new Set<string>()
+
+		const toolCallDelta = (callId: string, args: string, snapshot = false): string => {
+			const previous = streamedArgs.get(callId) || ""
+			const delta = snapshot ? (args.startsWith(previous) ? args.slice(previous.length) : "") : args
+			streamedArgs.set(callId, previous + delta)
+			return delta
+		}
 
 		for await (const chunk of stream) {
 			Logger.debug(`OpenAI Responses Chunk: ${JSON.stringify(chunk)}`)
@@ -510,17 +519,23 @@ export class OpenAiNativeHandler implements ApiHandler {
 				const item = chunk.item
 				if (item.type === "function_call" && item.id) {
 					functionCallByItemId.set(item.id, { call_id: item.call_id, name: item.name, id: item.id })
-					yield {
-						type: "tool_calls",
-						id: item.id,
-						tool_call: {
-							call_id: item.call_id,
-							function: {
-								id: item.id,
-								name: item.name,
-								arguments: item.arguments,
+					const callId = item.call_id || item.id
+					const rawArgs = typeof item.arguments === "string" ? item.arguments : ""
+					const delta = toolCallDelta(callId, rawArgs, true)
+					if (delta.length > 0 || !emittedCallIds.has(callId)) {
+						emittedCallIds.add(callId)
+						yield {
+							type: "tool_calls",
+							id: item.id,
+							tool_call: {
+								call_id: item.call_id,
+								function: {
+									id: item.id,
+									name: item.name,
+									arguments: delta,
+								},
 							},
-						},
+						}
 					}
 				}
 				if (item.type === "reasoning" && item.encrypted_content && item.id) {
@@ -535,20 +550,28 @@ export class OpenAiNativeHandler implements ApiHandler {
 			if (chunk.type === "response.output_item.done") {
 				const item = chunk.item
 				if (item.type === "function_call") {
+					const pendingCall = item.id ? functionCallByItemId.get(item.id) : undefined
+					const functionName = item.name || pendingCall?.name
 					if (item.id) {
-						functionCallByItemId.set(item.id, { call_id: item.call_id, name: item.name, id: item.id })
+						functionCallByItemId.set(item.id, { call_id: item.call_id, name: functionName, id: item.id })
 					}
-					yield {
-						type: "tool_calls",
-						id: item.id || item.call_id,
-						tool_call: {
-							call_id: item.call_id,
-							function: {
-								id: item.id,
-								name: item.name,
-								arguments: item.arguments,
+					const callId = item.call_id || item.id || ""
+					const rawArgs = typeof item.arguments === "string" ? item.arguments : "{}"
+					const delta = toolCallDelta(callId, rawArgs, true)
+					if (delta.length > 0 || !emittedCallIds.has(callId)) {
+						emittedCallIds.add(callId)
+						yield {
+							type: "tool_calls",
+							id: item.id || item.call_id,
+							tool_call: {
+								call_id: item.call_id,
+								function: {
+									id: item.id,
+									name: functionName,
+									arguments: delta,
+								},
 							},
-						},
+						}
 					}
 				}
 				if (item.type === "reasoning") {
@@ -602,38 +625,48 @@ export class OpenAiNativeHandler implements ApiHandler {
 			}
 			if (chunk.type === "response.function_call_arguments.delta") {
 				const pendingCall = functionCallByItemId.get(chunk.item_id)
-				const callId = pendingCall?.call_id
+				const callId = pendingCall?.call_id || chunk.item_id
 				const functionName = pendingCall?.name
 				const functionId = pendingCall?.id || chunk.item_id
+				const delta = toolCallDelta(callId, chunk.delta || "", false)
 
-				yield {
-					type: "tool_calls",
-					tool_call: {
-						call_id: callId,
-						function: {
-							id: functionId,
-							name: functionName,
-							arguments: chunk.delta,
-						},
-					},
-				}
-			}
-			if (chunk.type === "response.function_call_arguments.done") {
-				if (chunk.item_id && chunk.name && chunk.arguments) {
-					const pendingCall = functionCallByItemId.get(chunk.item_id)
-					const callId = pendingCall?.call_id
-					const functionId = pendingCall?.id || chunk.item_id
-
+				if (delta.length > 0) {
+					emittedCallIds.add(callId)
 					yield {
 						type: "tool_calls",
 						tool_call: {
 							call_id: callId,
 							function: {
 								id: functionId,
-								name: chunk.name,
-								arguments: chunk.arguments,
+								name: functionName,
+								arguments: delta,
 							},
 						},
+					}
+				}
+			}
+			if (chunk.type === "response.function_call_arguments.done") {
+				const pendingCall = chunk.item_id ? functionCallByItemId.get(chunk.item_id) : undefined
+				const functionName = chunk.name || pendingCall?.name
+				if (chunk.item_id && functionName) {
+					const callId = pendingCall?.call_id || chunk.item_id
+					const functionId = pendingCall?.id || chunk.item_id
+					const rawArgs = typeof chunk.arguments === "string" ? chunk.arguments : "{}"
+					const delta = toolCallDelta(callId, rawArgs, true)
+
+					if (delta.length > 0 || !emittedCallIds.has(callId)) {
+						emittedCallIds.add(callId)
+						yield {
+							type: "tool_calls",
+							tool_call: {
+								call_id: callId,
+								function: {
+									id: functionId,
+									name: functionName,
+									arguments: delta,
+								},
+							},
+						}
 					}
 				}
 			}

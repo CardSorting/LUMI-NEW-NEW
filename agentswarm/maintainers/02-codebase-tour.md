@@ -197,6 +197,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
   - Manages independent LLM client conversations for specialists.
   - Implements budget capping (`maxTokens`, `maxCost`) and heuristic token estimation when usage chunks are omitted by providers or return 0 tokens.
   - Defends UI streaming: wraps `onUsage` in `.catch()` error logging so webview transport disconnections do not fail the execution pipeline.
+  - Circuit-breaks transport decoding errors: inspects caught errors with `isTransportError` (identifying `ToolArgumentError(concatenation | syntax)`, `SyntaxError`, or `"Stream decoding failed"`). Emits `[Transport Error] Stream decoding failed: ...` with `safeToRetry: false`, preventing futile specialist failover loops ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
 - **`LegionToolAdapter.ts`:**
   - Isolates tool state with `executionOwner = legion:<streamId>`.
   - Maps parent permissions, approval callbacks, universal execution guards, and `.dietcodeignore` filters into the specialist context.
@@ -243,6 +244,22 @@ This document walks you through every file that makes up Agent Swarm & The Legio
   - Falls back to conversation history user prompt in `maybeRunAutomaticLegion` if `this.legionObjective` is not set directly.
   - Relaxes the 3.2 complexity score floor and 2-member minimum for `tactical_strike` strategy, test projects, or explicit swarm/legion keywords.
   - Defensively guards `messageStateHandler` in `hasUnansweredAsk` and `setResponseValues`.
+
+---
+
+## 10. Streaming Tool Argument Hygiene & Self-Healing Parser (`StreamResponseHandler.ts`, `openai-codex.ts`)
+
+**Purpose:** Protect specialist and orchestrator tool execution from stream snapshot duplication, interleaved call ID loss, and futile retry loops across model streaming endpoints.
+
+### Key Components & Invariants
+- **`StreamResponseHandler.ts` (`src/core/task/`):**
+  - `extractJsonRoots(raw: string)`: State-machine scanner parsing sequential complete JSON roots from stream buffers. Accurately tracks nested braces, brackets, quotes, escapes, and string literals with braces (e.g. `awk '{print $1}'`).
+  - `ToolUseHandler.processToolUseDelta`: Stream-time deduplication; checks prefix slicing and drops identical duplicate complete JSON roots (`deepEqual`).
+  - `ToolUseHandler.assertCompleteToolUses`: Terminal self-healing; when `JSON.parse` fails, extracts all complete JSON roots. If multiple identical roots exist (`deepEqual`) with no remainder, unifies them to `roots[0].value` and accepts the tool call cleanly.
+  - `ToolArgumentError`: Typed diagnostics (`"incomplete"`, `"concatenation"`, `"syntax"`, `"invalid_format"`) capturing `toolName` and `rawInput`.
+- **Streaming Provider Handlers (`src/core/api/providers/` & `src/core/api/utils/`):**
+  - `openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`: Stateful argument offset tracking via `toolCallDelta(callId, args, snapshot)`. When terminal snapshot chunks (`output_item.done`, `function_call_arguments.done`) follow deltas, slices unstreamed suffixes and drops duplicate snapshots (`delta = ""`).
+  - Interleaved tool identity maps (`toolCallIdByItemId`, `toolCallNameByItemId`, `toolCallNameByCallId`, `functionCallByItemId`) preserving tool call names across interleaved chunk streams.
 
 ---
 

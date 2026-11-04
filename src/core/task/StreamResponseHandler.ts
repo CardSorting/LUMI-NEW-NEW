@@ -1,5 +1,6 @@
 import type { ToolUse } from "@core/assistant-message"
 import { JSONParser } from "@streamparser/json"
+import deepEqual from "fast-deep-equal"
 import { nanoid } from "nanoid"
 import { McpHub } from "@/services/mcp/McpHub"
 import { CLINE_MCP_TOOL_IDENTIFIER } from "@/shared/mcp"
@@ -20,6 +21,101 @@ export interface PendingToolUse {
 	signature?: string
 	jsonParser?: JSONParser
 	call_id: string
+}
+
+export type ToolArgumentErrorKind = "incomplete" | "concatenation" | "syntax" | "invalid_format"
+
+export class ToolArgumentError extends Error {
+	constructor(
+		message: string,
+		public readonly kind: ToolArgumentErrorKind,
+		public readonly toolName: string,
+		public readonly rawInput: string,
+	) {
+		super(message)
+		this.name = "ToolArgumentError"
+	}
+}
+
+export interface ExtractedJsonRoot {
+	value: unknown
+	startIndex: number
+	endIndex: number
+	raw: string
+}
+
+export interface ExtractedJsonResult {
+	roots: ExtractedJsonRoot[]
+	remainder: string
+}
+
+/**
+ * Robustly parses all sequentially concatenated complete JSON objects/arrays from a string,
+ * tracking character offsets and preserving inner braces, escaped quotes, and string literals.
+ */
+export function extractJsonRoots(raw: string): ExtractedJsonResult {
+	const roots: ExtractedJsonRoot[] = []
+	let i = 0
+	while (i < raw.length) {
+		while (i < raw.length && /\s/.test(raw[i])) i++
+		if (i >= raw.length) break
+		const startChar = raw[i]
+		if (startChar !== "{" && startChar !== "[") {
+			return { roots, remainder: raw.slice(i) }
+		}
+		const startIndex = i
+		let depth = 0
+		let inString = false
+		let escape = false
+		let parsedRoot: unknown = null
+		let endIndex = -1
+		for (; i < raw.length; i++) {
+			const char = raw[i]
+			if (inString) {
+				if (escape) {
+					escape = false
+				} else if (char === "\\") {
+					escape = true
+				} else if (char === '"') {
+					inString = false
+				}
+			} else {
+				if (char === '"') {
+					inString = true
+				} else if (char === "{" || char === "[") {
+					depth++
+				} else if (char === "}" || char === "]") {
+					depth--
+					if (depth === 0) {
+						endIndex = i + 1
+						const slice = raw.slice(startIndex, endIndex)
+						try {
+							parsedRoot = JSON.parse(slice)
+						} catch {
+							parsedRoot = null
+						}
+						break
+					}
+				}
+			}
+		}
+		if (parsedRoot !== null) {
+			roots.push({ value: parsedRoot, startIndex, endIndex, raw: raw.slice(startIndex, endIndex) })
+			i = endIndex
+		} else {
+			return { roots, remainder: raw.slice(startIndex) }
+		}
+	}
+	return { roots, remainder: "" }
+}
+
+/**
+ * Detects if a string contains a complete JSON value followed by extra content
+ * (e.g. concatenated snapshots like `{"path": "."}{"path": "."}`).
+ * Returns the parsed first object if found.
+ */
+export function extractFirstCompleteJsonRoot(raw: string): unknown | undefined {
+	return extractJsonRoots(raw).roots[0]?.value
 }
 
 interface ToolUseDeltaBlock {
@@ -111,11 +207,31 @@ class ToolUseHandler {
 		}
 
 		if (delta.input) {
-			pending.input += delta.input
-			try {
-				pending.jsonParser?.write(delta.input)
-			} catch {
-				// Expected during streaming - JSONParser may not have complete JSON yet
+			let inputDelta = delta.input
+			// If delta.input is a duplicate snapshot of what was already accumulated, slice it to prevent corruption.
+			if (pending.input.length > 0 && inputDelta.startsWith(pending.input)) {
+				inputDelta = inputDelta.slice(pending.input.length)
+			} else if (pending.input.trim().length > 0 && inputDelta.trim().length > 0) {
+				// Check if inputDelta is an identical complete JSON duplicate of pending.input
+				const pendingResult = extractJsonRoots(pending.input)
+				const deltaResult = extractJsonRoots(inputDelta)
+				if (
+					pendingResult.roots.length > 0 &&
+					pendingResult.remainder.trim() === "" &&
+					deltaResult.roots.length > 0 &&
+					deltaResult.remainder.trim() === "" &&
+					deepEqual(pendingResult.roots[0].value, deltaResult.roots[0].value)
+				) {
+					inputDelta = ""
+				}
+			}
+			if (inputDelta.length > 0) {
+				pending.input += inputDelta
+				try {
+					pending.jsonParser?.write(inputDelta)
+				} catch {
+					// Expected during streaming - JSONParser may not have complete JSON yet
+				}
 			}
 		}
 	}
@@ -133,7 +249,12 @@ class ToolUseHandler {
 			try {
 				input = JSON.parse(pending.input)
 			} catch {
-				input = this.extractPartialJsonFields(pending.input)
+				const { roots } = extractJsonRoots(pending.input)
+				if (roots.length > 0 && typeof roots[0].value === "object" && roots[0].value !== null) {
+					input = roots[0].value
+				} else {
+					input = this.extractPartialJsonFields(pending.input)
+				}
 			}
 		}
 
@@ -159,14 +280,95 @@ class ToolUseHandler {
 
 	assertCompleteToolUses(): void {
 		for (const pending of this.pendingToolUses.values()) {
+			const toolIdentifier = pending.name || pending.id
+			if (!pending.name) {
+				throw new ToolArgumentError(
+					`Invalid arguments for tool ${toolIdentifier}; missing tool name.`,
+					"invalid_format",
+					toolIdentifier,
+					pending.input,
+				)
+			}
+
+			const trimmed = pending.input?.trim() ?? ""
+			if (trimmed.length === 0) {
+				throw new ToolArgumentError(
+					`Incomplete arguments for tool ${toolIdentifier}; the call was not executed.`,
+					"incomplete",
+					toolIdentifier,
+					pending.input,
+				)
+			}
+
 			let input: unknown
 			try {
 				input = JSON.parse(pending.input)
-			} catch {
-				throw new Error(`Incomplete arguments for tool ${pending.name || pending.id}; the call was not executed.`)
+			} catch (parseError) {
+				// Diagnose whether this is concatenated snapshots, an incomplete stream, or malformed syntax
+				const { roots, remainder } = extractJsonRoots(pending.input)
+				if (roots.length > 1 && remainder.trim() === "") {
+					const allEqual = roots.every((r) => deepEqual(r.value, roots[0].value))
+					if (
+						allEqual &&
+						typeof roots[0].value === "object" &&
+						roots[0].value !== null &&
+						!Array.isArray(roots[0].value)
+					) {
+						// Self-heal: multiple identical duplicate snapshots detected across the stream
+						pending.input = roots[0].raw
+						pending.parsedInput = roots[0].value
+						input = roots[0].value
+					}
+				}
+
+				if (!input) {
+					if (roots.length >= 1) {
+						// There was at least one complete JSON root followed by more content or non-identical roots
+						throw new ToolArgumentError(
+							`Malformed arguments for tool ${toolIdentifier}: detected concatenated tool call arguments or duplicate snapshots ("${pending.input}").`,
+							"concatenation",
+							toolIdentifier,
+							pending.input,
+						)
+					}
+
+					const errorMsg = parseError instanceof Error ? parseError.message : String(parseError)
+					const isIncomplete =
+						errorMsg.includes("Unexpected end of JSON") ||
+						errorMsg.includes("Unexpected end of data") ||
+						errorMsg.includes("Unterminated string") ||
+						errorMsg.includes("Expected ',' or '}'") ||
+						errorMsg.includes("Expected ':'") ||
+						errorMsg.includes("Expected double-quoted property name") ||
+						trimmed.endsWith(":") ||
+						trimmed.endsWith(",") ||
+						trimmed.endsWith("{") ||
+						trimmed.endsWith("[")
+
+					if (isIncomplete) {
+						throw new ToolArgumentError(
+							`Incomplete arguments for tool ${toolIdentifier}; the call was not executed.`,
+							"incomplete",
+							toolIdentifier,
+							pending.input,
+						)
+					}
+					throw new ToolArgumentError(
+						`Malformed arguments for tool ${toolIdentifier}: syntax error in tool arguments ("${errorMsg}").`,
+						"syntax",
+						toolIdentifier,
+						pending.input,
+					)
+				}
 			}
-			if (!pending.name || input === null || typeof input !== "object" || Array.isArray(input)) {
-				throw new Error(`Invalid arguments for tool ${pending.name || pending.id}; expected a JSON object.`)
+
+			if (input === null || typeof input !== "object" || Array.isArray(input)) {
+				throw new ToolArgumentError(
+					`Invalid arguments for tool ${toolIdentifier}; expected a JSON object.`,
+					"invalid_format",
+					toolIdentifier,
+					pending.input,
+				)
 			}
 		}
 	}

@@ -31,6 +31,9 @@ We built no new queue, engine, or mailbox. The same durable store that holds eve
 ### 8. Honest reporting
 Claims are labelled **verified** or **unverified**. A green test run is evidence; a worker's confidence is not. Reports state what was *not* checked. (This wiki follows the rule.)
 
+### 9. Stream hygiene over futile retries
+Transport stream decoding errors (such as concatenated snapshots or syntax corruption) are not transient logical failures. Retrying them against the same provider stream is futile and wastes token quotas. We slice snapshots at the source, self-heal unambiguous duplicates, and circuit-break transport errors with `safeToRetry: false`.
+
 ## What agentswarm refuses to be
 - A replacement for the host's agent engine or UI.
 - A framework that needs a model call to decide anything it can decide deterministically.

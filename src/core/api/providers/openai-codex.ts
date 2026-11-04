@@ -51,6 +51,9 @@ export class OpenAiCodexHandler implements ApiHandler {
 	// Track tool call identity for streaming
 	private pendingToolCallId: string | undefined
 	private pendingToolCallName: string | undefined
+	private readonly toolCallIdByItemId = new Map<string, string>()
+	private readonly toolCallNameByItemId = new Map<string, string>()
+	private readonly toolCallNameByCallId = new Map<string, string>()
 	// Completion events contain snapshots of text already delivered by delta events.
 	private readonly streamedText = new Map<string, string>()
 
@@ -117,6 +120,9 @@ export class OpenAiCodexHandler implements ApiHandler {
 		// Reset state for this request
 		this.pendingToolCallId = undefined
 		this.pendingToolCallName = undefined
+		this.toolCallIdByItemId.clear()
+		this.toolCallNameByItemId.clear()
+		this.toolCallNameByCallId.clear()
 		this.streamedText.clear()
 
 		// Get access token from OAuth manager
@@ -605,6 +611,14 @@ export class OpenAiCodexHandler implements ApiHandler {
 		return delta
 	}
 
+	private toolCallDelta(callId: string, args: string, snapshot = false): string {
+		const key = JSON.stringify(["tool_call", callId])
+		const previous = this.streamedText.get(key) || ""
+		const delta = snapshot ? (args.startsWith(previous) ? args.slice(previous.length) : "") : args
+		this.streamedText.set(key, previous + delta)
+		return delta
+	}
+
 	private async *processEvent(event: any, model: { id: string; info: ModelInfo }): ApiStream {
 		// Handle text deltas
 		if (event?.type === "response.text.delta" || event?.type === "response.output_text.delta") {
@@ -637,21 +651,71 @@ export class OpenAiCodexHandler implements ApiHandler {
 
 		// Handle tool/function call deltas
 		if (event?.type === "response.tool_call_arguments.delta" || event?.type === "response.function_call_arguments.delta") {
-			const callId = event.call_id || event.tool_call_id || event.id || this.pendingToolCallId
-			const name = event.name || event.function_name || this.pendingToolCallName
+			const callId =
+				event.call_id ||
+				event.tool_call_id ||
+				(event.item_id ? this.toolCallIdByItemId.get(event.item_id) : undefined) ||
+				event.id ||
+				this.pendingToolCallId
+			const name =
+				event.name ||
+				event.function_name ||
+				(event.item_id ? this.toolCallNameByItemId.get(event.item_id) : undefined) ||
+				(callId ? this.toolCallNameByCallId.get(callId) : undefined) ||
+				this.pendingToolCallName
 			const args = event.delta || event.arguments
 
 			if (typeof callId === "string" && callId.length > 0 && typeof name === "string" && name.length > 0) {
-				yield {
-					type: "tool_calls",
-					tool_call: {
-						call_id: callId,
-						function: {
-							id: callId,
-							name,
-							arguments: typeof args === "string" ? args : "",
+				const delta = this.toolCallDelta(callId, typeof args === "string" ? args : "", false)
+				if (delta.length > 0) {
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							call_id: callId,
+							function: {
+								id: callId,
+								name,
+								arguments: delta,
+							},
 						},
-					},
+					}
+				}
+			}
+			return
+		}
+
+		// Handle completed function call arguments event
+		if (event?.type === "response.function_call_arguments.done") {
+			const callId =
+				event.call_id ||
+				event.tool_call_id ||
+				(event.item_id ? this.toolCallIdByItemId.get(event.item_id) : undefined) ||
+				event.id ||
+				this.pendingToolCallId
+			const name =
+				event.name ||
+				event.function_name ||
+				(event.item_id ? this.toolCallNameByItemId.get(event.item_id) : undefined) ||
+				(callId ? this.toolCallNameByCallId.get(callId) : undefined) ||
+				this.pendingToolCallName
+			const args = event.arguments || event.delta
+			if (typeof callId === "string" && callId.length > 0 && typeof name === "string" && name.length > 0) {
+				const key = JSON.stringify(["tool_call", callId])
+				const previous = this.streamedText.get(key) || ""
+				const delta = this.toolCallDelta(callId, typeof args === "string" ? args : "{}", true)
+				if (delta.length > 0 || previous.length === 0) {
+					yield {
+						type: "tool_calls",
+						id: callId,
+						tool_call: {
+							call_id: callId,
+							function: {
+								id: callId,
+								name,
+								arguments: delta,
+							},
+						},
+					}
 				}
 			}
 			return
@@ -668,6 +732,15 @@ export class OpenAiCodexHandler implements ApiHandler {
 					if (typeof callId === "string" && callId.length > 0) {
 						this.pendingToolCallId = callId
 						this.pendingToolCallName = typeof name === "string" ? name : undefined
+						if (item.id) {
+							this.toolCallIdByItemId.set(item.id, callId)
+							if (name) {
+								this.toolCallNameByItemId.set(item.id, name)
+							}
+						}
+						if (name) {
+							this.toolCallNameByCallId.set(callId, name)
+						}
 					}
 				}
 
@@ -688,20 +761,38 @@ export class OpenAiCodexHandler implements ApiHandler {
 					(item.type === "function_call" || item.type === "tool_call") &&
 					event.type === "response.output_item.done"
 				) {
-					const callId = item.call_id || item.tool_call_id || item.id
+					const callId =
+						item.call_id ||
+						item.tool_call_id ||
+						(item.id ? this.toolCallIdByItemId.get(item.id) : undefined) ||
+						item.id
 					if (callId) {
+						const name =
+							item.name ||
+							item.function?.name ||
+							item.function_name ||
+							(item.id ? this.toolCallNameByItemId.get(item.id) : undefined) ||
+							(callId ? this.toolCallNameByCallId.get(callId) : undefined) ||
+							this.pendingToolCallName ||
+							""
 						const args = item.arguments || item.function?.arguments || item.function_arguments
-						yield {
-							type: "tool_calls",
-							id: callId,
-							tool_call: {
-								call_id: callId,
-								function: {
-									id: callId,
-									name: item.name || item.function?.name || item.function_name || "",
-									arguments: typeof args === "string" ? args : "{}",
+						const argStr = typeof args === "string" ? args : "{}"
+						const key = JSON.stringify(["tool_call", callId])
+						const previous = this.streamedText.get(key) || ""
+						const delta = this.toolCallDelta(callId, argStr, true)
+						if (delta.length > 0 || previous.length === 0) {
+							yield {
+								type: "tool_calls",
+								id: callId,
+								tool_call: {
+									call_id: callId,
+									function: {
+										id: callId,
+										name,
+										arguments: delta,
+									},
 								},
-							},
+							}
 						}
 					}
 				}

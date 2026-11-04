@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 | Phase / Milestone | Date | Focus | Key Post-Mortems / ADRs | Test Count (`AgentSwarmAuxiliary.test.ts` + Legion) |
 |---|---|---|---|---|
+| **[Phase 8 — Tool Argument Stream Deduplication, Self-Healing Parser & Transport Circuit-Breaking](#phase-8--tool-argument-stream-deduplication-self-healing-parser--transport-circuit-breaking-2026-11-04)** | 2026-11-04 | Tool call argument offset tracking and snapshot slicing (`openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`), interleaved tool call name tracking, `extractJsonRoots` state-machine parser in `StreamResponseHandler.ts`, self-healing across identical duplicate JSON roots (including nested objects and string literals with braces), typed `ToolArgumentError` diagnostics, and transport error circuit-breaking in `LegionAgentHost.ts` (`safeToRetry: false`) | [ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md) | **190 passing** (49 auxiliary + 54 legion host/tool + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys + 15 codex streaming + 15 stream response handler); 50 passing in streaming & host suite |
 | **[Phase 7 — Orchestrator Conductor Tool, Progress Streaming & Hardened Gating](#phase-7--orchestrator-conductor-tool-progress-streaming--hardened-gating-2026-11-03)** | 2026-11-03 | Conductor tool `engage_swarm`, auto-approval (`autoApprove.ts`), streaming progress cards (`formatLegionProgressMessage`), prompt conductor injection (`joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`), relaxed gating heuristics (tactical strikes, test projects), conversation history fallback, file attachment preservation, fallback `attempt_completion`, token/cost budget enforcement, categorized `safeToRetry` failover | [ADR-0013](adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | **158 passing** (49 auxiliary + 52 legion + 8 engage_swarm + 3 toolset + 14 orchestrator + 32 state keys) |
 | **[Phase 6 — Automatic Legion Execution, Sandboxed Tool Host & Steering Hardening](#phase-6--automatic-legion-execution-sandboxed-tool-host--steering-hardening-2026-11-03)** | 2026-11-03 | Automatic Legion default ([ADR-0012](adr/ADR-0012-automatic-legion-default.md)), `LegionAgentHost` native tool loop, `LegionToolAdapter` sandboxing, `activeLegionController` steering abort, objective handoff pinning, SQLite flush barriers, path reservation boundaries | [PM-013](postmortems/PM-013-dead-code-steering-interrupt-and-specialist-drift.md), [PM-014](postmortems/PM-014-composite-command-settlement-and-reservation-boundary.md), [ADR-0012](adr/ADR-0012-automatic-legion-default.md) | **104 passing** (49 auxiliary + 44 legion + 7 stream + 4 metrics) |
 | **[Phase 5 — Maintainer Hand-off, SQLite Cookbook & Persistence Hardening](#phase-5--maintainer-hand-off-sqlite-cookbook--persistence-hardening-2026-11-02)** | 2026-11-02 | Zero-to-hero Maintainers' Handbook, real-SQLite `Q1`–`Q8` probe, post-commit shadow stranding fix, post-resume barrier guard, same-batch `delete`/`upsert` ordering fix | [PM-011](postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md), [PM-012](postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md), [ADR-0010](adr/ADR-0010-direct-writes-for-shared-rows.md) | **34** (80 total backend + 7 webview) |
@@ -24,7 +25,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased / Active Working Tree]
 
-> **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–5 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/infrastructure/ai/` and `agentswarm/`). Verify `git log` when cutting a tagged release.
+> **Git Working Tree Note:** At the time of this changelog entry, all Phase 1–8 changes reside in the working tree (`git status` shows modified tracked files and untracked files under `src/infrastructure/ai/`, `src/core/task/`, and `agentswarm/`). Verify `git log` when cutting a tagged release.
+
+---
+
+## Phase 8 — Tool Argument Stream Deduplication, Self-Healing Parser & Transport Circuit-Breaking (2026-11-04)
+
+### Added
+- **State-Machine JSON Root Parser (`src/core/task/StreamResponseHandler.ts`, [ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md)):**
+  - Added `extractJsonRoots(raw: string): ExtractedJsonResult` capable of sequentially scanning multiple root objects/arrays from raw stream buffers. Accurately tracks nested braces, brackets, quotes, escaped backslashes, and string values containing braces (e.g. commands like `awk '{print $1}'`).
+  - Added `extractFirstCompleteJsonRoot(raw: string)` for lightweight leading-object extraction.
+- **Diagnostic `ToolArgumentError` Hierarchy (`src/core/task/StreamResponseHandler.ts`):**
+  - Added typed `ToolArgumentError` class with `kind` discriminant:
+    - `"incomplete"`: Stream truncated mid-JSON (e.g. `Unexpected end of JSON`, unterminated strings, dangling braces/colons).
+    - `"concatenation"`: Multiple non-identical JSON roots or complete root followed by trailing garbage.
+    - `"syntax"`: Malformed JSON syntax (unquoted identifiers, bad characters).
+    - `"invalid_format"`: Non-object or array where object arguments are expected, or missing tool name.
+  - Preserves `toolName` and `rawInput` for upstream circuit-breaking and triage.
+- **Comprehensive Unit & Streaming Tests:**
+  - Added `src/core/task/__tests__/StreamResponseHandler.test.ts` (15 unit tests) covering delta snapshot deduplication, extension slicing, self-healing of identical duplicate snapshots (nested structures, braces in strings, 3+ snapshots, whitespace variations), and typed error diagnostics.
+  - Added 5 new streaming tests to `src/core/api/__tests__/openai-codex.streaming.test.ts` verifying deduplication between deltas and `output_item.done`, suffix slicing, done without deltas, and interleaved tool call name preservation.
+  - Added 2 new tests to `src/core/task/legion/__tests__/LegionAgentHost.test.ts` verifying transport decoding circuit-breaking with `safeToRetry: false` and seamless snapshot healing during specialist host loops.
+
+### Changed
+- **Transport Error Circuit-Breaking in `LegionAgentHost` ([PM-015](postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md), [ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md)):**
+  - Caught `ToolArgumentError` (with `concatenation` or `syntax` kinds), `SyntaxError`, and stream decoding errors (`"Unexpected token"`, `"is not valid JSON"`, `"JSON.parse"`, `"concatenated tool call"`).
+  - Flags transport decoding failures with `safeToRetry: false`, returning `[Transport Error] Stream decoding failed: ...` to immediately halt futile failovers across identical transport streams.
+
+### Fixed
+- **Tool Argument Duplication in Streaming Providers ([PM-015](postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)):**
+  - Implemented `toolCallDelta(callId, args, snapshot = false)` in `src/core/api/providers/openai-codex.ts`, `src/core/api/providers/openai-native.ts`, and `src/core/api/utils/responses_api_support.ts`.
+  - When providers yield deltas followed by `output_item.done` or `function_call_arguments.done` containing complete snapshots, the incoming snapshot is checked against accumulated text (`args.startsWith(previous)`): only unstreamed trailing suffixes are yielded, and duplicate snapshots are dropped (`delta = ""`).
+- **Interleaved Tool Call Name Attribution ([ADR-0014](adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md)):**
+  - Added bidirectional tracking maps (`toolCallIdByItemId`, `toolCallNameByItemId`, `toolCallNameByCallId`, `functionCallByItemId`, `emittedCallIds`) to maintain tool call identity across interleaved chunk events where subsequent chunks omit `name` or reference transient `item_id`.
+- **Self-Healing Duplicate Snapshots in `ToolUseHandler`:**
+  - Added stream-time deduplication in `ToolUseHandler.processToolUseDelta`: slices extension snapshots and drops identical complete JSON duplicates.
+  - Added terminal-time self-healing in `ToolUseHandler.assertCompleteToolUses`: when `JSON.parse` fails due to multiple identical concatenated roots (`roots.length > 1 && remainder.trim() === ""` and `deepEqual`), automatically extracts the first root and assigns it to `pending.parsedInput`, allowing tool execution to succeed cleanly without failing the specialist.
 
 ---
 

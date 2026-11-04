@@ -18,3 +18,4 @@ To change a decision, add a new ADR that supersedes the old one — never rewrit
 | [0011](ADR-0011-legacy-role-alias.md) | Keep `legion_Trends_ux` as a legacy alias of `legion_ux_ergonomics` | Accepted |
 | [0012](ADR-0012-automatic-legion-default.md) | Automatic Legion formation by default | Accepted |
 | [0013](ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | Orchestrator Conductor tool (`engage_swarm`), progress streaming, auto-approval & hardened gating | Accepted |
+| [0014](ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md) | Tool argument stream deduplication, self-healing JSON parser & transport circuit-breaking | Accepted |

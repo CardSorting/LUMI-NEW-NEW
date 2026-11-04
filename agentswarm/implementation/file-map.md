@@ -18,11 +18,21 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 ## Specialist Task Execution (`src/core/task/legion/` & `src/core/task/`)
 | File | Status | Owns |
 |---|---|---|
-| `src/core/task/legion/LegionAgentHost.ts` | New | Autonomous agent execution host driving native tool conversations, model token/cost budgets, heuristic fallbacks, and UI progress streaming |
+| `src/core/task/legion/LegionAgentHost.ts` | New | Autonomous agent execution host driving native tool conversations, model token/cost budgets, heuristic fallbacks, UI progress streaming, and transport error circuit-breaking (`safeToRetry: false`) |
 | `src/core/task/legion/LegionToolAdapter.ts` | New | Specialist tool execution bridge with isolated `TaskState`, execution ownership (`legion:<streamId>`), command lifecycle tracking, process group abortion, and upward file revision propagation |
 | `src/core/task/legion/delegationPolicy.ts` | New | Policy rules for automatic delegation eligibility (opt-outs, plan-mode exclusions, native tool prerequisites) |
 | `src/core/task/index.ts` | Mod | `maybeRunAutomaticLegion`, `withLegionContext` objective-pinned handoff injection, `activeLegionController` steering interrupt abort, file attachment preservation, and `resumeTaskFromHistory` state recovery |
-| `src/core/task/legion/__tests__/` | New | 52 tests across `TaskLegion.test.ts` (19), `LegionAgentHost.test.ts` (18), `LegionToolAdapter.test.ts` (13), `LegionNativeProvider.integration.test.ts` (1), and `delegationPolicy.test.ts` (1) |
+| `src/core/task/legion/__tests__/` | New | 54 tests across `TaskLegion.test.ts` (19), `LegionAgentHost.test.ts` (20), `LegionToolAdapter.test.ts` (13), `LegionNativeProvider.integration.test.ts` (1), and `delegationPolicy.test.ts` (1) |
+
+## Streaming Response & Provider Transport (`src/core/task/`, `src/core/api/`)
+| File | Status | Owns |
+|---|---|---|
+| `src/core/task/StreamResponseHandler.ts` | Mod | State-machine `extractJsonRoots` parser, `extractFirstCompleteJsonRoot`, `ToolArgumentError` diagnostics, stream-time snapshot deduplication, and terminal self-healing across identical duplicate JSON roots |
+| `src/core/task/__tests__/StreamResponseHandler.test.ts` | New | 15 unit tests covering deduplication, extension slicing, self-healing of nested objects and string braces, whitespace variations, and typed `ToolArgumentError` diagnostics |
+| `src/core/api/providers/openai-codex.ts` | Mod | Tool argument offset tracking and snapshot slicing via `toolCallDelta`, interleaved tool identity maps (`toolCallIdByItemId`, `toolCallNameByItemId`, `toolCallNameByCallId`) |
+| `src/core/api/providers/openai-native.ts` | Mod | Tool argument offset tracking and snapshot slicing via `toolCallDelta` on done chunks |
+| `src/core/api/utils/responses_api_support.ts` | Mod | Responses API argument delta offset tracking, snapshot slicing via `toolCallDelta`, and interleaved tool call tracking via `functionCallByItemId` |
+| `src/core/api/__tests__/openai-codex.streaming.test.ts` | Mod | 15 unit tests (5 new in Phase 8) verifying snapshot deduplication, trailing suffix slicing, done chunks without deltas, and interleaved tool call name preservation |
 
 ## Conductor Tool & System Prompt Integration (`src/core/prompts/` & `src/core/task/tools/`)
 | File | Status | Owns |
@@ -89,3 +99,4 @@ Everything the feature touched, grouped by layer. (**New** = untracked at author
 | *(Extension, not in the specs)* | Legion specialists | `LegionCoordinator` — see ADR-0008/0009 |
 | [ADR-0012](../adr/ADR-0012-automatic-legion-default.md) | Automatic Legion execution host & sandboxed tools | `LegionAgentHost`, `LegionToolAdapter`, `Task.ts`, `LegionPipelineRunner` |
 | [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md) | Orchestrator Conductor tool, streaming cards, auto-approval & gating heuristics | `engage_swarm.ts`, `EngageSwarmHandler.ts`, `autoApprove.ts`, `joy_zoning.ts`, `formatLegionProgressMessage` |
+| [ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md) | Tool argument stream deduplication, self-healing JSON parser & transport circuit-breaking | `StreamResponseHandler.ts`, `openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`, `LegionAgentHost.ts` — see ADR-0014, PM-015 |

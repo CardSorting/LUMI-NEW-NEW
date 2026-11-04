@@ -18,6 +18,7 @@ Blameless. Each lists reproduction, root cause, fix, why it escaped, and the pre
 | [PM-012](PM-012-post-resume-reconcile-and-delete-upsert-ordering.md) | Post-resume barrier reconciliation re-suspended a resumed parent; same-batch reservation `delete` sorted before `upsert` | High |
 | [PM-013](PM-013-dead-code-steering-interrupt-and-specialist-drift.md) | Dead-code steering interrupt during active Legion execution; specialist handoff drift across multi-turn user messages | High |
 | [PM-014](PM-014-composite-command-settlement-and-reservation-boundary.md) | Composite command settlement failure in `LegionToolAdapter`; false multi-root reservation collisions | Medium |
+| [PM-015](PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md) | Tool argument snapshot concatenation caused JSON parse errors and futile specialist failover loops | High |
 
 ## Cross-cutting themes
 1. **Permissive mocks hide real defects** (PM-001/002/003/008/011/012). Always add a real-store test.
@@ -25,3 +26,4 @@ Blameless. Each lists reproduction, root cause, fix, why it escaped, and the pre
 3. **Shape, phase transitions and concurrency** (PM-006, PM-009, PM-012) — test depth, repetition, parallelism, failure, and events arriving *after* a phase has finished.
 4. **Delivered ≠ wired** (PM-007, PM-009, PM-010) — a capability exists only when its real entry point calls it and a test proves it.
 5. **Process** (PM-010) — verify claims; audit after interruptions.
+6. **Streaming transport hygiene & circuit breaking** (PM-015) — model streaming providers yield heterogeneous delta/snapshot contracts; parsers must self-heal duplicate roots, and transport decoding errors must never trigger futile specialist failover loops.

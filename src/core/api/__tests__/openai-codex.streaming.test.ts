@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert"
+import { StreamResponseHandler } from "@core/task/StreamResponseHandler"
 import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { openAiCodexOAuthManager } from "@/integrations/openai-codex/oauth"
@@ -183,5 +184,214 @@ describe("Codex response streaming", () => {
 		await assert.rejects(stream.next(), /401 unauthorized/)
 		sinon.assert.calledOnce(execute)
 		sinon.assert.notCalled(refresh)
+	})
+
+	it("deduplicates tool call argument snapshots when deltas are followed by output_item.done", async () => {
+		const { handler, model } = fixture()
+		const events = [
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "item-1", call_id: "call-1", name: "list_files", arguments: "" },
+			},
+			{
+				type: "response.function_call_arguments.delta",
+				call_id: "call-1",
+				name: "list_files",
+				delta: '{"path":',
+			},
+			{
+				type: "response.function_call_arguments.delta",
+				call_id: "call-1",
+				name: "list_files",
+				delta: ' "."}',
+			},
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "item-1",
+					call_id: "call-1",
+					name: "list_files",
+					arguments: '{"path": "."}',
+				},
+			},
+		]
+
+		const chunks: ApiStreamChunk[] = []
+		for (const event of events) {
+			chunks.push(...(await collect(handler.processEvent(event, model))))
+		}
+
+		// Verify emitted tool call chunks
+		const toolCallChunks = chunks.filter((c): c is Extract<ApiStreamChunk, { type: "tool_calls" }> => c.type === "tool_calls")
+		const accumulatedArgs = toolCallChunks.map((c) => c.tool_call.function.arguments).join("")
+		assert.equal(accumulatedArgs, '{"path": "."}')
+
+		// Feed into StreamResponseHandler and verify end-to-end integration
+		const streamHandler = new StreamResponseHandler().getHandlers().toolUseHandler
+		for (const chunk of toolCallChunks) {
+			streamHandler.processToolUseDelta(
+				{
+					id: chunk.tool_call.function.id,
+					type: "tool_use",
+					name: chunk.tool_call.function.name,
+					input: chunk.tool_call.function.arguments,
+				},
+				chunk.tool_call.call_id,
+			)
+		}
+
+		// assertCompleteToolUses must succeed without throwing "Incomplete arguments" or syntax error
+		assert.doesNotThrow(() => streamHandler.assertCompleteToolUses())
+		const finalized = streamHandler.getAllFinalizedToolUses()
+		assert.equal(finalized.length, 1)
+		assert.deepEqual(finalized[0].input, { path: "." })
+	})
+
+	it("slices trailing argument suffix if output_item.done contains unstreamed content", async () => {
+		const { handler, model } = fixture()
+		const events = [
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "item-2", call_id: "call-2", name: "read_file", arguments: "" },
+			},
+			{
+				type: "response.tool_call_arguments.delta",
+				call_id: "call-2",
+				name: "read_file",
+				delta: '{"path":',
+			},
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "item-2",
+					call_id: "call-2",
+					name: "read_file",
+					arguments: '{"path": "foo.ts"}',
+				},
+			},
+		]
+
+		const chunks: ApiStreamChunk[] = []
+		for (const event of events) {
+			chunks.push(...(await collect(handler.processEvent(event, model))))
+		}
+
+		const toolCallChunks = chunks.filter((c): c is Extract<ApiStreamChunk, { type: "tool_calls" }> => c.type === "tool_calls")
+		const accumulatedArgs = toolCallChunks.map((c) => c.tool_call.function.arguments).join("")
+		assert.equal(accumulatedArgs, '{"path": "foo.ts"}')
+	})
+
+	it("delivers full arguments when provider emits only output_item.done without deltas", async () => {
+		const { handler, model } = fixture()
+		const event = {
+			type: "response.output_item.done",
+			item: {
+				type: "function_call",
+				id: "item-3",
+				call_id: "call-3",
+				name: "list_files",
+				arguments: '{"path": "src"}',
+			},
+		}
+
+		const chunks = await collect(handler.processEvent(event, model))
+		const toolCallChunks = chunks.filter((c): c is Extract<ApiStreamChunk, { type: "tool_calls" }> => c.type === "tool_calls")
+		assert.equal(toolCallChunks.length, 1)
+		assert.equal(toolCallChunks[0].tool_call.function.arguments, '{"path": "src"}')
+	})
+
+	it("handles function_call_arguments.done followed by output_item.done without duplication", async () => {
+		const { handler, model } = fixture()
+		const events = [
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "item-4", call_id: "call-4", name: "list_files", arguments: "" },
+			},
+			{
+				type: "response.function_call_arguments.delta",
+				item_id: "item-4",
+				delta: '{"path": "."}',
+			},
+			{
+				type: "response.function_call_arguments.done",
+				item_id: "item-4",
+				name: "list_files",
+				arguments: '{"path": "."}',
+			},
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "item-4",
+					call_id: "call-4",
+					name: "list_files",
+					arguments: '{"path": "."}',
+				},
+			},
+		]
+
+		const chunks: ApiStreamChunk[] = []
+		for (const event of events) {
+			chunks.push(...(await collect(handler.processEvent(event, model))))
+		}
+
+		const toolCallChunks = chunks.filter((c): c is Extract<ApiStreamChunk, { type: "tool_calls" }> => c.type === "tool_calls")
+		const accumulatedArgs = toolCallChunks.map((c) => c.tool_call.function.arguments).join("")
+		assert.equal(accumulatedArgs, '{"path": "."}')
+	})
+
+	it("preserves correct tool names across multiple interleaved tool calls in a single response", async () => {
+		const { handler, model } = fixture()
+		const events = [
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "item-a", call_id: "call-a", name: "read_file", arguments: "" },
+			},
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "item-b", call_id: "call-b", name: "list_files", arguments: "" },
+			},
+			// Delta for item-a without name property
+			{
+				type: "response.function_call_arguments.delta",
+				item_id: "item-a",
+				delta: '{"path": "a.txt"}',
+			},
+			// Delta for item-b without name property
+			{
+				type: "response.function_call_arguments.delta",
+				item_id: "item-b",
+				delta: '{"path": "dir"}',
+			},
+			// Done for item-a without name property
+			{
+				type: "response.function_call_arguments.done",
+				item_id: "item-a",
+				arguments: '{"path": "a.txt"}',
+			},
+			// Done for item-b without name property
+			{
+				type: "response.function_call_arguments.done",
+				item_id: "item-b",
+				arguments: '{"path": "dir"}',
+			},
+		]
+
+		const chunks: ApiStreamChunk[] = []
+		for (const event of events) {
+			chunks.push(...(await collect(handler.processEvent(event, model))))
+		}
+
+		const toolCallChunks = chunks.filter((c): c is Extract<ApiStreamChunk, { type: "tool_calls" }> => c.type === "tool_calls")
+		const chunksA = toolCallChunks.filter((c) => c.tool_call.call_id === "call-a")
+		const chunksB = toolCallChunks.filter((c) => c.tool_call.call_id === "call-b")
+
+		assert.equal(chunksA[0].tool_call.function.name, "read_file")
+		assert.equal(chunksA.map((c) => c.tool_call.function.arguments).join(""), '{"path": "a.txt"}')
+
+		assert.equal(chunksB[0].tool_call.function.name, "list_files")
+		assert.equal(chunksB.map((c) => c.tool_call.function.arguments).join(""), '{"path": "dir"}')
 	})
 })

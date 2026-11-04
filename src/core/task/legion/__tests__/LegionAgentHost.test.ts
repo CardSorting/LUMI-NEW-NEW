@@ -547,4 +547,74 @@ describe("LegionAgentHost", () => {
 			expect(result.summary).to.equal("Success despite onUsage error")
 		}
 	})
+
+	it("flags transport decoding errors with safeToRetry: false to prevent futile specialist failovers", async () => {
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: "bad",
+								name: "read_file",
+								arguments: '{"path": invalid-syntax}',
+							},
+						},
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			createApi: () => api,
+			createTools: async () => ({
+				definitions: [],
+				allowedNames: new Set(["read_file"]),
+				execute: async () => "",
+			}),
+		})
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("failed")
+		if (result.status === "failed") {
+			expect(result.safeToRetry).to.equal(false)
+			expect(result.reason).to.include("[Transport Error] Stream decoding failed:")
+		}
+	})
+
+	it("heals duplicate identical snapshots so execution succeeds seamlessly", async () => {
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					// Simulate corrupted stream where delta and snapshot were both yielded and concatenated
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: "heal",
+								name: "attempt_completion",
+								arguments: '{"result":"Healed work"}',
+							},
+						},
+					}
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: "heal",
+								name: "attempt_completion",
+								arguments: '{"result":"Healed work"}',
+							},
+						},
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+		})
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("completed")
+		if (result.status === "completed") {
+			expect(result.summary).to.equal("Healed work")
+		}
+	})
 })

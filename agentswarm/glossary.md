@@ -33,6 +33,12 @@
 | **Safe-to-Retry Failover** | Property on `LegionExecutionResult` (`safeToRetry?: boolean`) allowing ADR-0009 failover only for recoverable errors, halting on dirty commands or budget exhaustion. |
 | **Fallback Completion Spec** | Isolated `attempt_completion` spec injected into specialist contexts with a single `result: string` parameter. |
 | **Tactical Strike Strategy** | Targeted single-specialist formation strategy (`tactical_strike`) that bypasses the 3.2 complexity floor and multi-specialist minimums. |
+| **Tool Argument Offset Tracking (`toolCallDelta`)** | Stateful byte/character offset tracking across provider streams (`openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`). Slices unstreamed suffixes and suppresses duplicate terminal snapshots (`output_item.done`, `function_call_arguments.done`) before chunk emission. |
+| **Interleaved Tool Tracking** | Bidirectional lookup maps (`toolCallIdByItemId`, `toolCallNameByItemId`, `toolCallNameByCallId`, `functionCallByItemId`) preserving tool call identities and names across interleaved provider stream chunks. |
+| **State-Machine JSON Root Parser (`extractJsonRoots`)** | Character-by-character scanner in `StreamResponseHandler.ts` that tracks nesting depth, string literal quotes, and escapes to extract sequential complete JSON roots and slices from raw stream buffers. |
+| **Self-Healing Tool Arguments** | Dual-tier deduplication in `StreamResponseHandler.ts`: stream-time prefix slicing in `processToolUseDelta`, and terminal-time unification in `assertCompleteToolUses` across multiple identical complete JSON roots (`deepEqual`). |
+| **`ToolArgumentError`** | Typed diagnostic error with `kind` classification (`incomplete`, `concatenation`, `syntax`, `invalid_format`), retaining `toolName` and `rawInput` for precise triage. |
+| **Transport Error Circuit-Breaking** | Catch guard in `LegionAgentHost` (`isTransportError`) returning `safeToRetry: false` on stream decoding, concatenation, or JSON syntax errors, halting futile failovers. |
 
 ## Specialist codenames
 

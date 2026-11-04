@@ -11,7 +11,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 1. **[01 — The System from Scratch](../maintainers/01-system-from-scratch.md):** The task and swarm architecture. Its original default-off description predates [ADR-0012](../adr/ADR-0012-automatic-legion-default.md): Legion now defaults on.
 2. **[02 — Line-by-Line Codebase Tour](../maintainers/02-codebase-tour.md):** Exact file-by-file, method-by-method, and line-anchor walkthrough of every file you own — including **what breaks if you weaken each guard**.
 3. **[03 — Day-2 Operating & SQLite Inspection Handbook](../maintainers/03-operating-handbook.md):** Where `joyzoning.sqlite` lives on macOS/Linux/Windows, WAL & corruption auto-recovery, `BufferedDbPool` 1s flush + 5min shadow expiry + operation sort order, log prefixes to grep, and **8 empirically verified `sqlite3` diagnostic queries (`Q1`–`Q8`)**.
-4. **[04 — Failure Modes, War Games & Recovery Drills](../maintainers/04-failure-modes-and-drills.md):** Mutation-testing proofs (`M1`–`M4`) and hands-on recovery drills for stuck barriers, specialist crashes, SQLite flush errors, config precedence surprises, and interrupted AI subagent work.
+4. **[04 — Failure Modes, War Games & Recovery Drills](../maintainers/04-failure-modes-and-drills.md):** Mutation-testing proofs (`M1`–`M5`) and hands-on recovery drills for stuck barriers, specialist crashes, SQLite flush errors, config precedence surprises, streaming snapshot deduplication, and interrupted AI subagent work.
 
 ---
 
@@ -24,6 +24,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 | **Critical Review** | `src/infrastructure/ai/CriticalCompletionReview.ts`, `src/core/task/tools/completionGatePipeline.ts`, `src/core/task/tools/handlers/AttemptCompletionHandler.ts` | **Bounded 1+1** (1 follow-up + 1 remediation max); strict `verified_defect` vs. `unverified_concern` separation; `finally` auto-resume ([ADR-0005](../adr/ADR-0005-bounded-review-with-category-separation.md), [PM-007](../postmortems/PM-007-review-left-pipeline-suspended-and-unwired.md)) |
 | **The Legion** | `src/infrastructure/ai/LegionCoordinator.ts`, `src/infrastructure/ai/Orchestrator.ts` | Deterministic multi-signal classification; 5-stage gated handoff; active-only file reservation checks; **terminal states (`completed`/`failed`/`rerouted`) are final**; max 2 attempts per slot ([ADR-0008](../adr/ADR-0008-deterministic-legion-classification.md), [ADR-0009](../adr/ADR-0009-legion-lifecycle-dag-failover-terminal-states.md), [PM-008](../postmortems/PM-008-stale-reservation-false-positives.md), [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)) |
 | **Conductor & Tools** | `src/core/task/tools/handlers/EngageSwarmHandler.ts`, `src/core/prompts/system-prompt/tools/engage_swarm.ts`, `src/core/task/tools/autoApprove.ts`, `src/core/prompts/system-prompt/components/joy_zoning.ts`, `capabilities.ts`, `act_vs_plan_mode.ts`, `LegionPipelineRunner.ts` | Conductor tool `engage_swarm` is auto-approved, respects budgets (`maxTokens`/`maxCost`), streams progress cards, and categorizes `safeToRetry` failovers ([ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md)) |
+| **Streaming & Parser** | `src/core/task/StreamResponseHandler.ts`, `src/core/api/providers/openai-codex.ts`, `openai-native.ts`, `responses_api_support.ts`, `LegionAgentHost.ts` | Providers slice snapshot done chunks against deltas; `StreamResponseHandler` self-heals identical duplicate roots; transport decoding errors circuit-break with `safeToRetry: false` ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)) |
 | **Persistence** | `src/infrastructure/db/BufferedDbPool.ts`, `src/infrastructure/ai/Orchestrator.ts` | `TABLE_FK_ORDER` flush order; composite `conflictTarget: ["streamId", "key"]` on `agent_memory`; **no shadow writes after `commitWork` or on shared rows**; flush before same-batch reservation deletes ([ADR-0003](../adr/ADR-0003-durable-state-in-agent-memory.md), [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md), [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md), [PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md), [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)) |
 | **Settings Surface** | `proto/dietcode/state.proto`, `state-keys.ts`, `ExtensionMessage.ts`, `updateSettings.ts`, `updateTaskSettings.ts`, `ToolExecutor.ts`, `TaskConfig.ts`, `ToolConstants.ts`, `Controller`, `webview-ui/**` | All 7 layers move together ([ADR-0007](../adr/ADR-0007-settings-through-proto-with-boundary-clamping.md), [PB-02](../playbooks/PB-02-add-a-setting-end-to-end.md), [PM-005](../postmortems/PM-005-task-config-keys-drift.md)) |
 
@@ -56,7 +57,7 @@ For a deep, self-contained walkthrough that assumes **zero prior knowledge** of 
 
 ## 3. Release Gates
 
-1. Full automated verification block from [PB-07](../playbooks/PB-07-release-verification.md) passes (**158 backend tests** across Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, Orchestrator, and State Keys; **7 webview tests** in `webview-ui`).
+1. Full automated verification block from [PB-07](../playbooks/PB-07-release-verification.md) passes (**190 backend tests** across Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, State Keys, Codex Streaming deduplication, and StreamResponseHandler self-healing; **7 webview tests** in `webview-ui`).
 2. Real-SQLite persistence tests (Section 5 and Section 8 of `AgentSwarmAuxiliary.test.ts`) pass.
 3. Manual smoke in a live VS Code Extension Development Host window (**not yet performed at wiki authoring time — see [findings](../implementation/findings.md#known-limits-and-open-questions)**).
 4. Confirm defaults in `state-keys.ts` and `package.json` remain `false` / `safe_boundary` / `adaptive` / `1` / `1` / `4` (with `agentSwarmLegionEnabled: true`).
@@ -90,9 +91,9 @@ Treat AI agent completion reports as **unverified claims** until proven on disk.
 
 ## 7. Navigating the Rest of the Wiki
 
-- **[Feature Changelog (`CHANGELOG.md`)](../CHANGELOG.md)** — Chronological history of Phases 1–7, architectural milestones, and bug fixes
-- **[Maintainers' Handbook (`maintainers/`)](../maintainers/README.md)** — Zero-to-hero system guide, codebase tour, SQLite operating cookbook (`Q1`–`Q8`), and failure drills (`M1`–`M4`)
-- **[ADRs (`adr/`)](../adr/README.md)** — Why every architectural decision was made (ADR-0001 through ADR-0013)
-- **[Post-Mortems (`postmortems/`)](../postmortems/README.md)** — Every bug discovered and fixed during implementation and verification (PM-001 through PM-014)
+- **[Feature Changelog (`CHANGELOG.md`)](../CHANGELOG.md)** — Chronological history of Phases 1–8, architectural milestones, and bug fixes
+- **[Maintainers' Handbook (`maintainers/`)](../maintainers/README.md)** — Zero-to-hero system guide, codebase tour, SQLite operating cookbook (`Q1`–`Q8`), and failure drills (`M1`–`M5`)
+- **[ADRs (`adr/`)](../adr/README.md)** — Why every architectural decision was made (ADR-0001 through ADR-0014)
+- **[Post-Mortems (`postmortems/`)](../postmortems/README.md)** — Every bug discovered and fixed during implementation and verification (PM-001 through PM-015)
 - **[Playbooks (`playbooks/`)](../playbooks/README.md)** — Step-by-step operational recipes (PB-01 through PB-08)
 - **[Papers (`papers/`)](../papers/01-philosophy.md)** — [Philosophy](../papers/01-philosophy.md) · [Stakeholder Handoff](../papers/02-stakeholder-handoff.md) · [Technical Whitepaper](../papers/03-technical-whitepaper.md)

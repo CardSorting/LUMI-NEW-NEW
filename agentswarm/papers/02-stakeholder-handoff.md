@@ -22,15 +22,15 @@ Quick presets let a user choose *Standard (Off)*, *Review Only*, *Defer Only*, *
 | Area | Status | Evidence |
 |---|---|---|
 | Build / type safety | ✅ Passing | Type-check (extension + webview) |
-| Automated tests | ✅ Passing | 158 backend unit tests passing across Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, Orchestrator, and State Keys; 7 webview tests; includes real-SQLite tests |
-| Lint | ✅ No errors on touched files | Biome (1,764 files checked) |
+| Automated tests | ✅ Passing | 190 backend unit tests passing across Auxiliary, Legion Host, Tool Adapter, Task Legion, Engage Swarm Handler, ToolSet Discovery, Orchestrator, State Keys, Codex Streaming deduplication, and StreamResponseHandler self-healing; 7 webview tests; includes real-SQLite tests |
+| Lint | ✅ No errors on touched files | Biome (1,765 files checked) |
 | **Specialist task execution** | ✅ Implemented & Hardened | `LegionAgentHost`, `LegionToolAdapter`, and `LegionPipelineRunner` execute native-tool specialist loops, stream progress cards, and enforce token/cost budgets |
 | **Live product smoke test** | ⚠️ **Not done** | Never exercised in a running VS Code window with real model runs |
 | Code committed? | ⚠️ **Check** | Work was uncommitted when this was written |
 
 **Recommendation:** treat as *ready for internal dogfooding with Legion enabled by default*, **not** ready for general release until the manual smoke test is closed.
 
-> **Update:** while preparing and empirically verifying the maintainers' handbook against a real SQLite database, we found and fixed **two additional persistence/phase defects**: (1) a stream's *completed* state, its summary, and its file-reservation releases were stranded in a private shadow overlay ([PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md)), and (2) late child completion after a pipeline resumed could re-suspend the parent, while same-batch reservation deletes sorted before upserts ([PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)). Both are now fixed and covered by tests that read the real database file.
+> **Update (Phase 5 & 8):** while preparing and empirically verifying the maintainers' handbook against a real SQLite database, we found and fixed **two additional persistence/phase defects**: (1) a stream's *completed* state, its summary, and its file-reservation releases were stranded in a private shadow overlay ([PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md)), and (2) late child completion after a pipeline resumed could re-suspend the parent, while same-batch reservation deletes sorted before upserts ([PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)). In Phase 8, we resolved streaming tool argument snapshot duplication and interleaved tool identity loss across model streaming endpoints ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md)), added state-machine JSON root extraction with self-healing, and circuit-broken transport decoding errors in `LegionAgentHost` with `safeToRetry: false` to stop futile failover loops ([PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)). All are now fixed and covered by 190 passing automated tests.
 
 ## 4. Risks and mitigations
 | Risk | Likelihood | Impact | Mitigation |

@@ -2,7 +2,7 @@ import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "
 import type { ApiHandler } from "@core/api"
 import { guardedStream } from "@core/api/guardedStream"
 import type { ApiStreamUsageChunk } from "@core/api/transform/stream"
-import { StreamResponseHandler } from "@core/task/StreamResponseHandler"
+import { StreamResponseHandler, ToolArgumentError } from "@core/task/StreamResponseHandler"
 import type { DietCodeAssistantContent, DietCodeStorageMessage, DietCodeUserContent } from "@shared/messages/content"
 import { Logger } from "@shared/services/Logger"
 import type { DietCodeTool } from "@shared/tools"
@@ -242,7 +242,21 @@ export class LegionAgentHost implements LegionExecutionHost {
 			}
 			return failed("Specialist turn limit reached.", true)
 		} catch (error) {
-			return failed(error instanceof Error ? error.message : String(error), true)
+			const isTransportError =
+				(error instanceof ToolArgumentError && (error.kind === "concatenation" || error.kind === "syntax")) ||
+				error instanceof SyntaxError ||
+				(error instanceof Error &&
+					(error.message.includes("concatenated tool call") ||
+						error.message.includes("duplicate snapshot") ||
+						error.message.includes("Unexpected token") ||
+						error.message.includes("is not valid JSON") ||
+						error.message.includes("JSON.parse")))
+
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			if (isTransportError) {
+				return failed(`[Transport Error] Stream decoding failed: ${errorMessage}`, false)
+			}
+			return failed(errorMessage, true)
 		} finally {
 			tools.dispose?.()
 		}

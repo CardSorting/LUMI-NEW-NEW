@@ -2,13 +2,13 @@
 
 To truly own a complex distributed/multi-agent subsystem, you need to know **how it can fail**, **how the test suite proves it won't**, and **how to recover if a new edge case appears**.
 
-This guide documents **6 hands-on War-Game Drills** (including the exact **Mutation Proofs `M1`–`M4`** executed during verification) that you can run in under 2 minutes on your machine.
+This guide documents **7 hands-on War-Game Drills** (including the exact **Mutation Proofs `M1`–`M5`** executed during verification) that you can run in under 2 minutes on your machine.
 
 ---
 
-## 1. Mutation Proofs: How We Know the Tests Actually Catch Bugs
+## 1. Mutation Proofs: How We Know the Tests Catch Real Bugs
 
-A passing test suite means nothing if breaking the production guard still leaves the tests green. During the authoring of this handbook, we deliberately injected the historical bugs back into the codebase (**Mutations `M1`–`M4`**) and ran the test suite to prove that our tests fail immediately with a clear diagnostic.
+A passing test suite means nothing if breaking the production guard still leaves the tests green. During the authoring of this handbook, we deliberately injected the historical bugs back into the codebase (**Mutations `M1`–`M5`**) and ran the test suite to prove that our tests fail immediately with a clear diagnostic.
 
 | Mutation ID | What We Deliberately Broke | File & Line Anchor | Test That Caught It Immediately | Exact Failure Output |
 |---|---|---|---|---|
@@ -16,6 +16,7 @@ A passing test suite means nothing if breaking the production guard still leaves
 | **`M2` (PM-008)** | Removed active-stream check (`streamRow.status === "active"`) when checking `file_res:*` conflicts | `LegionCoordinator.ts` (`formLegion`) | *"persists Legion formations, handoffs, synthesis, and active-only file reservation checks cleanly through the real SQLite BufferedDbPool"* | `AssertionError: expected [ 'src/shared/contested.ts' ] to deeply equal []` |
 | **`M3` (PM-011)** | Re-added `streamId` as the 2nd argument (`pushBatch(ops, streamId)`) after `commitWork(streamId)` in `completeStream` | `Orchestrator.ts` (`completeStream`) | *"persists completeStream status and summary to SQLite (not stranded in a post-commit shadow overlay) and releases a parent suspension barrier"* | `AssertionError: expected 'active' to equal 'completed'` & `expected 'waiting_for_children' to equal 'suspended'` |
 | **`M4` (PM-012)** | Removed `pipeline.phase !== "waiting_for_children" && pipeline.phase !== "suspending"` guard in `reconcilePipelineBarrier` | `HierarchicalDeferCoordinator.ts` (`reconcilePipelineBarrier`) | *"does not re-suspend an already resumed pipeline when a child completes later, and deletes same-batch file reservations on disk"* | `AssertionError: expected 'waiting_for_children' to equal 'resumed'` |
+| **`M5` (PM-015)** | Removed `isTransportError` check in `LegionAgentHost.execute`, returning `safeToRetry: true` on transport stream decoding failures | `LegionAgentHost.ts` (`execute` catch block) | *"flags transport decoding errors with safeToRetry: false to prevent futile specialist failovers"* | `AssertionError: expected true to equal false` |
 
 ---
 
@@ -128,7 +129,7 @@ grep -rn 'reconcileAfterStreamFailure\|settleSpecialistStream\|evaluateOptionalC
 # 4. Run both TypeScript compilers (Extension Host + Webview UI)
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 
-# 5. Run the full real-SQLite + unit test verification block (158 tests)
+# 5. Run the full real-SQLite + unit test verification block (190 tests)
 npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
   --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
   src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
@@ -136,7 +137,9 @@ npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --time
   "src/core/task/legion/__tests__/*.test.ts" \
   src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
   src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
-  src/shared/storage/__tests__/state-keys.test.ts
+  src/shared/storage/__tests__/state-keys.test.ts \
+  src/core/api/__tests__/openai-codex.streaming.test.ts \
+  src/core/task/__tests__/StreamResponseHandler.test.ts
 ```
 
 ---
@@ -155,4 +158,24 @@ A conductor calls `engage_swarm`, but execution fails or specialists stop premat
    If the user sent a chat message while specialists were active, `activeLegionController.abort()` immediately fires, causing `pipelineResult.status === "cancelled"`.
 4. **Check Failover Eligibility:**
    Verify `safeToRetry` status. Failures with unconfirmed commands, disallowed tools, or duplicate IDs cannot be safely retried.
+
+---
+
+## 8. Drill 7: Stream Decoding Failures, Concatenated Snapshots & Transport Circuit-Breaking
+
+### Symptom
+Specialist execution halts with:
+```text
+[Transport Error] Stream decoding failed: Malformed arguments for tool <tool_name>: ...
+```
+or `SyntaxError: Unexpected non-whitespace character after JSON`.
+
+### Root-Cause Checklist ([PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md), [ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md))
+1. **Check if Self-Healing Activated:**
+   - If the provider emitted identical duplicate snapshots (e.g. `{"path": "."}{"path": "."}`), `StreamResponseHandler.extractJsonRoots` detects multiple identical roots and automatically self-heals without throwing.
+   - If `status: "failed"` occurred, inspect the logged error: non-identical concatenated objects (e.g. two conflicting parameter payloads) or invalid syntax will throw `ToolArgumentError` (`kind: "concatenation"` or `kind: "syntax"`).
+2. **Verify Circuit-Breaking (`safeToRetry: false`):**
+   - Check that `safeToRetry` is `false`. When stream decoding or JSON syntax fails, `LegionAgentHost` prevents `LegionCoordinator` from triggering an automatic failover replacement. Retrying the same model with the same transport would hit the exact same decoding bug.
+3. **Verify Provider Offset Tracking:**
+   - If a new streaming provider is added, verify that its stream response generator uses `toolCallDelta(callId, args, snapshot)` to slice terminal done snapshots against accumulated deltas.
 

@@ -76,6 +76,21 @@ type LegionExecutionResult =
 interface FallbackAttemptCompletionParams {
   result: string // Required specialist result and handoff summary
 }
+
+// Streaming Parser & Tool Argument Error Models (ADR-0014, StreamResponseHandler.ts)
+type ToolArgumentErrorKind = "incomplete" | "concatenation" | "syntax" | "invalid_format"
+
+interface ExtractedJsonRoot {
+  value: unknown
+  startIndex: number
+  endIndex: number
+  raw: string
+}
+
+interface ExtractedJsonResult {
+  roots: ExtractedJsonRoot[]
+  remainder: string
+}
 ```
 
 `SpawnedLegionMember` carries `stage`, `attempt` (1-based), `reroutedToStreamId`, `resultSummary`, `failureReason`, `completedAt`.

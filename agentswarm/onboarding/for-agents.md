@@ -22,6 +22,7 @@ Read this fully before modifying anything under `src/infrastructure/ai/`, `src/i
 5. **Bounded loops only.** Review = 1+1. Failover = max 2 attempts per slot. If you add a loop, add a bound and a test.
 6. **Fix root causes, not symptoms.** No monkey patches (e.g. don't mutate test mocks to hide a real-pool bug).
 7. **Never claim done without evidence.** "Done" = a command you ran and its output. Reports from other agents are *claims*, not evidence.
+8. **Streaming hygiene & circuit-breaking.** Provider streaming handlers slice done snapshots against accumulated deltas; `StreamResponseHandler` self-heals identical duplicate JSON roots; transport decoding errors circuit-break with `safeToRetry: false` ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
 
 ## 2. Persistence rules (the #1 source of past bugs)
 
@@ -53,7 +54,9 @@ npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --time
   "src/core/task/legion/__tests__/*.test.ts" \
   src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
   src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
-  src/shared/storage/__tests__/state-keys.test.ts
+  src/shared/storage/__tests__/state-keys.test.ts \
+  src/core/api/__tests__/openai-codex.streaming.test.ts \
+  src/core/task/__tests__/StreamResponseHandler.test.ts
 (cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 npx biome lint --diagnostic-level=error <touched files>
 ```

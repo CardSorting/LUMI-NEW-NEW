@@ -6,6 +6,8 @@ tmp
 packages/
 .vscode-test/
 *.vsix
+release-*/
+release/
 *.db
 *.db-shm
 *.db-wal

@@ -1,7 +1,7 @@
 # Implementation Details & Findings
 
 ## What was built (short)
-Three independently toggleable capabilities over existing infrastructure — see [how-it-works](../architecture/how-it-works.md). Counts at Phase 7: 158 tests passing (49 auxiliary, 52 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys); core engines and handlers total ~6,000 lines.
+Three independently toggleable capabilities over existing infrastructure — see [how-it-works](../architecture/how-it-works.md). Counts at Phase 8: 190 tests passing (49 auxiliary, 54 legion host/adapter/task, 8 engage_swarm handler, 3 toolset discovery, 14 orchestrator, 32 state keys, 15 codex streaming, 15 stream response handler); core engines and handlers total ~6,500 lines.
 
 ## Key findings
 
@@ -18,6 +18,7 @@ Three independently toggleable capabilities over existing infrastructure — see
 11. **Streaming progress cards make multi-agent systems observable.** Opaque multi-stage execution feels hung. Emitting badge-annotated markdown progress cards (`formatLegionProgressMessage`) keeps users informed across stage transitions and specialist runs.
 12. **Snapshot test isolation requires conditional tool suppression.** Dynamically registering new tools alters system prompt token streams and snapshot assertions. Gating tool variants on `!context.isTesting` protects regression test baselines while enabling full capabilities in production.
 13. **Failover must distinguish retryable errors from toxic errors.** Indiscriminately retrying exhausted budgets or disallowed tools creates infinite loops. Categorizing `safeToRetry` ensures failover only reroutes recoverable failures.
+14. **Streaming transport hygiene & circuit breaking.** Model endpoints yield divergent delta/snapshot contracts (deltas followed by full argument snapshots, or interleaved call IDs). Deduplicating snapshots at the provider level, self-healing duplicate complete JSON roots in `StreamResponseHandler`, and circuit-breaking transport decoding errors with `safeToRetry: false` in `LegionAgentHost` prevents futile specialist failover loops and token waste ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
 
 ## Known limits and open questions
 
