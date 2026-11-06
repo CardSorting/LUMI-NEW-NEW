@@ -1,0 +1,77 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:04.200
+Meet LUMI 26.5: Agent Swarm and The Legion.
+
+2
+00:00:04.400 --> 00:00:08.200
+Single-stream coding agents hit a wall on complex systems.
+
+3
+00:00:08.400 --> 00:00:13.500
+LUMI transforms one prompt into an autonomous, multi-agent engineering organization,
+
+4
+00:00:13.700 --> 00:00:18.800
+combining Hierarchical Defer & Resume, Critical Completion Review, and The Legion specialist engine.
+
+5
+00:00:19.042 --> 00:00:22.242
+At the center is the Orchestrator Conductor.
+
+6
+00:00:22.442 --> 00:00:28.842
+Using the auto-approved engage_swarm tool, the conductor classifies your objective across 10 specialist archetypes
+
+7
+00:00:29.042 --> 00:00:35.542
+and dispatches dependency-ordered DAG stages: Lead & Recon, Parallel Execution, and Verification & Hardening.
+
+8
+00:00:35.742 --> 00:00:41.642
+Real-time progress cards stream into chat while strict file-reservation partitioning prevents edit collisions.
+
+9
+00:00:41.942 --> 00:00:46.742
+Under the hood, Phases 8 through 10 deliver rock-solid execution resilience.
+
+10
+00:00:46.942 --> 00:00:53.142
+A state-machine JSON root parser deduplicates streaming tool snapshots and self-heals concatenated payloads.
+
+11
+00:00:53.342 --> 00:00:58.742
+Multi-tier terminal guards intercept heredoc file writes and raw file dumps before execution,
+
+12
+00:00:58.942 --> 00:01:03.842
+preventing shell deadlocks while decoupling specialist token budgets from turn starvation.
+
+13
+00:01:04.168 --> 00:01:11.368
+New in Phase 11: workspace-scoped dynamic project knowledge shares verified insights across stages via a Swarm Blackboard,
+
+14
+00:01:11.568 --> 00:01:15.368
+automatically scrubbed against credential leaks.
+
+15
+00:01:15.568 --> 00:01:20.368
+Manifest fingerprinting reactively invalidates environment caches on file edits.
+
+16
+00:01:20.568 --> 00:01:28.568
+Supervised shells enforce view-epoch fencing, while surrogate-safe XML handoffs and two-phase reservations guarantee zero duplicate failovers.
+
+17
+00:01:28.876 --> 00:01:36.476
+Every invariant is backed by real SQLite persistence, 20 Architecture Decision Records, and 19 blameless post-mortems.
+
+18
+00:01:36.676 --> 00:01:42.676
+Verified across 952 automated tests with zero TypeScript or lint errors.
+
+19
+00:01:42.876 --> 00:01:48.976
+LUMI Agent Swarm and The Legion: autonomous scale, cryptographic safety, and calm developer flow.
