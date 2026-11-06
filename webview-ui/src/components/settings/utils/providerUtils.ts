@@ -58,6 +58,16 @@ export interface NormalizedApiConfig {
 	selectedModelInfo: ModelInfo
 }
 
+/** Identify a saved provider that normalization cannot represent in the current UI. */
+export function getUnsupportedProvider(apiConfiguration: ApiConfiguration | undefined, mode: Mode): string | undefined {
+	const stored = mode === "plan" ? apiConfiguration?.planModeApiProvider : apiConfiguration?.actModeApiProvider
+	return stored &&
+		stored !== "openrouter" &&
+		normalizeApiConfiguration(apiConfiguration, mode).selectedProvider === "openrouter"
+		? stored
+		: undefined
+}
+
 /**
  * Normalizes API configuration to ensure consistent values
  */
@@ -67,10 +77,22 @@ export function normalizeApiConfiguration(
 ): NormalizedApiConfig {
 	const storedProvider =
 		(currentMode === "plan" ? apiConfiguration?.planModeApiProvider : apiConfiguration?.actModeApiProvider) || "openrouter"
-	const provider: ApiProvider =
-		(storedProvider as string) === "claude-code"
-			? "claude-subscription-directsdk-experimental"
-			: (storedProvider as ApiProvider)
+	const aliases: Record<string, ApiProvider> = {
+		"claude-code": "claude-subscription-directsdk-experimental",
+		"cline-pass": "cline-pass",
+		cline: "cline-pass",
+		clinepass: "cline-pass",
+		nous: "nousResearch",
+		nousresearch: "nousResearch",
+		"nous-research": "nousResearch",
+		nous_research: "nousResearch",
+		"nous-portal": "nousResearch",
+		opencode: "opencode",
+		"opencode-go": "opencode",
+		"opencode-zen": "opencode",
+		"opencode-console": "opencode",
+	}
+	const provider = aliases[storedProvider.trim().toLowerCase()] || (storedProvider as ApiProvider)
 
 	const modelId = currentMode === "plan" ? apiConfiguration?.planModeApiModelId : apiConfiguration?.actModeApiModelId
 

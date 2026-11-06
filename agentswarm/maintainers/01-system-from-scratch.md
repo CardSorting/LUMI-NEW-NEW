@@ -36,19 +36,23 @@ When the LLM decides it is finished, it invokes the `attempt_completion` tool (`
 Before the `agentswarm` specs (`agentswarm.md` through `agentswarm4.md`) were introduced, LUMI already had two foundational building blocks:
 
 ### A. `AgentOrchestrator` (`src/infrastructure/ai/Orchestrator.ts`)
+
 An in-process coordinator that tracks **streams** (`agent_streams` table), **tasks** (`agent_tasks` table), and **per-stream key-value memory** (`agent_memory` table):
+
 - A **stream** (`id`, `parentId`, `status: 'active' | 'paused' | 'completed' | 'failed'`, `createdAt`) represents one independent agent execution context.
 - A parent stream can spawn child streams (`parentId = parentStreamId`).
 - Each stream has a durable key-value store in `agent_memory` (`streamId`, `key`, `value`, `updatedAt`) where JSON documents (checkpoints, handoffs, roadmaps, file reservations) are stored.
 
 ### B. `BufferedDbPool` (`src/infrastructure/db/BufferedDbPool.ts`)
+
 Instead of blocking the Node.js event loop with synchronous SQLite disk writes on every agent thought or tool call, `BufferedDbPool` sits between `AgentOrchestrator` and `better-sqlite3`:
+
 - **Active Buffer (`this.activeBuffer`):** Direct writes (`dbPool.push(op)` or `dbPool.pushBatch(ops)` with **no** `agentId`) go into `this.activeBuffer` and are flushed to SQLite inside a single `BEGIN IMMEDIATE ... COMMIT` transaction every **1,000 ms** (or immediately when `await dbPool.flush()` is called).
 - **Shadow Overlays (`this.agentShadows`):** When a write is called with an `agentId` (`dbPool.push(op, streamId)`), it does **not** go to `this.activeBuffer` or disk. It sits in a private in-memory overlay (`this.agentShadows.get(streamId)`) until `dbPool.commitWork(streamId)` drains that overlay into `this.activeBuffer`, or `dbPool.rollbackWork(streamId)` discards it.
 
 > [!IMPORTANT]
 > **Why you must know about Shadow Overlays right now:**
-> Over half of the critical bugs discovered during implementation ([PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md), [PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md)) happened because someone wrote to a shadow overlay when they meant to write to `this.activeBuffer`, or wrote to a shadow overlay *after* calling `commitWork(streamId)`. See [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md).
+> Over half of the critical bugs discovered during implementation ([PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md), [PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md)) happened because someone wrote to a shadow overlay when they meant to write to `this.activeBuffer`, or wrote to a shadow overlay _after_ calling `commitWork(streamId)`. See [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md).
 
 ---
 
@@ -85,6 +89,7 @@ flowchart TB
 ```
 
 ### Capability 1: Hierarchical Defer & Resume (`HierarchicalDeferCoordinator.ts`)
+
 - **Problem it solves:** When a parent agent has spawned child/grandchild streams and needs to pause the hierarchy (for example, while a completion review inspects the workspace, or because a user/coordinator requested a pause), **aborting** in-flight children destroys their context and forces blind task replay.
 - **How it works:**
   1. **Defer ≠ Cancel:** Deferring transitions a stream or multi-stream hierarchy into `"suspending"` → `"waiting_for_children"` → `"suspended"` while preserving `agent_tasks` as `"pending"` with `"deferred": true` metadata.
@@ -94,6 +99,7 @@ flowchart TB
   5. **Idempotent Resume:** `resumeHierarchy` restores each stream from its checkpoint and uses `stream_step_receipts` to guarantee completed steps are **never re-executed**.
 
 ### Capability 2: Critical Completion Review (`CriticalCompletionReview.ts`)
+
 - **Problem it solves:** Agents sometimes call `attempt_completion` prematurely — with unverified claims, missing requirements, or subtle regressions. On the other hand, open-ended "critic loops" can argue forever without converging.
 - **How it works:**
   1. **Wired into `attempt_completion`:** When `agentSwarmCriticalReviewEnabled` is true (or `manualInvocation` is passed), `AttemptCompletionHandler` calls `evaluateOptionalCriticalCompletionReview` (`completionGatePipeline.ts`) right after the standard audit gate passes.
@@ -108,6 +114,7 @@ flowchart TB
      - `ESCALATE`: Verified defects persist after the remediation budget is exhausted (`1` initial review + `1` follow-up pass after `1` remediation pass = **1+1 bound**). Completion is blocked and escalated to the user/coordinator.
 
 ### Capability 3: The Legion (`LegionCoordinator.ts`)
+
 - **Problem it solves:** Complex engineering tasks span architecture, implementation, security, testing, UX, and documentation. A single generalist prompt struggles to maintain specialist rigor across all of them simultaneously.
 - **How it works:**
   1. **7 Canonical Specialist Archetypes across 3 Dependency Stages:**
@@ -123,6 +130,9 @@ flowchart TB
   7. **Orchestrator Conductor & Streaming Progress (`EngageSwarmHandler`, `joy_zoning.ts`, `LegionPipelineRunner`):** With [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), the parent model operates as the conductor. The conductor can explicitly dispatch specialist teams via `engage_swarm` (auto-approved in `autoApprove.ts`), stream real-time progress cards into the chat feed (`formatLegionProgressMessage`), map roles to milestones in Plan Mode, and coordinate stage execution in Act Mode. Gating heuristics allow tactical strikes and test projects to execute even below the standard 3.2 complexity floor.
   8. **Streaming Deduplication, Self-Healing Parser & Circuit-Breaking (`StreamResponseHandler`, `openai-codex`, `LegionAgentHost`):** With [ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), streaming providers slice tool argument snapshots and track interleaved call IDs, `StreamResponseHandler` self-heals identical duplicate JSON roots across stream splits, and `LegionAgentHost` marks transport decoding errors with `safeToRetry: false` to circuit-break futile failover loops ([PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
   9. **Multi-Tier Heredoc Defense, Specialist Prompt Parity & Shell Integration Circuit-Breaking (`LegionAgentHost`, `heredocPolicy`, `ExecuteCommandToolHandler`, `UniversalGuard`, `VscodeTerminalProcess`):** With [ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md) and [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md), specialist prompts achieve 1:1 parity with conductor rules via `LEGION_CORE_RULES`, `heredocPolicy` detects and intercepts terminal heredoc file creations (`cat <<'EOF' > file`, `tee`) before UI prompting and execution, and `VscodeTerminalProcess` circuit-breaks interactive shell integration deadlocks by safely falling back to managed terminals or refusing unobservable execution.
+  10. **Multi-Tier Terminal File Read Defense & Token Decoupling (`terminalFileReadPolicy`, `LegionAgentHost`, `rules.ts`, `editing_files.ts`):** With [ADR-0016](../adr/ADR-0016-terminal-file-read-defense-budget-starvation-and-conductor-prompt-parity.md) and [PM-017](../postmortems/PM-017-terminal-file-dump-specialist-starvation-and-conductor-fallback.md), intercepts terminal file reads (`cat`, `head`, `tail`, `more`, `less`), directs models to `read_file`, enforces conductor-specialist prompt parity, and decouples token budget limits from multi-turn accumulation.
+  11. **Dynamic Project Knowledge & Scoped Credential Sanitization (`LegionKnowledge.ts`, `agent_knowledge`):** With [ADR-0017](../adr/ADR-0017-dynamic-project-knowledge-blackboard-and-credential-sanitization.md), scopes observations via SHA-256 workspace digests, enforces multi-pattern credential regex screening, stores heuristics in `agent_knowledge` with a 30-day TTL, coordinates cross-stage blackboard passing, and prunes expired records via `BufferedDbPool.pruneExpiredAgentKnowledge`.
+  12. **Surrogate-Safe Handoff, Two-Phase Reservations & Unsettled State Reconciliation (`LegionHandoff.ts`, `LegionCoordinator.ts`, `LegionPipelineRunner.ts`):** With [ADR-0020](../adr/ADR-0020-legion-handoff-sanitization-two-phase-reservation-and-unsettled-reconciliation.md) and [PM-019](../postmortems/PM-019-unpersisted-specialist-settlement-and-formation-dispatch-race.md), formats and caps specialist handoffs to 12 KB without splitting UTF-16 surrogate pairs, prevents parallel team formation races via atomic reservations, and transitions to `needs_reconciliation` whenever specialist termination or SQLite settlement cannot be confirmed.
 
 ---
 
@@ -131,10 +141,10 @@ flowchart TB
 Per [ADR-0012](../adr/ADR-0012-automatic-legion-default.md) and [ADR-0013](../adr/ADR-0013-orchestrator-conductor-tool-and-streaming-progress.md), **Legion is enabled by default** for eligible act-mode tasks, and the parent conductor has access to `engage_swarm`, while **Critical Completion Review** and **Hierarchical Defer** remain disabled by default.
 
 When an auxiliary capability is disabled or explicitly opted out:
+
 - `AttemptCompletionHandler` does not run `CriticalCompletionReviewService`.
 - `Orchestrator.completeStream` and `failStream` perform fast memory look-ups that no-op when no active pipeline exists.
 - `Task.ts` skips automatic Legion formation and proceeds directly with the standard single-agent loop.
 - `engage_swarm` is omitted from `DietCodeToolSet.getEnabledTools` and prompt conductor sections are withheld.
 
 Next: Read **[02 — Line-by-Line Codebase Tour](02-codebase-tour.md)** to see how every file is structured and where each invariant lives.
-

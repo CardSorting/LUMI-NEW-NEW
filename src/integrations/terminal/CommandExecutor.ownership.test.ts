@@ -165,6 +165,26 @@ describe("terminal command ownership", () => {
 		sinon.assert.calledOnce(reopened.processes[0].terminate)
 		sinon.assert.notCalled(first.manager.runCommand as sinon.SinonStub)
 	})
+	it("lets an old reader finish without writing or publishing into a replacement view", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const first = fixture(runtime)
+		const pending = first.executor.execute("build", 1, { actionId: "run", commandMessageTs: 12 })
+		await clock.tickAsync(1000)
+		await pending
+		const read = first.executor.readCommandOutput("run", 30)
+		const replacement = fixture(runtime)
+		replacement.callbacks.getDietCodeMessages = () => [{ ts: 12, say: "command" }]
+		const persist = sinon.spy(runtime, "persist")
+		first.processes[0].complete({ exitCode: 7 })
+		persist.resetHistory()
+		;(replacement.callbacks.updateDietCodeMessage as sinon.SinonStub).resetHistory()
+		const result = await read
+		assert.equal(result.status, "failed")
+		assert.equal(result.exit_code, 7)
+		sinon.assert.notCalled(persist)
+		sinon.assert.notCalled(replacement.callbacks.updateDietCodeMessage as sinon.SinonStub)
+	})
 	it("fences both acquiring and queued launches when the task view changes", async () => {
 		const clock = sinon.useFakeTimers()
 		const runtime = new CommandRuntime("task", "task")
@@ -216,6 +236,102 @@ describe("terminal command ownership", () => {
 		snapshot.output = "tampered"
 		assert.equal(reopened.executor.getExecutionSnapshot("intent")!.output, "captured output")
 	})
+	it("marks a replayed execution as not started on the new command row", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks, manager } = fixture()
+		const first = executor.execute("build", 1, { actionId: "same", suppressUserInteraction: true })
+		await clock.tickAsync(0)
+		processes[0].complete({ exitCode: 0 })
+		await first
+		callbacks.getDietCodeMessages = () => [{ ts: 42, type: "say", say: "command", text: "build" }]
+		const replay = await executor.execute("build", 1, { actionId: "same", commandMessageTs: 42 })
+		assert.equal(replay[2]?.status, "completed")
+		sinon.assert.calledWithMatch(callbacks.updateDietCodeMessage as sinon.SinonStub, 0, {
+			commandCompleted: true,
+			commandExecution: { status: "not_started", detail: sinon.match("Execution same already exists") },
+		})
+		sinon.assert.calledOnce(manager.runCommand as sinon.SinonStub)
+	})
+	it("preserves the original row when refreshing the same execution ID", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks } = fixture()
+		callbacks.getDietCodeMessages = () => [{ ts: 42, type: "say", say: "command", text: "build" }]
+		const first = executor.execute("build", 1, { actionId: "same", commandMessageTs: 42 })
+		await clock.tickAsync(0)
+		processes[0].complete({ exitCode: 7 })
+		await first
+		;(callbacks.updateDietCodeMessage as sinon.SinonStub).resetHistory()
+		await executor.execute("build", 1, { actionId: "same", commandMessageTs: 42 })
+		sinon.assert.calledWithMatch(callbacks.updateDietCodeMessage as sinon.SinonStub, 0, {
+			commandExecution: { status: "failed", exitCode: 7 },
+		})
+	})
+	it("preserves the original row when replaying an execution that is still running", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks, manager } = fixture()
+		callbacks.getDietCodeMessages = () => [{ ts: 42, type: "say", say: "command", text: "build" }]
+		const first = executor.execute("build", 1, { actionId: "same", commandMessageTs: 42 })
+		await clock.tickAsync(1000)
+		await first
+		;(callbacks.updateDietCodeMessage as sinon.SinonStub).resetHistory()
+		const replay = await executor.execute("build", 1, { actionId: "same", commandMessageTs: 42 })
+		assert.equal(replay[2]?.status, "background")
+		sinon.assert.calledWithMatch(callbacks.updateDietCodeMessage as sinon.SinonStub, 0, {
+			commandExecution: { status: "background", executionId: "same" },
+		})
+		sinon.assert.calledOnce(manager.runCommand as sinon.SinonStub)
+		processes[0].complete()
+	})
+	it("updates only the command row with the matching timestamp and execution identity", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks } = fixture()
+		callbacks.getDietCodeMessages = () => [
+			{ ts: 42, type: "say", say: "text", text: "unrelated" },
+			{
+				ts: 42,
+				type: "say",
+				say: "command",
+				text: "older",
+				commandExecution: { status: "completed", executionId: "other" },
+			},
+			{ ts: 42, type: "say", say: "command", text: "build" },
+		]
+		const pending = executor.execute("build", 1, { actionId: "own", commandMessageTs: 42 })
+		await clock.tickAsync(0)
+		processes[0].complete({ exitCode: 0 })
+		await pending
+		const updates = callbacks.updateDietCodeMessage as sinon.SinonStub
+		assert.ok(updates.callCount > 0)
+		assert.ok(updates.getCalls().every((call) => call.args[0] === 2))
+	})
+	it("uses command text to distinguish unassigned rows sharing a timestamp", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks } = fixture()
+		callbacks.getDietCodeMessages = () => [
+			{ ts: 42, say: "command", text: "old" },
+			{ ts: 42, say: "command", text: "build" },
+		]
+		const pending = executor.execute("build", 1, { actionId: "own", commandMessageTs: 42 })
+		await clock.tickAsync(0)
+		processes[0].complete({ exitCode: 0 })
+		await pending
+		const updates = callbacks.updateDietCodeMessage as sinon.SinonStub
+		assert.ok(updates.callCount > 0)
+		assert.ok(updates.getCalls().every((call) => call.args[0] === 1))
+	})
+	it("does not attach a command to an unrelated unassigned row sharing its timestamp", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks } = fixture()
+		callbacks.getDietCodeMessages = () => [
+			{ ts: 42, say: "command", text: "old", commandExecution: { status: "completed", executionId: "other" } },
+			{ ts: 42, say: "command", text: "different request" },
+		]
+		const pending = executor.execute("build", 1, { actionId: "own", commandMessageTs: 42 })
+		await clock.tickAsync(0)
+		processes[0].complete({ exitCode: 0 })
+		await pending
+		sinon.assert.notCalled(callbacks.updateDietCodeMessage as sinon.SinonStub)
+	})
 	it("retains detached live ownership under idle cache pressure while isolating task identities", async () => {
 		const clock = sinon.useFakeTimers()
 		const registry = new CommandRuntimeRegistry(1)
@@ -238,6 +354,28 @@ describe("terminal command ownership", () => {
 		reopened.executor.detach()
 		assert.equal(runtime.retainedWork, false)
 		assert.equal(runtime.activeProcesses.size, 0)
+	})
+	it("retains a detached unconfirmed receipt without durable recovery under cache pressure", async () => {
+		const clock = sinon.useFakeTimers()
+		const registry = new CommandRuntimeRegistry(1)
+		const runtime = registry.get("task", "task")
+		const first = fixture(runtime)
+		const pending = first.executor.execute("uncertain build", 1, { actionId: "uncertain", suppressUserInteraction: true })
+		await clock.tickAsync(0)
+		first.processes[0].complete({ terminalClosed: true })
+		await pending
+		first.executor.detach()
+		for (let i = 0; i < 6; i++) registry.get("unrelated", String(i))
+		assert.equal(registry.get("task", "task"), runtime)
+		const reopened = fixture(runtime)
+		assert.equal(reopened.executor.getExecutionInventory().unresolved[0].execution_id, "uncertain")
+		const duplicate = await reopened.executor.execute("uncertain build", 1, {
+			actionId: "new",
+			suppressUserInteraction: true,
+		})
+		assert.equal(duplicate[2]?.executionId, "uncertain")
+		sinon.assert.notCalled(reopened.manager.runCommand as sinon.SinonStub)
+		reopened.executor.detach()
 	})
 	it("exposes foreground, background, and recent owned commands without consuming their output", async () => {
 		const clock = sinon.useFakeTimers()
@@ -332,6 +470,74 @@ describe("terminal command ownership", () => {
 		await next
 		assert.equal(clock.countTimers(), 0)
 	})
+	it("waits for the same running command when reading by its action ID", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const { executor, processes } = fixture(runtime)
+		const pending = executor.execute("build", 1, { actionId: "run", suppressUserInteraction: true })
+		await clock.tickAsync(1000)
+		await pending
+		const state = [...runtime.activeProcesses.values()][0]
+		state.actionId = "action-alias"
+		let settled = false
+		const read = executor.readCommandOutput("action-alias", 30).then((value) => {
+			settled = true
+			return value
+		})
+		await clock.tickAsync(2000)
+		assert.equal(settled, false)
+		processes[0].complete({ exitCode: 7 })
+		const receipt = await read
+		assert.equal(receipt.execution_id, "run")
+		assert.equal(receipt.action_id, "action-alias")
+		assert.equal(receipt.status, "failed")
+		assert.equal(receipt.exit_code, 7)
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("retains the captured final output for a waiting reader after receipt eviction", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const { executor, processes } = fixture(runtime)
+		const pending = executor.execute("build", 1, { actionId: "run", suppressUserInteraction: true })
+		await clock.tickAsync(1000)
+		await pending
+		const read = executor.readCommandOutput("run", 30)
+		processes[0].getOutputSnapshot.returns("final evidence")
+		processes[0].complete({ exitCode: 7 })
+		runtime.receipts.delete("run")
+		processes[0].getOutputSnapshot.throws(new Error("terminal unavailable"))
+		const result = await read
+		assert.equal(result.status, "failed")
+		assert.equal(result.exit_code, 7)
+		assert.equal(result.output, "final evidence")
+		assert.equal(clock.countTimers(), 0)
+	})
+	it("does not replace a waiting reader's final evidence with a newer receipt using the same ID", async () => {
+		const clock = sinon.useFakeTimers()
+		const runtime = new CommandRuntime("task", "task")
+		const { executor, processes } = fixture(runtime)
+		const pending = executor.execute("first build", 1, { actionId: "run", suppressUserInteraction: true })
+		await clock.tickAsync(1000)
+		await pending
+		const read = executor.readCommandOutput("run", 30)
+		processes[0].getOutputSnapshot.returns("first output")
+		processes[0].complete({ exitCode: 7 })
+		const next = {
+			...runtime.receipts.get("run")!.snapshot,
+			command: "new build",
+			output: "new output",
+			status: "completed" as const,
+			exit_code: 0,
+		}
+		runtime.receipts.set("run", { snapshot: next })
+		const persist = sinon.spy(runtime, "persist")
+		const result = await read
+		assert.equal(result.command, "first build")
+		assert.equal(result.output, "first output")
+		assert.equal(result.exit_code, 7)
+		assert.equal(runtime.receipts.get("run")?.snapshot.output, "new output")
+		sinon.assert.notCalled(persist)
+	})
 	it("bounds repeated observations and cancels only a reader, leaving the command owned", async () => {
 		const clock = sinon.useFakeTimers()
 		const { executor, processes, manager } = fixture()
@@ -386,6 +592,47 @@ describe("terminal command ownership", () => {
 		await assert.rejects(fixture().executor.readCommandOutput(ids[64], 0), /not tracked/)
 		assert.equal((manager.runCommand as sinon.SinonStub).callCount, 65)
 		assert.equal(clock.countTimers(), 0)
+	})
+	it("retains unconfirmed receipts beyond recent history and fences duplicate commands", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, manager } = fixture()
+		const first = executor.execute("uncertain build", 1, {
+			actionId: "uncertain",
+			owner: "legion:one",
+			suppressUserInteraction: true,
+		})
+		await clock.tickAsync(0)
+		processes[0].complete({ terminalClosed: true })
+		await first
+		for (let i = 0; i < 65; i++) {
+			const pending = executor.execute(`other ${i}`, 1, { suppressUserInteraction: true })
+			await clock.tickAsync(0)
+			processes[i + 1].complete()
+			await pending
+		}
+		const inventory = executor.getExecutionInventory()
+		assert.equal(inventory.unresolved[0].execution_id, "uncertain")
+		assert.ok(inventory.recent.every((entry) => entry.execution_id !== "uncertain"))
+		assert.equal(executor.getExecutionSummary("uncertain")?.status, "unconfirmed")
+		const duplicate = await executor.execute("uncertain build", 1, { actionId: "new-attempt", suppressUserInteraction: true })
+		assert.equal(duplicate[2]?.executionId, "uncertain")
+		assert.equal((manager.runCommand as sinon.SinonStub).callCount, 66)
+	})
+	it("marks the new command row not started when an unresolved receipt blocks dispatch", async () => {
+		const clock = sinon.useFakeTimers()
+		const { executor, processes, callbacks, manager } = fixture()
+		const first = executor.execute("build", 1, { actionId: "old", suppressUserInteraction: true })
+		await clock.tickAsync(0)
+		processes[0].complete({ terminalClosed: true })
+		await first
+		callbacks.getDietCodeMessages = () => [{ ts: 42, type: "say", say: "command", text: "build" }]
+		const result = await executor.execute("build", 1, { actionId: "new", commandMessageTs: 42 })
+		assert.equal(result[2]?.executionId, "old")
+		sinon.assert.calledWithMatch(callbacks.updateDietCodeMessage as sinon.SinonStub, 0, {
+			commandCompleted: true,
+			commandExecution: { status: "not_started", detail: sinon.match("Execution old has unresolved effects") },
+		})
+		sinon.assert.calledOnce(manager.runCommand as sinon.SinonStub)
 	})
 	it("preserves completion metadata when output capture fails and refreshes the original row", async () => {
 		const clock = sinon.useFakeTimers()

@@ -14,6 +14,7 @@ describe("Legion native provider integration", () => {
 	})
 	it("executes a multi-turn native tool conversation through the OpenAI-compatible provider", async function () {
 		const requests: any[] = []
+		const contentEncodings: Array<string | undefined> = []
 		server = createServer((req, res) => {
 			const chunks: Buffer[] = []
 			req.on("data", (chunk) => {
@@ -21,6 +22,7 @@ describe("Legion native provider integration", () => {
 			})
 			req.on("end", () => {
 				const buf = Buffer.concat(chunks)
+				contentEncodings.push(req.headers["content-encoding"])
 				const raw = req.headers["content-encoding"] === "gzip" ? gunzipSync(buf).toString("utf8") : buf.toString("utf8")
 				requests.push(JSON.parse(raw))
 				const first = requests.length === 1
@@ -63,6 +65,7 @@ describe("Legion native provider integration", () => {
 		const port = (server.address() as AddressInfo).port
 		const used: string[] = []
 		const host = new LegionAgentHost({
+			systemContext: "Project context ".repeat(400),
 			createApi: () =>
 				new OpenAiHandler({
 					openAiApiKey: "test",
@@ -100,6 +103,7 @@ describe("Legion native provider integration", () => {
 		expect(result).to.deep.equal({ status: "completed", summary: "Inspected example.ts" })
 		expect(used).to.deep.equal(["read_file:example.ts"])
 		expect(requests).to.have.length(2)
+		expect(contentEncodings).to.deep.equal(["gzip", "gzip"])
 		expect(JSON.stringify(requests[1].messages)).to.include("file contents")
 	})
 })

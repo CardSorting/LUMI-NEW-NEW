@@ -128,7 +128,9 @@ describe("command approval execution", () => {
 		config.messageState = {
 			getDietCodeMessages: () => [
 				{ ts: 1, say: "command" },
-				{ ts: 2, say: "command" },
+				{ ts: 2, say: "command", commandExecution: { status: "running", executionId: "existing-action" } },
+				{ ts: 2, say: "text" },
+				{ ts: 2, say: "command", text: "npm test" },
 			],
 			updateDietCodeMessage: update,
 		} as never
@@ -146,8 +148,35 @@ describe("command approval execution", () => {
 		assert.ok(isToolFailure(result))
 		assert.match(String(result), /existing-action/)
 		sinon.assert.notCalled(callbacks.executeCommandTool)
-		sinon.assert.calledOnceWithMatch(update, 1, { commandExecution: { status: "not_started" } })
+		sinon.assert.calledOnceWithMatch(update, 3, { commandCompleted: true, commandExecution: { status: "not_started" } })
 		assert.equal(config.taskState.workspaceRevision, 0)
+	})
+	it("does not update an ambiguous duplicate-command row", async () => {
+		const { config, callbacks, handler } = fixture()
+		callbacks.say.resolves(2)
+		const update = sinon.stub().resolves()
+		config.messageState = {
+			getDietCodeMessages: () => [
+				{ ts: 2, say: "command", text: "npm test" },
+				{ ts: 2, say: "command", text: "npm test" },
+			],
+			updateDietCodeMessage: update,
+		} as never
+		config.callbacks.postStateToWebview = sinon.stub().resolves()
+		;(executor.execute as sinon.SinonStub).rejects(
+			new ActionAlreadyActiveError({
+				execution_id: "existing",
+				kind: "command",
+				label: "npm test",
+				owner: "parent",
+				status: "running",
+			}),
+		)
+		const result = await handler.execute(config, block)
+		assert.ok(isToolFailure(result))
+		assert.match(String(result), /existing/)
+		sinon.assert.notCalled(update)
+		sinon.assert.notCalled(callbacks.executeCommandTool)
 	})
 	it("executes once when optional command presentation rejects", async () => {
 		const { config, callbacks, handler } = fixture()

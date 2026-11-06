@@ -1,9 +1,16 @@
 import { strict as assert } from "node:assert"
 import { describe, it } from "mocha"
 import type { DietCodeMessage } from "../ExtensionMessage"
-import { getApiMetrics, getLastApiReqTotalTokens } from "../getApiMetrics"
+import { getApiMetrics, getLastApiReqTotalTokens, hasValidApiUsage } from "../getApiMetrics"
 
 describe("getApiMetrics", () => {
+	it("rejects malformed, negative and non-finite recorded usage for budget decisions", () => {
+		const message = (text: string): DietCodeMessage => ({ ts: 1, type: "say", say: "api_req_started", text })
+		assert.equal(hasValidApiUsage([message('{"tokensIn":4,"specialistUsage":{"cost":0.2}}')]), true)
+		for (const text of ["{", '{"tokensIn":-1}', '{"cost":1e400}', '{"specialistUsage":{"tokensOut":"unknown"}}']) {
+			assert.equal(hasValidApiUsage([message(text)]), false)
+		}
+	})
 	it("includes api_req_started and deleted_api_reqs in aggregate totals", () => {
 		const messages: DietCodeMessage[] = [
 			{

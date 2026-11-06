@@ -2,34 +2,34 @@
 
 ## Settings
 
-| VS Code setting | Proto/State key | Type | Default | Range |
-|---|---|---|---|---|
-| `lumi.agentSwarm.enabled` | `agentSwarmEnabled` | bool | `false` | master switch |
-| `lumi.agentSwarm.criticalCompletionReview.enabled` | `agentSwarmCriticalCompletionReviewEnabled` | bool | `false` | |
-| `lumi.agentSwarm.criticalCompletionReview.maxInitialReviews` | `agentSwarmMaxInitialCompletionReviews` | int | `1` | 1–5 |
-| `lumi.agentSwarm.criticalCompletionReview.maxCorrectivePasses` | `agentSwarmMaxCorrectiveVerificationPasses` | int | `1` | 1–5 |
-| `lumi.agentSwarm.hierarchicalDefer.enabled` | `agentSwarmHierarchicalDeferEnabled` | bool | `false` | |
-| `lumi.agentSwarm.hierarchicalDefer.defaultBoundary` | `agentSwarmDefaultDeferBoundary` | enum | `safe_boundary` | `before_turn` \| `safe_boundary` \| `immediate` |
-| `lumi.agentSwarm.autoDeferOnCompletionReview` | `agentSwarmAutoDeferOnCompletionReview` | bool | `true` | only acts if both Review and Defer are on |
-| `lumi.agentSwarm.legion.enabled` | `agentSwarmLegionEnabled` | bool | `true` | automatic formation; explicit false opts out |
-| `lumi.agentSwarm.legion.strategy` | `agentSwarmLegionStrategy` | enum | `adaptive` | `adaptive` \| `tactical_strike` \| `balanced_squad` \| `full_legion` \| `verification_heavy` |
-| `lumi.agentSwarm.legion.maxSpecialists` | `agentSwarmLegionMaxSpecialists` | int | `4` | 1–8 |
+| VS Code setting                                                | Proto/State key                             | Type | Default         | Range                                                                                        |
+| -------------------------------------------------------------- | ------------------------------------------- | ---- | --------------- | -------------------------------------------------------------------------------------------- |
+| `lumi.agentSwarm.enabled`                                      | `agentSwarmEnabled`                         | bool | `false`         | master switch                                                                                |
+| `lumi.agentSwarm.criticalCompletionReview.enabled`             | `agentSwarmCriticalCompletionReviewEnabled` | bool | `false`         |                                                                                              |
+| `lumi.agentSwarm.criticalCompletionReview.maxInitialReviews`   | `agentSwarmMaxInitialCompletionReviews`     | int  | `1`             | 1–5                                                                                          |
+| `lumi.agentSwarm.criticalCompletionReview.maxCorrectivePasses` | `agentSwarmMaxCorrectiveVerificationPasses` | int  | `1`             | 1–5                                                                                          |
+| `lumi.agentSwarm.hierarchicalDefer.enabled`                    | `agentSwarmHierarchicalDeferEnabled`        | bool | `false`         |                                                                                              |
+| `lumi.agentSwarm.hierarchicalDefer.defaultBoundary`            | `agentSwarmDefaultDeferBoundary`            | enum | `safe_boundary` | `before_turn` \| `safe_boundary` \| `immediate`                                              |
+| `lumi.agentSwarm.autoDeferOnCompletionReview`                  | `agentSwarmAutoDeferOnCompletionReview`     | bool | `true`          | only acts if both Review and Defer are on                                                    |
+| `lumi.agentSwarm.legion.enabled`                               | `agentSwarmLegionEnabled`                   | bool | `true`          | automatic formation; explicit false opts out                                                 |
+| `lumi.agentSwarm.legion.strategy`                              | `agentSwarmLegionStrategy`                  | enum | `adaptive`      | `adaptive` \| `tactical_strike` \| `balanced_squad` \| `full_legion` \| `verification_heavy` |
+| `lumi.agentSwarm.legion.maxSpecialists`                        | `agentSwarmLegionMaxSpecialists`            | int  | `4`             | 1–8                                                                                          |
 
 Proto fields: `Settings` 339–348 and `UpdateSettingsRequest` 55–64 in `proto/dietcode/state.proto` (`agent_swarm_*`, all `optional`). Invalid enum values and out-of-range numbers are **clamped/ignored at the controller boundary** (`updateSettings.ts`, `updateTaskSettings.ts`).
 
 ## Environment variables (each also accepts a `DIETCODE_` twin where noted)
 
-| Variable | Effect |
-|---|---|
-| `LUMI_AGENT_SWARM_ENABLED` (`DIETCODE_…`) | master |
-| `LUMI_CRITICAL_COMPLETION_REVIEW_ENABLED` (`DIETCODE_…`) | review |
-| `LUMI_HIERARCHICAL_DEFER_ENABLED` (`DIETCODE_…`) | defer |
-| `LUMI_AGENT_SWARM_DEFER_BOUNDARY` | boundary |
-| `LUMI_AGENT_SWARM_AUTO_DEFER_ON_REVIEW` | auto-defer |
+| Variable                                                                         | Effect               |
+| -------------------------------------------------------------------------------- | -------------------- |
+| `LUMI_AGENT_SWARM_ENABLED` (`DIETCODE_…`)                                        | master               |
+| `LUMI_CRITICAL_COMPLETION_REVIEW_ENABLED` (`DIETCODE_…`)                         | review               |
+| `LUMI_HIERARCHICAL_DEFER_ENABLED` (`DIETCODE_…`)                                 | defer                |
+| `LUMI_AGENT_SWARM_DEFER_BOUNDARY`                                                | boundary             |
+| `LUMI_AGENT_SWARM_AUTO_DEFER_ON_REVIEW`                                          | auto-defer           |
 | `LUMI_AGENT_SWARM_MAX_INITIAL_REVIEWS`, `LUMI_AGENT_SWARM_MAX_CORRECTIVE_PASSES` | bounds (clamped 1–5) |
-| `LUMI_AGENT_SWARM_LEGION_ENABLED` (`DIETCODE_…`) | legion |
-| `LUMI_AGENT_SWARM_LEGION_STRATEGY` | strategy |
-| `LUMI_AGENT_SWARM_LEGION_MAX_SPECIALISTS` | cap (clamped 1–8) |
+| `LUMI_AGENT_SWARM_LEGION_ENABLED` (`DIETCODE_…`)                                 | legion               |
+| `LUMI_AGENT_SWARM_LEGION_STRATEGY`                                               | strategy             |
+| `LUMI_AGENT_SWARM_LEGION_MAX_SPECIALISTS`                                        | cap (clamped 1–8)    |
 
 Booleans accept `1/true/yes/on/enabled` and `0/false/no/off/disabled`.
 
@@ -61,12 +61,19 @@ Within the "global" step, a task's `settingsPatch` (from `TaskConfig`) is consul
 6. **Auto-Approval of `engage_swarm`:** The `engage_swarm` conductor tool is auto-approved by default in `AutoApprove.shouldAutoApproveToolWithPath`. It does not prompt the user for interactive approval when the conductor dispatches specialist teams.
 7. **Test Isolation (`isTesting`):** `engage_swarm` tool specification and prompt conductor sections (`joy_zoning.ts`, `act_vs_plan_mode.ts`) check `context.isTesting`. When running under test runners (`isTesting: true`), they are omitted to keep prompt snapshot tests deterministic and stable.
 8. **Adaptive Gating Floor Overrides:** The automatic delegation complexity floor (`3.2`) and 2-specialist minimum are bypassed when `appliedStrategy === "tactical_strike"`, for test project tasks, or when explicit swarm/legion keywords appear in the objective.
+9. **Dynamic Project Knowledge:** Scoped heuristics persist in `agent_knowledge` for 30 days (`LEGION_KNOWLEDGE_TTL_MS = 30 * 24 * 60 * 60 * 1000`) and are capped at 20 items per workspace digest. Expired records are pruned during recall queries.
+10. **Environment Lease Invalidation:** Edits to manifest files automatically revoke the active environment lease and clear `stateManager.setGlobalState("environmentalLease", undefined)`.
+11. **Specialist Usage Persistence Fence:** When specialist usage fails to persist reliably, `taskState.specialistUsageUnverified` is set to `true` to notify downstream consumers.
+12. **Handoff Encoding Limits:** Specialist handoff text is escaped and capped at 12,000 bytes (`formatLegionHandoffText`) preserving UTF-16 surrogate pairs.
 
 ## Quick recipes
 
 ```jsonc
 // settings.json — everything on
-{ "lumi.agentSwarm.enabled": true, "lumi.agentSwarm.legion.strategy": "adaptive" }
+{
+	"lumi.agentSwarm.enabled": true,
+	"lumi.agentSwarm.legion.strategy": "adaptive"
+}
 ```
 ```bash
 # Env — Legion only, 6 specialists

@@ -311,16 +311,22 @@ export class ExecuteCommandToolHandler implements IFullyManagedTool {
 				if (typeof commandMessageTs === "number") {
 					await display.observe(async () => {
 						const messages = config.messageState
+						const rows = messages?.getDietCodeMessages?.() ?? []
+						const candidates = rows.flatMap((message, index) =>
+							message.ts === commandMessageTs && (message.say === "command" || message.ask === "command")
+								? [index]
+								: [],
+						)
+						const unassigned = candidates.filter((index) => !rows[index].commandExecution?.executionId)
+						const matching = unassigned.filter((index) => rows[index].text === actualCommand)
 						const index =
-							messages
-								?.getDietCodeMessages?.()
-								.findIndex(
-									(message) =>
-										message.ts === commandMessageTs &&
-										(message.say === "command" || message.ask === "command"),
-								) ?? -1
+							candidates.length === 1 && unassigned.length === 1
+								? unassigned[0]
+								: matching.length === 1
+									? matching[0]
+									: -1
 						if (index < 0) return
-						await messages.updateDietCodeMessage(index, { commandExecution: state })
+						await messages!.updateDietCodeMessage(index, { commandCompleted: true, commandExecution: state })
 						await config.callbacks.postStateToWebview()
 					})
 				}

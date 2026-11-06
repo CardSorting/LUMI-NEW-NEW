@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process"
 import { basename } from "node:path"
+import { Logger } from "@/shared/services/Logger"
 import type { TerminalCompletionDetails } from "./types"
 
 export interface SupervisedShellOptions {
@@ -9,6 +10,8 @@ export interface SupervisedShellOptions {
 	onData: (data: string) => void
 	onComplete: (details: TerminalCompletionDetails) => void
 	onError: (error: Error) => void
+	/** A post-spawn error does not establish that the process exited. */
+	onObservationError?: (error: Error) => void
 }
 
 /** One dispatch, with OS-owned pipes and exit events, independent of shell integration. */
@@ -41,6 +44,13 @@ export class SupervisedShell {
 				: name === "wsl"
 					? ["--exec", "/bin/sh", "-c", options.command]
 					: ["-c", options.command]
+		const observationError = (error: unknown) => {
+			try {
+				options.onObservationError?.(error instanceof Error ? error : new Error(String(error)))
+			} catch (observerError) {
+				Logger.warn("Supervised shell observation callback failed:", observerError)
+			}
+		}
 		try {
 			const child =
 				name === "cmd"
@@ -59,14 +69,29 @@ export class SupervisedShell {
 							stdio: "pipe",
 						})
 			this.child = child
+			let spawned = false
+			child.once("spawn", () => {
+				spawned = true
+			})
 			for (const stream of [child.stdout, child.stderr]) {
 				stream?.setEncoding("utf8")
-				stream?.on("data", (data: string) => options.onData(data))
+				stream?.on("data", (data: string) => {
+					try {
+						options.onData(data)
+					} catch (error) {
+						observationError(error)
+					}
+				})
+				stream?.on("error", observationError)
 			}
 			// Input can race a natural exit. A closed stdin must not crash the extension host.
 			child.stdin?.on("error", () => {})
-			child.once("error", (error) => {
+			child.on("error", (error) => {
 				if (this.ended) return
+				if (spawned) {
+					observationError(error)
+					return
+				}
 				this.ended = true
 				this.resolveClosed()
 				options.onError(error)
@@ -97,9 +122,21 @@ export class SupervisedShell {
 		if (this.ended) return Promise.resolve()
 		if (this.stopPromise) return this.stopPromise
 		this.cancelled = true
-		if (!this.child?.pid) return Promise.resolve()
-		const pid = this.child.pid
+		const child = this.child
+		if (!child) return Promise.resolve()
 		this.stopPromise = (async () => {
+			if (!child.pid && !this.ended) {
+				await new Promise<void>((resolve) => {
+					const ready = () => {
+						child.removeListener("spawn", ready)
+						resolve()
+					}
+					child.once("spawn", ready)
+					void this.closed.then(ready)
+				})
+			}
+			const pid = child.pid
+			if (!pid || this.ended) return
 			if (process.platform === "win32") {
 				await new Promise<void>((resolve, reject) => {
 					const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
@@ -132,6 +169,7 @@ export class SupervisedShell {
 			}
 		})().catch((error) => {
 			this.stopPromise = undefined
+			this.cancelled = false
 			throw error
 		})
 		return this.stopPromise

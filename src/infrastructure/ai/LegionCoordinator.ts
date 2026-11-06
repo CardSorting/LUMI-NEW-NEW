@@ -17,6 +17,13 @@ import {
 	resolveEffectiveAgentSwarmState,
 } from "./AgentSwarmConfig"
 import { hierarchicalDeferCoordinator } from "./HierarchicalDeferCoordinator"
+import {
+	isReusableLegionObservation,
+	LEGION_KNOWLEDGE_TTL_MS,
+	legionWorkspaceScope,
+	recallLegionKnowledge,
+	rememberLegionKnowledge,
+} from "./LegionKnowledge"
 
 export type { CanonicalLegionSpecialistRole, LegionFormationStrategy, LegionSpecialistRole }
 export { normalizeLegionSpecialistRole }
@@ -208,6 +215,7 @@ export interface LegionFormationManifest {
 	createdAt: number
 	updatedAt: number
 	swarmBlackboard?: string[]
+	knowledgeScope?: string
 }
 
 export interface FormLegionOptions extends LegionClassificationInput {
@@ -219,6 +227,8 @@ export interface FormLegionOptions extends LegionClassificationInput {
 	resolvedFeatureState?: EffectiveAgentSwarmFeatureState
 	/** Cross-turn blackboard heuristics to seed the formation. */
 	swarmBlackboard?: string[]
+	/** Workspace path used only to scope unverified reusable observations. */
+	workspacePath?: string
 }
 
 const UX_SPECIALIST_DESCRIPTOR_BASE: Omit<LegionSpecialistDescriptor, "role"> = {
@@ -1070,7 +1080,7 @@ export class LegionCoordinator {
 				if (item && !extracted.includes(item)) extracted.push(item)
 			}
 		}
-		return extracted
+		return [...new Set(extracted.map((item) => item.slice(0, 500)))].slice(0, 20)
 	}
 
 	/**
@@ -1244,6 +1254,61 @@ export class LegionCoordinator {
 		manifest?: LegionFormationManifest
 		classification: LegionClassificationResult
 		reason?: string
+		requiresReconciliation?: boolean
+	}> {
+		const classification = this.classifyTaskForLegion({
+			taskDescription: options.taskDescription,
+			parentFocus: options.parentFocus,
+			targetFiles: options.targetFiles,
+			strategy: options.strategy ?? options.resolvedFeatureState?.legionStrategy,
+			maxSpecialists: options.maxSpecialists ?? options.resolvedFeatureState?.legionMaxSpecialists,
+			preferredRoles: options.preferredRoles,
+			excludeRoles: options.excludeRoles,
+		})
+		const token = await this.acquireFormationReservation(parentStreamId)
+		if (!token)
+			return {
+				formed: false,
+				classification,
+				requiresReconciliation: true,
+				reason: "A formation attempt is unresolved or already in progress.",
+			}
+		// Never release ownership on an exception: child streams or buffered writes may exist.
+		const previous = await this.recallLastLegionFormation(parentStreamId)
+		if (
+			previous?.status === "deferred" ||
+			previous?.members.some((member) => member.status === "running" || member.status === "deferred") ||
+			(previous?.status === "active" && !this.evaluateStageProgression(previous).allStagesCompleted)
+		) {
+			await this.releaseFormationReservation(parentStreamId, token)
+			return {
+				formed: false,
+				classification,
+				requiresReconciliation: true,
+				reason: `Formation ${previous.formationId} has unresolved work.`,
+			}
+		}
+		const result = await this.formAndSpawnLegionOwned(parentStreamId, options)
+		await dbPool.flush()
+		if (!(await this.releaseFormationReservation(parentStreamId, token))) {
+			return {
+				formed: false,
+				classification,
+				requiresReconciliation: true,
+				reason: "Formation ownership could not be confirmed.",
+			}
+		}
+		return result
+	}
+
+	private async formAndSpawnLegionOwned(
+		parentStreamId: string,
+		options: FormLegionOptions,
+	): Promise<{
+		formed: boolean
+		manifest?: LegionFormationManifest
+		classification: LegionClassificationResult
+		reason?: string
 	}> {
 		const featureState =
 			options.resolvedFeatureState ??
@@ -1274,6 +1339,17 @@ export class LegionCoordinator {
 		if (!parentStream) {
 			throw new Error(`Parent stream ${parentStreamId} not found`)
 		}
+		// Formations are persisted under the parent task stream. Carry only bounded,
+		// explicitly marked observations forward within that same task.
+		const previousFormation = await this.recallLastLegionFormation(parentStreamId)
+		const knowledgeScope = options.workspacePath ? legionWorkspaceScope(options.workspacePath) : undefined
+		const workspaceKnowledge = knowledgeScope ? await recallLegionKnowledge(knowledgeScope) : []
+		const previousKnowledge =
+			previousFormation &&
+			previousFormation.knowledgeScope === knowledgeScope &&
+			previousFormation.updatedAt > Date.now() - LEGION_KNOWLEDGE_TTL_MS
+				? (previousFormation?.swarmBlackboard ?? []).filter(isReusableLegionObservation)
+				: []
 
 		const parentDeferStatus = await hierarchicalDeferCoordinator.getAgentDeferStatus(parentStreamId)
 		if (!parentDeferStatus.acceptingNewWork) {
@@ -1287,7 +1363,7 @@ export class LegionCoordinator {
 			allStreams.filter((s: { status: string }) => s.status === "active").map((s: { id: string }) => s.id),
 		)
 
-		const formationId = `legion-form-${parentStreamId.slice(0, 8)}-${Date.now()}`
+		const formationId = `legion-form-${parentStreamId.slice(0, 8)}-${uuidv4()}`
 		const members: SpawnedLegionMember[] = []
 		const shouldReserve = options.reserveAssignedFiles ?? true
 
@@ -1396,7 +1472,12 @@ export class LegionCoordinator {
 			status: "active",
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
-			swarmBlackboard: options.swarmBlackboard ? [...options.swarmBlackboard] : [],
+			knowledgeScope,
+			swarmBlackboard: [...new Set([...workspaceKnowledge, ...previousKnowledge, ...(options.swarmBlackboard ?? [])])]
+				.filter((item) => typeof item === "string" && item.trim())
+				.map((item) => item.trim().slice(0, 500))
+				.filter(isReusableLegionObservation)
+				.slice(-20),
 		}
 		manifest.stageProgression = this.evaluateStageProgression(manifest)
 
@@ -1520,6 +1601,30 @@ export class LegionCoordinator {
 			.onConflict((conflict) => conflict.columns(["streamId", "key"]).doNothing())
 			.executeTakeFirst()
 		return result.numInsertedOrUpdatedRows === 1n
+	}
+
+	/** Reserve formation creation for this parent across processes; ambiguous owners do not expire. */
+	public async acquireFormationReservation(parentStreamId: string): Promise<string | undefined> {
+		await dbPool.flush()
+		const db = await getPersistentDb()
+		const token = uuidv4()
+		const result = await db
+			.insertInto("agent_memory")
+			.values({ streamId: parentStreamId, key: "legion_formation_reservation", value: token, updatedAt: Date.now() })
+			.onConflict((conflict) => conflict.columns(["streamId", "key"]).doNothing())
+			.executeTakeFirst()
+		return result.numInsertedOrUpdatedRows === 1n ? token : undefined
+	}
+
+	public async releaseFormationReservation(parentStreamId: string, token: string): Promise<boolean> {
+		const db = await getPersistentDb()
+		const result = await db
+			.deleteFrom("agent_memory")
+			.where("streamId", "=", parentStreamId)
+			.where("key", "=", "legion_formation_reservation")
+			.where("value", "=", token)
+			.executeTakeFirst()
+		return result.numDeletedRows === 1n
 	}
 
 	/** Prevent concurrent processes from forming the same objective twice while allowing settled objectives to re-form. */
@@ -1649,15 +1754,18 @@ export class LegionCoordinator {
 		manifest.members[memberIdx] = updatedMember
 
 		// F06: Extract learned heuristics and append to swarmBlackboard
-		if (outcome.summary) {
-			const heuristics = this.extractLearnedHeuristics(outcome.summary)
+		if (outcome.status === "completed" && outcome.summary) {
+			const heuristics = this.extractLearnedHeuristics(outcome.summary).filter(isReusableLegionObservation)
 			if (heuristics.length > 0) {
+				if (manifest.knowledgeScope)
+					await rememberLegionKnowledge(manifest.knowledgeScope, profile.parentStreamId, heuristics)
 				manifest.swarmBlackboard = manifest.swarmBlackboard || []
 				for (const h of heuristics) {
 					if (!manifest.swarmBlackboard.includes(h)) {
 						manifest.swarmBlackboard.push(h)
 					}
 				}
+				manifest.swarmBlackboard = manifest.swarmBlackboard.slice(-20)
 			}
 		}
 

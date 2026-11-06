@@ -75,6 +75,38 @@ describe("shared task execution state", () => {
 		assert.deepEqual(state.commands.active, [])
 		assert.deepEqual(state.queues, [])
 	})
+	it("keeps an active command reservation visible when its linked receipt is only recent", () => {
+		const ulid = randomUUID()
+		const action = executor.executions.claim(ulid, { kind: "command", input: "build", label: "build", owner: "legion:one" })
+		try {
+			executor.executions.reconcileCommand(ulid, action.snapshot.execution_id, {
+				status: "unconfirmed",
+				terminalClosed: true,
+			})
+			const command = {
+				execution_id: "command-id",
+				action_id: action.snapshot.execution_id,
+				owner: "legion:one",
+				command: "build",
+				cwd: "/workspace",
+				status: "unconfirmed",
+				output_preview: "",
+			}
+			const inventory = { active: [] as any[], recent: [command] }
+			const task = Object.assign(Object.create(Task.prototype), {
+				ulid,
+				commandExecutor: { getExecutionInventory: () => inventory },
+			}) as Task
+			let state = task.getExecutionState() as ExecutionState
+			assert.equal(state.actions.active[0].execution_id, action.snapshot.execution_id)
+			assert.equal(state.actions.active[0].status, "unconfirmed")
+			inventory.active.push({ ...command, status: "running", owner: "legion:other" })
+			state = task.getExecutionState() as ExecutionState
+			assert.equal(state.actions.active[0].execution_id, action.snapshot.execution_id)
+		} finally {
+			executor.executions.finish(action, "failed", "test cleanup")
+		}
+	})
 	it("keeps action inspection available when terminal observation fails", () => {
 		const ulid = randomUUID()
 		const resource = executor.executions.claim(ulid, { kind: "mcp_resource", input: "docs", label: "docs" })

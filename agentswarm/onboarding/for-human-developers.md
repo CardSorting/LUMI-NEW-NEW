@@ -6,45 +6,34 @@
 
 Three configurable capabilities: Legion is enabled by default; Review and Defer default to **off**.
 
-| Capability | One-liner | Main file |
-|---|---|---|
-| Hierarchical Defer & Resume | Pause a parent + all children at safe points; resume later without replaying finished work | `src/infrastructure/ai/HierarchicalDeferCoordinator.ts` |
-| Critical Completion Review | One bounded, evidence-based review after a task completes | `src/infrastructure/ai/CriticalCompletionReview.ts` |
-| The Legion | Classify a task, spawn the right specialist child agents, run them in stages, fail over once | `src/infrastructure/ai/LegionCoordinator.ts` |
+| Capability                  | One-liner                                                                                    | Main file                                               |
+| --------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Hierarchical Defer & Resume | Pause a parent + all children at safe points; resume later without replaying finished work   | `src/infrastructure/ai/HierarchicalDeferCoordinator.ts` |
+| Critical Completion Review  | One bounded, evidence-based review after a task completes                                    | `src/infrastructure/ai/CriticalCompletionReview.ts`     |
+| The Legion                  | Classify a task, spawn the right specialist child agents, run them in stages, fail over once | `src/infrastructure/ai/LegionCoordinator.ts`            |
 
 Glue: `Orchestrator.ts` (public API), `AgentSwarmConfig.ts` (toggles/precedence), `BufferedDbPool.ts` (persistence).
 
 ## 2. Mental model (3 rules)
 
-1. **Streams are independent.** Parent and children never share a transcript or inbox. The parent only *observes reports* and updates the roadmap.
+1. **Streams are independent.** Parent and children never share a transcript or inbox. The parent only _observes reports_ and updates the roadmap.
 2. **Defer is not cancel.** We never abort running work to look "suspended". We wait for a boundary, checkpoint, ack.
 3. **Everything durable lives in `agent_memory`** (key/value per stream) written through `BufferedDbPool`. No new queues or engines.
 
 ## 3. Run it
 
 ```bash
-# backend suites (Agent Swarm, Legion Host/Adapter/Task, Engage Swarm, Orchestrator, state keys, codex streaming, response handler, terminal heredoc defense — 291 tests)
-npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
-  --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
-  src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
-  src/infrastructure/ai/__tests__/Orchestrator.test.ts \
-  "src/core/task/legion/__tests__/*.test.ts" \
-  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
-  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
-  src/shared/storage/__tests__/state-keys.test.ts \
-  src/core/api/__tests__/openai-codex.streaming.test.ts \
-  src/core/task/__tests__/StreamResponseHandler.test.ts \
-  src/integrations/terminal/__tests__/heredocPolicy.test.ts \
-  src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts \
-  src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts \
-  src/hosts/vscode/terminal/TerminalOutputDecoder.test.ts \
-  src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts
+# backend suites (npm run test:swarm — 455 passing tests across 28 test suites)
+npm run test:swarm
 
-# settings UI
-cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx
+# full execution reliability suite (465 passing tests + 32 webview tests)
+npm run test:execution
+
+# settings UI (7 component tests)
+(cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 
 # types + lint
-npx tsc --noEmit && npx tsc -b webview-ui
+npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 npx biome lint --diagnostic-level=error <files you touched>
 ```
 
@@ -54,7 +43,7 @@ Run time: seconds. One test (`updateSettings … clamping`) takes ~4 s — that 
 
 Any one of:
 
-- **UI:** Settings → *Preferences* → *Agent Swarm & Hierarchy Orchestration* → pick a **Quick mode preset**.
+- **UI:** Settings → _Preferences_ → _Agent Swarm & Hierarchy Orchestration_ → pick a **Quick mode preset**.
 - **VS Code settings:** `"lumi.agentSwarm.enabled": true` (see [configuration](../architecture/configuration.md)).
 - **Env:** `LUMI_AGENT_SWARM_ENABLED=1`.
 - **Tests/code:** `toggleAgentSwarmFeature(true, { legionEnabled: true })`.
@@ -63,14 +52,14 @@ Any one of:
 
 ## 5. Where to look when…
 
-| Symptom | Look at |
-|---|---|
-| A toggle does nothing | [configuration.md](../architecture/configuration.md) precedence; `getAgentSwarmConfig()` 30 s cache (invalidated by `updateSettings`) |
-| Pipeline stuck in `waiting_for_children` | [PB-04](../playbooks/PB-04-diagnose-a-stuck-pipeline.md) |
-| `FOREIGN KEY constraint failed` on flush | [PB-06](../playbooks/PB-06-triage-sqlite-flush-errors.md), [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md) |
-| Legion specialist failed | [PB-05](../playbooks/PB-05-recover-a-failed-legion-formation.md) |
-| Adding a setting | [PB-02](../playbooks/PB-02-add-a-setting-end-to-end.md) |
-| Adding a specialist | [PB-03](../playbooks/PB-03-add-a-legion-specialist.md) |
+| Symptom                                  | Look at                                                                                                                               |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| A toggle does nothing                    | [configuration.md](../architecture/configuration.md) precedence; `getAgentSwarmConfig()` 30 s cache (invalidated by `updateSettings`) |
+| Pipeline stuck in `waiting_for_children` | [PB-04](../playbooks/PB-04-diagnose-a-stuck-pipeline.md)                                                                              |
+| `FOREIGN KEY constraint failed` on flush | [PB-06](../playbooks/PB-06-triage-sqlite-flush-errors.md), [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md)       |
+| Legion specialist failed                 | [PB-05](../playbooks/PB-05-recover-a-failed-legion-formation.md)                                                                      |
+| Adding a setting                         | [PB-02](../playbooks/PB-02-add-a-setting-end-to-end.md)                                                                               |
+| Adding a specialist                      | [PB-03](../playbooks/PB-03-add-a-legion-specialist.md)                                                                                |
 
 ## 6. Rules before you open a PR
 
@@ -83,4 +72,3 @@ Any one of:
 ## 7. Glossary & deeper reading
 
 [glossary.md](../glossary.md) · [how-it-works.md](../architecture/how-it-works.md) · [whitepaper](../papers/03-technical-whitepaper.md)
-

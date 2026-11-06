@@ -10,7 +10,7 @@ import { ToolExecutorCoordinator } from "@/core/task/tools/ToolExecutorCoordinat
 import type { TaskConfig } from "@/core/task/tools/types/TaskConfig"
 import { Logger } from "@/shared/services/Logger"
 import { DietCodeDefaultTool } from "@/shared/tools"
-import { dbPool } from "../../db/BufferedDbPool"
+import { dbPool, ShadowCommitError } from "../../db/BufferedDbPool"
 import {
 	getAgentSwarmConfig,
 	resolveEffectiveAgentSwarmState,
@@ -33,6 +33,7 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 	let streamsTable: Map<string, any>
 	let tasksTable: Map<string, any>
 	let memoryTable: Map<string, any>
+	let knowledgeTable: Map<string, any>
 
 	const matchesWhere = (row: any, where: any): boolean => {
 		if (!where) return true
@@ -44,6 +45,7 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 		if (table === "agent_streams") return streamsTable
 		if (table === "agent_tasks") return tasksTable
 		if (table === "agent_memory") return memoryTable
+		if (table === "agent_knowledge") return knowledgeTable
 		return new Map()
 	}
 
@@ -52,19 +54,26 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 	let originalAcquireDispatchToken: typeof legionCoordinator.acquireDispatchToken
 	let originalAcquireFormationDispatchToken: typeof legionCoordinator.acquireFormationDispatchToken
 	let originalAcquireAutomaticFormationToken: typeof legionCoordinator.acquireAutomaticFormationToken
+	let originalAcquireFormationReservation: typeof legionCoordinator.acquireFormationReservation
+	let originalReleaseFormationReservation: typeof legionCoordinator.releaseFormationReservation
 
 	beforeEach(() => {
 		originalIsClaimDurable = legionCoordinator.isClaimDurable
 		originalAcquireDispatchToken = legionCoordinator.acquireDispatchToken
 		originalAcquireFormationDispatchToken = legionCoordinator.acquireFormationDispatchToken
 		originalAcquireAutomaticFormationToken = legionCoordinator.acquireAutomaticFormationToken
+		originalAcquireFormationReservation = legionCoordinator.acquireFormationReservation
+		originalReleaseFormationReservation = legionCoordinator.releaseFormationReservation
 		legionCoordinator.isClaimDurable = async () => true
 		legionCoordinator.acquireDispatchToken = async () => true
 		legionCoordinator.acquireFormationDispatchToken = async () => true
 		legionCoordinator.acquireAutomaticFormationToken = async () => true
+		legionCoordinator.acquireFormationReservation = async () => "mock-reservation"
+		legionCoordinator.releaseFormationReservation = async () => true
 		streamsTable = new Map()
 		tasksTable = new Map()
 		memoryTable = new Map()
+		knowledgeTable = new Map()
 		setAgentSwarmConfigOverride(null)
 
 		const target = dbPool as any
@@ -78,10 +87,16 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			push: target.push,
 			pushBatch: target.pushBatch,
 			flush: target.flush,
+			pruneExpiredAgentKnowledge: target.pruneExpiredAgentKnowledge,
 		}
 
 		target.beginWork = async () => {}
 		target.flush = async () => {}
+		target.pruneExpiredAgentKnowledge = async (type: string, now: number) => {
+			for (const [id, row] of knowledgeTable) {
+				if (row.type === type && row.expiresAt !== null && row.expiresAt <= now) knowledgeTable.delete(id)
+			}
+		}
 		target.commitWork = async () => {}
 		target.rollbackWork = async () => {}
 
@@ -140,6 +155,8 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 		legionCoordinator.acquireDispatchToken = originalAcquireDispatchToken
 		legionCoordinator.acquireFormationDispatchToken = originalAcquireFormationDispatchToken
 		legionCoordinator.acquireAutomaticFormationToken = originalAcquireAutomaticFormationToken
+		legionCoordinator.acquireFormationReservation = originalAcquireFormationReservation
+		legionCoordinator.releaseFormationReservation = originalReleaseFormationReservation
 		setAgentSwarmConfigOverride(null)
 		const target = dbPool as any
 		for (const [k, fn] of Object.entries(originalDbMethods)) {
@@ -871,6 +888,273 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			}
 		}
 
+		it("applies pending deletions before limiting ordered disk results", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Limited query overlay")
+				for (const key of ["a", "b"]) {
+					await dbPool.push({
+						type: "insert",
+						table: "agent_memory",
+						layer: "infrastructure",
+						values: { streamId: stream.id, key, value: key, updatedAt: Date.now() },
+					})
+				}
+				await dbPool.flush()
+				await dbPool.push({
+					type: "delete",
+					table: "agent_memory",
+					layer: "infrastructure",
+					where: [
+						{ column: "streamId", value: stream.id },
+						{ column: "key", value: "a" },
+					],
+				})
+				const rows = await dbPool.selectWhere("agent_memory", { column: "streamId", value: stream.id }, undefined, {
+					orderBy: { column: "key", direction: "asc" },
+					limit: 1,
+				})
+				expect(rows.map((row) => row.key)).to.deep.equal(["b"])
+			})
+		})
+
+		it("applies status changes to warmed, status-filtered reads", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Status overlay")
+				const task = await orchestrator.createTask(stream.id, "Change status")
+				await dbPool.flush()
+				await dbPool.warmupTable("agent_tasks", "status", "pending")
+				await dbPool.push({
+					type: "update",
+					table: "agent_tasks",
+					layer: "infrastructure",
+					where: [{ column: "id", value: task.id }],
+					values: { status: "running" },
+				})
+				const pending = await dbPool.selectWhere("agent_tasks", { column: "status", value: "pending" })
+				expect(pending.some((row) => row.id === task.id)).to.equal(false)
+			})
+		})
+
+		it("returns rows moved into filtered results by pending updates, consistent with SQLite after flush", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Entering status overlay")
+				const task = await orchestrator.createTask(stream.id, "Check filtering")
+				await dbPool.flush()
+				await dbPool.push({
+					type: "update",
+					table: "agent_tasks",
+					layer: "infrastructure",
+					where: [{ column: "id", value: task.id }],
+					values: { status: "running" },
+				})
+				const queries = [
+					{ column: "status", value: "running" },
+					{ column: "status", operator: "LIKE" as const, value: "RUN%" },
+					{ column: "status", operator: "IS NOT" as const, value: null },
+				]
+				const before = await Promise.all(queries.map((where) => dbPool.selectWhere("agent_tasks", where)))
+				expect(before.every((rows) => rows.some((row) => row.id === task.id))).to.equal(true)
+				await dbPool.flush()
+				const after = await Promise.all(queries.map((where) => dbPool.selectWhere("agent_tasks", where)))
+				expect(before.map((rows) => rows.map((row) => row.id).sort())).to.deep.equal(
+					after.map((rows) => rows.map((row) => row.id).sort()),
+				)
+			})
+		})
+
+		it("orders pending nullable values like SQLite before applying a limit", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Nullable sort")
+				const first = await orchestrator.createTask(stream.id, "First task")
+				const second = await orchestrator.createTask(stream.id, "Second task")
+				await dbPool.flush()
+				await dbPool.push({
+					type: "update",
+					table: "agent_tasks",
+					layer: "infrastructure",
+					where: [{ column: "id", value: first.id }],
+					values: { result: "done" },
+				})
+				const query = () =>
+					dbPool.selectWhere("agent_tasks", { column: "streamId", value: stream.id }, undefined, {
+						orderBy: { column: "result", direction: "asc" },
+						limit: 1,
+					})
+				const before = await query()
+				expect(before.map((row) => row.id)).to.deep.equal([second.id])
+				await dbPool.flush()
+				expect((await query()).map((row) => row.id)).to.deep.equal([second.id])
+			})
+		})
+
+		it("does not match a LIKE pattern before a trailing newline", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("LIKE newline")
+				const task = await orchestrator.createTask(stream.id, "LIKE check")
+				await dbPool.flush()
+				await dbPool.push({
+					type: "update",
+					table: "agent_tasks",
+					layer: "infrastructure",
+					where: [{ column: "id", value: task.id }],
+					values: { result: "done\n" },
+				})
+				const query = () => dbPool.selectWhere("agent_tasks", { column: "result", operator: "LIKE", value: "done" })
+				expect((await query()).some((row) => row.id === task.id)).to.equal(false)
+				await dbPool.flush()
+				expect((await query()).some((row) => row.id === task.id)).to.equal(false)
+			})
+		})
+
+		it("uses the upsert conflict target rather than its where clause in buffered reads", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Upsert conflict identity")
+				for (const key of ["a", "b"]) {
+					await dbPool.push({
+						type: "insert",
+						table: "agent_memory",
+						layer: "infrastructure",
+						values: { streamId: stream.id, key, value: `old-${key}`, updatedAt: 1 },
+					})
+				}
+				await dbPool.flush()
+				await dbPool.push({
+					type: "upsert",
+					table: "agent_memory",
+					layer: "infrastructure",
+					conflictTarget: ["streamId", "key"],
+					where: [
+						{ column: "streamId", value: stream.id },
+						{ column: "key", value: "a" },
+					],
+					values: { streamId: stream.id, key: "b", value: "updated-b", updatedAt: 2 },
+				})
+				const query = () =>
+					dbPool.selectWhere("agent_memory", { column: "streamId", value: stream.id }, undefined, {
+						orderBy: { column: "key", direction: "asc" },
+					})
+				const before = (await query()).map(({ key, value }) => ({ key, value }))
+				expect(before).to.deep.equal([
+					{ key: "a", value: "old-a" },
+					{ key: "b", value: "updated-b" },
+				])
+				await dbPool.flush()
+				expect((await query()).map(({ key, value }) => ({ key, value }))).to.deep.equal(before)
+			})
+		})
+
+		it("applies column affinity when matching buffered writes and reads", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Affinity")
+				const task = await orchestrator.createTask(stream.id, "Numeric comparison")
+				await dbPool.flush()
+				await dbPool.push({
+					type: "update",
+					table: "agent_tasks",
+					layer: "infrastructure",
+					where: [{ column: "id", value: task.id }],
+					values: { complexity: 3 },
+				})
+				await dbPool.push({
+					type: "update",
+					table: "agent_tasks",
+					layer: "infrastructure",
+					where: [
+						{ column: "id", value: task.id },
+						{ column: "complexity", value: "3" },
+					],
+					values: { status: "running" },
+				})
+				const queries = [
+					{ column: "complexity", value: "3" },
+					{ column: "complexity", operator: "IN" as const, value: ["3", "4"] },
+					{ column: "complexity", operator: "<" as const, value: "not-a-number" },
+				]
+				const before = await Promise.all(queries.map((where) => dbPool.selectWhere("agent_tasks", where)))
+				expect(before.every((rows) => rows.some((row) => row.id === task.id))).to.equal(true)
+				expect(before[0].find((row) => row.id === task.id)?.status).to.equal("running")
+				await dbPool.flush()
+				const after = await Promise.all(queries.map((where) => dbPool.selectWhere("agent_tasks", where)))
+				expect(after[0].find((row) => row.id === task.id)?.status).to.equal("running")
+				expect(before.map((rows) => rows.map((row) => row.id).sort())).to.deep.equal(
+					after.map((rows) => rows.map((row) => row.id).sort()),
+				)
+			})
+		})
+
+		it("makes every table in a mixed batch visible before and after flush", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Mixed batch")
+				const task = await orchestrator.createTask(stream.id, "Batch task")
+				await dbPool.flush()
+				await dbPool.pushBatch([
+					{
+						type: "insert",
+						table: "agent_memory",
+						layer: "infrastructure",
+						values: { streamId: stream.id, key: "batch", value: "saved", updatedAt: 1 },
+					},
+					{
+						type: "update",
+						table: "agent_tasks",
+						layer: "infrastructure",
+						where: { column: "id", value: task.id },
+						values: { status: "running" },
+					},
+				])
+				const read = async () => ({
+					memory: (await dbPool.selectWhere("agent_memory", { column: "streamId", value: stream.id })).map(
+						(row) => row.value,
+					),
+					status: (await dbPool.selectOne("agent_tasks", { column: "id", value: task.id }))?.status,
+				})
+				expect(await read()).to.deep.equal({ memory: ["saved"], status: "running" })
+				await dbPool.flush()
+				expect(await read()).to.deep.equal({ memory: ["saved"], status: "running" })
+			})
+		})
+
+		it("retains causal order when a retryable flush fails", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Retry ordering")
+				const task = await orchestrator.createTask(stream.id, "Retry task")
+				await dbPool.flush()
+				await dbPool.pushBatch([
+					{
+						type: "update",
+						table: "agent_tasks",
+						layer: "infrastructure",
+						where: { column: "id", value: task.id },
+						values: { status: "running" },
+					},
+					{
+						type: "update",
+						table: "agent_tasks",
+						layer: "infrastructure",
+						where: { column: "id", value: task.id },
+						values: { status: "completed" },
+					},
+				])
+				const failure = sinon
+					.stub(dbPool as any, "ensureDb")
+					.rejects(Object.assign(new Error("busy"), { code: "SQLITE_BUSY" }))
+				try {
+					let rejected = false
+					try {
+						await dbPool.flush()
+					} catch {
+						rejected = true
+					}
+					expect(rejected).to.equal(true)
+				} finally {
+					failure.restore()
+				}
+				expect((await dbPool.selectOne("agent_tasks", { column: "id", value: task.id }))?.status).to.equal("completed")
+				await dbPool.flush()
+				expect((await dbPool.selectOne("agent_tasks", { column: "id", value: task.id }))?.status).to.equal("completed")
+			})
+		})
+
 		it("persists completeStream's final status and summary to SQLite and exposes them to non-overlay readers", async () => {
 			await withRealSqlite(async (file) => {
 				const stream = await orchestrator.createStream("Persist completion state")
@@ -882,7 +1166,6 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				const visible = await dbPool.selectOne("agent_streams", { column: "id", value: stream.id })
 				expect(visible?.status).to.equal("completed")
 
-				await dbPool.flush()
 				const Database = (await import("better-sqlite3")).default
 				const raw = new Database(file, { readonly: true })
 				try {
@@ -895,6 +1178,29 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				} finally {
 					raw.close()
 				}
+			})
+		})
+
+		it("does not settle completion when persistence fails", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Completion persistence failure")
+				await dbPool.flush()
+				const flush = sinon.stub(dbPool, "flush").rejects(new Error("persistence unavailable"))
+				const settle = sinon.spy(legionCoordinator, "settleSpecialistStream")
+				try {
+					let rejected = false
+					try {
+						await orchestrator.completeStream(stream.id, "unfinished persistence")
+					} catch {
+						rejected = true
+					}
+					expect(rejected).to.equal(true)
+					expect(settle.called).to.equal(false)
+				} finally {
+					flush.restore()
+					settle.restore()
+				}
+				await dbPool.flush()
 			})
 		})
 
@@ -970,7 +1276,7 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			})
 		})
 
-		it("executes operations in strict causal opSeq order: upsert followed by delete in same batch deletes record", async () => {
+		it("preserves causal order for writes to the same row across layers", async () => {
 			await withRealSqlite(async (file) => {
 				const stream = await orchestrator.createStream("Causal stream")
 				await dbPool.flush()
@@ -984,7 +1290,7 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 						{ column: "key", value: "causal_test_key" },
 					],
 					values: { streamId: stream.id, key: "causal_test_key", value: "alive", updatedAt: Date.now() },
-					layer: "domain",
+					layer: "infrastructure",
 				})
 				await dbPool.push({
 					type: "delete",
@@ -1010,22 +1316,24 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			})
 		})
 
-		it("throws on non-retryable flush errors and logs structured failure without swallowing", async () => {
+		it("retains a failed batch, blocks new writes and allows an explicit retry", async () => {
 			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Failed flush")
+				const task = await orchestrator.createTask(stream.id, "Retained update")
+				await dbPool.flush()
 				const logSpy = sinon.spy(Logger, "error")
+				let failure: sinon.SinonStub | undefined
 				try {
 					await dbPool.push({
-						type: "insert",
+						type: "update",
 						table: "agent_tasks",
-						values: {
-							id: "bad-task",
-							streamId: "non-existent-stream-fk-fail",
-							description: "broken",
-							status: "invalid-status-type",
-							createdAt: Date.now(),
-						},
+						where: { column: "id", value: task.id },
+						values: { status: "running" },
 						layer: "plumbing",
 					})
+					failure = sinon
+						.stub(dbPool as any, "ensureDb")
+						.rejects(Object.assign(new Error("constraint"), { code: "SQLITE_CONSTRAINT" }))
 					let errorThrown: unknown = null
 					try {
 						await dbPool.flush()
@@ -1034,9 +1342,264 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 					}
 					expect(errorThrown).to.not.equal(null)
 					expect(logSpy.calledWithMatch(sinon.match(/\[DbPool\] Non-retryable flush failure:/))).to.equal(true)
+					failure.restore()
+					failure = undefined
+					expect((await dbPool.selectOne("agent_tasks", { column: "id", value: task.id }))?.status).to.equal("running")
+					let blocked = false
+					try {
+						await dbPool.push({
+							type: "update",
+							table: "agent_tasks",
+							where: { column: "id", value: task.id },
+							values: { status: "completed" },
+						})
+					} catch {
+						blocked = true
+					}
+					expect(blocked).to.equal(true)
+					await dbPool.flush()
+					await dbPool.push({
+						type: "update",
+						table: "agent_tasks",
+						where: { column: "id", value: task.id },
+						values: { status: "completed" },
+					})
+					await dbPool.flush()
+					expect((await dbPool.selectOne("agent_tasks", { column: "id", value: task.id }))?.status).to.equal(
+						"completed",
+					)
 				} finally {
+					failure?.restore()
 					logSpy.restore()
 				}
+			})
+		})
+
+		it("allows shutdown to be retried after a flush failure", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Shutdown retry")
+				await dbPool.flush()
+				await dbPool.push({
+					type: "update",
+					table: "agent_streams",
+					where: { column: "id", value: stream.id },
+					values: { status: "completed" },
+				})
+				const failure = sinon
+					.stub(dbPool as any, "ensureDb")
+					.rejects(Object.assign(new Error("failure"), { code: "SQLITE_CONSTRAINT" }))
+				try {
+					let rejected = false
+					try {
+						await dbPool.stop()
+					} catch {
+						rejected = true
+					}
+					expect(rejected).to.equal(true)
+				} finally {
+					failure.restore()
+				}
+				await dbPool.stop()
+			})
+		})
+
+		it("retains a transaction shadow when commit fails and exposes its recovery identity", async () => {
+			await withRealSqlite(async () => {
+				const stream = await orchestrator.createStream("Retained transaction")
+				await dbPool.flush()
+				const commit = sinon.stub(dbPool, "commitWork").rejects(new Error("commit unavailable"))
+				let failure: unknown
+				try {
+					await dbPool.runTransaction(async (agentId) => {
+						await dbPool.push(
+							{
+								type: "insert",
+								table: "agent_memory",
+								values: { streamId: stream.id, key: "retained", value: "work", updatedAt: 1 },
+							},
+							agentId,
+						)
+					})
+				} catch (error) {
+					failure = error
+				} finally {
+					commit.restore()
+				}
+				expect(failure).to.be.instanceOf(ShadowCommitError)
+				const agentId = (failure as ShadowCommitError).agentId
+				expect(
+					(await dbPool.selectWhere("agent_memory", { column: "streamId", value: stream.id }, agentId)).map(
+						(row) => row.value,
+					),
+				).to.deep.equal(["work"])
+				let shutdownBlocked = false
+				try {
+					await dbPool.stop()
+				} catch {
+					shutdownBlocked = true
+				}
+				expect(shutdownBlocked).to.equal(true)
+				await dbPool.commitWork(agentId)
+				await dbPool.flush()
+				expect(
+					(await dbPool.selectWhere("agent_memory", { column: "streamId", value: stream.id })).map((row) => row.value),
+				).to.deep.equal(["work"])
+			})
+		})
+
+		it("blocks admission during shutdown and shares concurrent shutdown calls", async () => {
+			await withRealSqlite(async (file) => {
+				const stream = await orchestrator.createStream("Shutdown admission")
+				await dbPool.flush()
+				await dbPool.push({
+					type: "update",
+					table: "agent_streams",
+					where: { column: "id", value: stream.id },
+					values: { status: "completed" },
+				})
+				let release!: () => void
+				let entered!: () => void
+				const blocked = new Promise<void>((resolve) => {
+					release = resolve
+				})
+				const started = new Promise<void>((resolve) => {
+					entered = resolve
+				})
+				const original = (dbPool as any).ensureDb.bind(dbPool)
+				const stub = sinon.stub(dbPool as any, "ensureDb").callsFake(async () => {
+					entered()
+					await blocked
+					return original()
+				})
+				try {
+					const stopping = dbPool.stop()
+					await started
+					expect(dbPool.stop()).to.equal(stopping)
+					let rejected = false
+					try {
+						await dbPool.push({
+							type: "update",
+							table: "agent_streams",
+							where: { column: "id", value: stream.id },
+							values: { status: "failed" },
+						})
+					} catch {
+						rejected = true
+					}
+					expect(rejected).to.equal(true)
+					release()
+					await stopping
+				} finally {
+					release()
+					stub.restore()
+				}
+				const Database = (await import("better-sqlite3")).default
+				const raw = new Database(file, { readonly: true })
+				try {
+					expect(
+						(raw.prepare("select status from agent_streams where id = ?").get(stream.id) as { status: string })
+							.status,
+					).to.equal("completed")
+				} finally {
+					raw.close()
+				}
+			})
+		})
+
+		it("refuses shutdown while a transaction shadow is active", async () => {
+			await withRealSqlite(async () => {
+				await dbPool.beginWork("active-shadow")
+				let rejected = false
+				try {
+					await dbPool.stop()
+				} catch {
+					rejected = true
+				}
+				expect(rejected).to.equal(true)
+				await dbPool.rollbackWork("active-shadow")
+			})
+		})
+
+		it("cleans empty finished shadows without discarding their uncommitted work", async () => {
+			await withRealSqlite(async () => {
+				const occupied = await orchestrator.createStream("Finished with shadow work")
+				const empty = await orchestrator.createStream("Finished with empty shadow")
+				await dbPool.pushBatch(
+					[occupied, empty].map((stream) => ({
+						type: "update" as const,
+						table: "agent_streams" as const,
+						where: { column: "id", value: stream.id },
+						values: { status: "completed" },
+					})),
+				)
+				await dbPool.flush()
+				await dbPool.push(
+					{
+						type: "insert",
+						table: "agent_memory",
+						values: { streamId: occupied.id, key: "partial", value: "preserved", updatedAt: 1 },
+					},
+					occupied.id,
+				)
+				await dbPool.beginWork(empty.id)
+				await (dbPool as any).cleanupShadows()
+				expect((dbPool as any).agentShadows.has(empty.id)).to.equal(false)
+				expect(
+					(await dbPool.selectWhere("agent_memory", { column: "streamId", value: occupied.id }, occupied.id)).map(
+						(row) => row.value,
+					),
+				).to.deep.equal(["preserved"])
+				await dbPool.commitWork(occupied.id)
+				await dbPool.flush()
+				expect(
+					(await dbPool.selectWhere("agent_memory", { column: "streamId", value: occupied.id })).map(
+						(row) => row.value,
+					),
+				).to.deep.equal(["preserved"])
+			})
+		})
+
+		it("preserves a failing specialist's shadow findings before recording failure", async () => {
+			await withRealSqlite(async (file) => {
+				const stream = await orchestrator.createStream("Partial work before failure")
+				await dbPool.flush()
+				await dbPool.pushBatch(
+					[
+						{
+							type: "insert",
+							table: "agent_memory",
+							values: { streamId: stream.id, key: "partial_finding", value: "useful evidence", updatedAt: 1 },
+						},
+						{
+							type: "update",
+							table: "agent_streams",
+							where: { column: "id", value: stream.id },
+							values: { status: "active" },
+						},
+					],
+					stream.id,
+				)
+				await orchestrator.failStream(stream.id, "execution failed", { skipFailover: true })
+				const Database = (await import("better-sqlite3")).default
+				const raw = new Database(file, { readonly: true })
+				try {
+					expect(
+						(
+							raw
+								.prepare("select value from agent_memory where streamId = ? and key = ?")
+								.get(stream.id, "partial_finding") as { value: string }
+						).value,
+					).to.equal("useful evidence")
+					expect(
+						(raw.prepare("select status from agent_streams where id = ?").get(stream.id) as { status: string })
+							.status,
+					).to.equal("failed")
+				} finally {
+					raw.close()
+				}
+				expect(await orchestrator.recallMemory(stream.id, "partial_finding")).to.equal("useful evidence")
+				expect(await orchestrator.recallMemory(stream.id, "failure_reason")).to.equal("execution failed")
+				expect((await dbPool.selectOne("agent_streams", { column: "id", value: stream.id }))?.status).to.equal("failed")
 			})
 		})
 
@@ -1649,6 +2212,59 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			toggleAgentSwarmFeature(true, { legionEnabled: true, legionStrategy: "full_legion", legionMaxSpecialists: 3 })
 		})
 
+		it("guards direct formation calls with the parent reservation", async () => {
+			const parent = await orchestrator.createStream("Parent: reserved direct formation")
+			const reservation = sinon.stub(legionCoordinator, "acquireFormationReservation").resolves(undefined)
+			try {
+				const before = streamsTable.size
+				const result = await orchestrator.formLegion(parent.id, { taskDescription: "Implement and verify" })
+				expect(result.formed).to.equal(false)
+				expect(result.requiresReconciliation).to.equal(true)
+				expect(streamsTable.size).to.equal(before)
+			} finally {
+				reservation.restore()
+			}
+		})
+
+		it("retains the reservation when formation creation fails", async () => {
+			const parent = await orchestrator.createStream("Parent: failed direct formation")
+			const failure = sinon.stub(legionCoordinator as any, "formAndSpawnLegionOwned").rejects(new Error("storage failure"))
+			const release = sinon.spy(legionCoordinator, "releaseFormationReservation")
+			try {
+				try {
+					await orchestrator.formLegion(parent.id, { taskDescription: "Implement and verify" })
+					expect.fail("expected formation failure")
+				} catch (error) {
+					expect((error as Error).message).to.equal("storage failure")
+				}
+				sinon.assert.notCalled(release)
+			} finally {
+				failure.restore()
+				release.restore()
+			}
+		})
+
+		it("blocks a direct formation if a partially failed formation still has a running member", async () => {
+			const parent = await orchestrator.createStream("Parent: partial failure with live specialist")
+			const first = await formPipelineLegion(parent.id)
+			const running = {
+				...first.manifest,
+				status: "partial_failure" as const,
+				members: first.manifest.members.map((member, index) => ({
+					...member,
+					status: index === 0 ? ("running" as const) : member.status,
+				})),
+			}
+			const recall = sinon.stub(legionCoordinator, "recallLastLegionFormation").resolves(running)
+			try {
+				const result = await orchestrator.formLegion(parent.id, { taskDescription: "Another objective" })
+				expect(result.formed).to.equal(false)
+				expect(result.requiresReconciliation).to.equal(true)
+			} finally {
+				recall.restore()
+			}
+		})
+
 		it("gates stages as a DAG (lead -> parallel -> verification), hands lead context downstream, and synthesizes once finished", async () => {
 			const parent = await orchestrator.createStream("Parent: staged delivery")
 			const { lead, worker, verifier } = await formPipelineLegion(parent.id)
@@ -1783,14 +2399,128 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 					return { status: "completed" as const, summary: "Specialist finished" }
 				},
 			}
-			const base = { parentStreamId: parent.id, taskDescription, host, signal: new AbortController().signal }
+			const base = {
+				parentStreamId: parent.id,
+				taskDescription,
+				workspacePath: "/project/automatic",
+				host,
+				signal: new AbortController().signal,
+			}
 			expect((await runAutomaticLegion({ ...base, delegationAllowed: false })).decision).to.equal("local")
 			expect(await orchestrator.recallLastLegionFormation(parent.id)).to.equal(null)
 			const result = await runAutomaticLegion({ ...base, delegationAllowed: true })
 			expect(result.decision).to.equal("delegated")
 			if (result.decision === "delegated") expect(result.pipeline.status).to.equal("completed")
+			const { legionWorkspaceScope } = await import("../LegionKnowledge")
+			expect((await orchestrator.recallLastLegionFormation(parent.id))?.knowledgeScope).to.equal(
+				legionWorkspaceScope("/project/automatic"),
+			)
 			expect(calls).to.be.greaterThan(1)
 			expect((await runAutomaticLegion({ ...base, delegationAllowed: true })).decision).to.equal("local")
+		})
+
+		it("does not form a new team while the prior formation has an unconfirmed running specialist", async () => {
+			const parent = await orchestrator.createStream("Parent: ambiguous running specialist")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			expect(await legionCoordinator.claimReadySpecialist(lead.streamId)).to.equal(true)
+			const result = await runAutomaticLegion({
+				parentStreamId: parent.id,
+				taskDescription: "Implement and verify the project with specialists",
+				delegationAllowed: true,
+				host: {
+					execute: async () => {
+						throw new Error("must not dispatch")
+					},
+				},
+				signal: new AbortController().signal,
+			})
+			expect(result).to.deep.equal({ decision: "needs_reconciliation", formationId: manifest.formationId })
+			expect((await orchestrator.recallLastLegionFormation(parent.id))?.formationId).to.equal(manifest.formationId)
+		})
+
+		it("passes completed observations to later stages and persists scoped knowledge for later tasks", async () => {
+			const parent = await orchestrator.createStream("Parent: learning continuity")
+			const { manifest, lead, worker, verifier } = await formPipelineLegion(parent.id, { workspacePath: "/project-a" })
+			const credentialShapedValue = `ghp_${"a".repeat(36)}`
+			await orchestrator.completeStream(
+				lead.streamId,
+				`Evidence gathered.\nHeuristic: use the local test fixture\nHeuristic: API key is private\nHeuristic: ${credentialShapedValue}`,
+			)
+			const progress = await orchestrator.getLegionStageProgression(parent.id, manifest.formationId)
+			expect(progress?.priorStageHandoffContext.join("\n")).to.include("use the local test fixture")
+			expect(progress?.swarmBlackboard).not.to.include(credentialShapedValue)
+			await orchestrator.completeStream(worker.streamId, "implementation finished")
+			await orchestrator.completeStream(verifier.streamId, "verification finished")
+			const next = await formPipelineLegion(parent.id, {
+				taskDescription: "A follow-up task for this parent",
+				workspacePath: "/project-a",
+			})
+			expect(next.manifest.swarmBlackboard).to.include("use the local test fixture")
+			expect(next.manifest.swarmBlackboard).not.to.include("API key is private")
+			const otherParent = await orchestrator.createStream("Parent: unrelated task")
+			const unrelated = await formPipelineLegion(otherParent.id, { workspacePath: "/project-b" })
+			expect(unrelated.manifest.swarmBlackboard).not.to.include("use the local test fixture")
+			const laterParent = await orchestrator.createStream("Parent: later task")
+			const later = await formPipelineLegion(laterParent.id, { workspacePath: "/project-a" })
+			expect(later.manifest.swarmBlackboard).to.include("use the local test fixture")
+			expect(later.manifest.swarmBlackboard).not.to.include("API key is private")
+			expect(later.manifest.swarmBlackboard).not.to.include(credentialShapedValue)
+			for (const record of knowledgeTable.values()) record.expiresAt = Date.now() - 1
+			const expiredParent = await orchestrator.createStream("Parent: expired observations")
+			const expired = await formPipelineLegion(expiredParent.id, { workspacePath: "/project-a" })
+			expect(expired.manifest.swarmBlackboard).not.to.include("use the local test fixture")
+		})
+
+		it("rejects common credential shapes from reusable knowledge without dropping ordinary observations", async () => {
+			const { isReusableLegionObservation } = await import("../LegionKnowledge")
+			const credentialShapes = [
+				`ghp_${"a".repeat(36)}`,
+				`github_pat_${"b".repeat(30)}`,
+				`sk-proj-${"c".repeat(40)}`,
+				`AKIA${"D".repeat(16)}`,
+				`AIza${"e".repeat(35)}`,
+				`xoxb-${"f".repeat(30)}`,
+				`eyJ${"g".repeat(12)}.${"h".repeat(12)}.${"i".repeat(12)}`,
+				"https://user:example-value@example.invalid/project",
+				"https://example.invalid/file?signature=example-value",
+			]
+			for (const value of credentialShapes) expect(isReusableLegionObservation(`observed ${value}`)).to.equal(false)
+			expect(isReusableLegionObservation("Run npm test before building the webview")).to.equal(true)
+			expect(isReusableLegionObservation("Use https://example.invalid/docs for the migration guide")).to.equal(true)
+		})
+
+		it("only carries prior blackboard observations across matching workspace scopes", async () => {
+			for (const [previousPath, nextPath, shouldCarry] of [
+				[undefined, "/scope-a", false],
+				["/scope-a", undefined, false],
+				["/scope-a", "/scope-b", false],
+				[undefined, undefined, true],
+				["/scope-a", "/scope-a", true],
+			] as const) {
+				const parent = await orchestrator.createStream(`Parent: scope ${previousPath} ${nextPath}`)
+				const first = await formPipelineLegion(parent.id, {
+					workspacePath: previousPath,
+					swarmBlackboard: ["observation from previous formation", "API key is private"],
+				})
+				for (const member of first.manifest.members) await orchestrator.completeStream(member.streamId, "done")
+				const next = await formPipelineLegion(parent.id, { workspacePath: nextPath })
+				expect(next.manifest.swarmBlackboard?.includes("observation from previous formation")).to.equal(shouldCarry)
+				expect(next.manifest.swarmBlackboard).not.to.include("API key is private")
+			}
+		})
+
+		it("does not revive expired observations from an old formation", async () => {
+			const parent = await orchestrator.createStream("Parent: old observations")
+			const first = await formPipelineLegion(parent.id, { swarmBlackboard: ["outdated observation"] })
+			for (const member of first.manifest.members) await orchestrator.completeStream(member.streamId, "done")
+			const now = Date.now()
+			const clock = sinon.stub(Date, "now").returns(now + 31 * 24 * 60 * 60 * 1000)
+			try {
+				const next = await formPipelineLegion(parent.id)
+				expect(next.manifest.swarmBlackboard).not.to.include("outdated observation")
+			} finally {
+				clock.restore()
+			}
 		})
 
 		it("forms a team and runs isolated provider conversations through the tool adapter", async () => {
@@ -1876,6 +2606,117 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			expect(calls).to.equal(1)
 		})
 
+		it("completes the formation when a progress callback rejects after a claim", async () => {
+			const parent = await orchestrator.createStream("Parent: broken progress observer")
+			const { manifest } = await formPipelineLegion(parent.id)
+			let calls = 0
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						calls++
+						return { status: "completed", summary: "done" }
+					},
+				},
+				new AbortController().signal,
+				{
+					onProgress: (event) => {
+						if (event.status === "member_started") throw new Error("observer unavailable")
+					},
+				},
+			)
+			expect(result.status).to.equal("completed")
+			expect(calls).to.equal(manifest.members.length)
+		})
+
+		it("continues when a progress callback never settles", async () => {
+			const parent = await orchestrator.createStream("Parent: stalled progress observer")
+			const { manifest } = await formPipelineLegion(parent.id)
+			let calls = 0
+			const result = await runLegionPipeline(
+				parent.id,
+				manifest.formationId,
+				{
+					execute: async () => {
+						calls++
+						return { status: "completed", summary: "done" }
+					},
+				},
+				new AbortController().signal,
+				{
+					onProgress: (event) => (event.status === "member_started" ? new Promise<void>(() => {}) : undefined),
+				},
+			)
+			expect(result.status).to.equal("completed")
+			expect(calls).to.equal(manifest.members.length)
+		})
+
+		it("settles a claimed specialist when cancellation occurs during progress reporting", async () => {
+			const parent = await orchestrator.createStream("Parent: cancelled progress observer")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			const controller = new AbortController()
+			const execute = sinon.spy(async () => ({ status: "completed" as const, summary: "done" }))
+			const result = await runLegionPipeline(parent.id, manifest.formationId, { execute }, controller.signal, {
+				onProgress: (event) => {
+					if (event.status === "member_started") {
+						controller.abort()
+						return new Promise<void>(() => {})
+					}
+					return undefined
+				},
+			})
+			expect(result.status).to.equal("cancelled")
+			sinon.assert.notCalled(execute)
+			const after = (await orchestrator.recallLastLegionFormation(parent.id))!
+			expect(after.members.find((entry) => entry.streamId === lead.streamId)?.status).to.equal("failed")
+		})
+
+		it("requires reconciliation if pre-start cancellation cannot be recorded", async () => {
+			const parent = await orchestrator.createStream("Parent: cancellation settlement failure")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			const controller = new AbortController()
+			const execute = sinon.spy(async () => ({ status: "completed" as const, summary: "unused" }))
+			const { orchestrator: runnerOrchestrator } = await import("../Orchestrator")
+			const fail = sinon.stub(runnerOrchestrator, "failStream").rejects(new Error("storage unavailable"))
+			try {
+				const result = await runLegionPipeline(parent.id, manifest.formationId, { execute }, controller.signal, {
+					onProgress: (event) => {
+						if (event.status === "member_started") controller.abort()
+					},
+				})
+				expect(result.status).to.equal("needs_reconciliation")
+				expect(result.detail).to.include("not started")
+				sinon.assert.notCalled(execute)
+				expect(
+					(await orchestrator.recallLastLegionFormation(parent.id))!.members.find(
+						(member) => member.streamId === lead.streamId,
+					)?.status,
+				).to.equal("running")
+			} finally {
+				fail.restore()
+			}
+		})
+
+		it("requires reconciliation when cancellation interrupts tool initialization", async () => {
+			const parent = await orchestrator.createStream("Parent: uncertain tool initialization")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			const controller = new AbortController()
+			const host = new LegionAgentHost({
+				createApi: () => ({}) as ApiHandler,
+				createTools: async () => {
+					controller.abort()
+					return await new Promise<never>(() => {})
+				},
+			})
+			const result = await runLegionPipeline(parent.id, manifest.formationId, host, controller.signal)
+			expect(result.status).to.equal("needs_reconciliation")
+			expect(result.detail).to.include("initialization")
+			const after = (await orchestrator.recallLastLegionFormation(parent.id))!
+			expect(after.members.find((entry) => entry.streamId === lead.streamId)?.status).to.equal("running")
+			expect(after.members).to.have.length(manifest.members.length)
+		})
+
 		it("does not create a replacement when a host stops due to cancellation", async () => {
 			const parent = await orchestrator.createStream("Parent: cancellation")
 			const { manifest } = await formPipelineLegion(parent.id)
@@ -1917,6 +2758,19 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			expect((await orchestrator.recallLastLegionFormation(parent.id))!.members).to.have.length(manifest.members.length)
 		})
 
+		it("keeps a host rejection unresolved instead of recording a settled failure", async () => {
+			const parent = await orchestrator.createStream("Parent: host rejected")
+			const { manifest, lead } = await formPipelineLegion(parent.id)
+			const execute = sinon.stub().rejects(new Error("connection lost"))
+			const result = await runLegionPipeline(parent.id, manifest.formationId, { execute }, new AbortController().signal)
+			expect(result.status).to.equal("needs_reconciliation")
+			expect(result.detail).to.include("without confirming")
+			sinon.assert.calledOnce(execute)
+			const after = (await orchestrator.recallLastLegionFormation(parent.id))!
+			expect(after.members.find((member) => member.streamId === lead.streamId)?.status).to.equal("running")
+			expect(after.members).to.have.length(manifest.members.length)
+		})
+
 		it("leaves a specialist running when a command outcome is unresolved", async () => {
 			const parent = await orchestrator.createStream("Parent: active command")
 			const { manifest, lead } = await formPipelineLegion(parent.id)
@@ -1936,6 +2790,43 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				)?.status,
 			).to.equal("running")
 		})
+
+		for (const outcome of ["completed", "failed"] as const) {
+			it(`requires reconciliation when a specialist ${outcome} result cannot be settled`, async () => {
+				const parent = await orchestrator.createStream(`Parent: ${outcome} settlement failure`)
+				const { manifest, lead } = await formPipelineLegion(parent.id)
+				const { orchestrator: runnerOrchestrator } = await import("../Orchestrator")
+				const settlement = sinon
+					.stub(runnerOrchestrator, outcome === "completed" ? "completeStream" : "failStream")
+					.rejects(new Error("storage unavailable"))
+				let calls = 0
+				try {
+					const result = await runLegionPipeline(
+						parent.id,
+						manifest.formationId,
+						{
+							execute: async () => {
+								calls++
+								return outcome === "completed"
+									? { status: "completed", summary: "partial <evidence>" }
+									: { status: "failed", reason: "failed execution", safeToRetry: true }
+							},
+						},
+						new AbortController().signal,
+					)
+					expect(result.status).to.equal("needs_reconciliation")
+					if (outcome === "completed") expect(result.detail).to.include("partial <evidence>")
+					expect(calls).to.equal(1)
+					expect(
+						(await orchestrator.recallLastLegionFormation(parent.id))!.members.find(
+							(member) => member.streamId === lead.streamId,
+						)?.status,
+					).to.equal("running")
+				} finally {
+					settlement.restore()
+				}
+			})
+		}
 
 		it("does not launch a specialist when its claim is not durable", async () => {
 			const parent = await orchestrator.createStream("Parent: durability failure")
@@ -2089,6 +2980,8 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 			legionCoordinator.acquireDispatchToken = originalAcquireDispatchToken
 			legionCoordinator.acquireFormationDispatchToken = originalAcquireFormationDispatchToken
 			legionCoordinator.acquireAutomaticFormationToken = originalAcquireAutomaticFormationToken
+			legionCoordinator.acquireFormationReservation = originalAcquireFormationReservation
+			legionCoordinator.releaseFormationReservation = originalReleaseFormationReservation
 			const target = dbPool as any
 			for (const [k, fn] of Object.entries(originalDbMethods)) {
 				target[k] = fn
@@ -2131,12 +3024,30 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 						claimed: boolean
 						driver: boolean
 						dispatch: boolean
+						reservation?: string
 					}
 				})
 				expect(claims[0].root).to.equal(claims[1].root)
 				expect(claims.filter((claim) => claim.claimed)).to.have.length(1)
 				expect(claims.filter((claim) => claim.driver)).to.have.length(1)
 				expect(claims.filter((claim) => claim.dispatch)).to.have.length(1)
+				expect(claims.filter((claim) => claim.reservation)).to.have.length(1)
+				const token = claims.find((claim) => claim.reservation)!.reservation!
+				const { hasOutstandingFormationReservation } = await import("../LegionExecutionReceipt")
+				expect(await hasOutstandingFormationReservation(claims[0].root)).to.equal(true)
+				expect(await legionCoordinator.acquireFormationReservation(claims[0].root)).to.equal(undefined)
+				const blockedDirect = await orchestrator.formLegion(claims[0].root, {
+					taskDescription: "A different direct formation attempt",
+					forceEnable: true,
+				})
+				expect(blockedDirect.formed).to.equal(false)
+				expect(blockedDirect.requiresReconciliation).to.equal(true)
+				expect(await legionCoordinator.releaseFormationReservation(claims[0].root, "wrong-token")).to.equal(false)
+				expect(await legionCoordinator.releaseFormationReservation(claims[0].root, token)).to.equal(true)
+				expect(await hasOutstandingFormationReservation(claims[0].root)).to.equal(false)
+				const replacement = await legionCoordinator.acquireFormationReservation(claims[0].root)
+				expect(replacement).to.be.a("string")
+				expect(await legionCoordinator.releaseFormationReservation(claims[0].root, replacement!)).to.equal(true)
 				const roots = await Promise.all([
 					orchestrator.getOrCreateLegionTaskStream("same-task", "objective"),
 					orchestrator.getOrCreateLegionTaskStream("same-task", "objective"),
@@ -2149,16 +3060,19 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				expect(formations.filter(Boolean)).to.have.length(1)
 				const { hasLegionFormationIntent } = await import("../LegionExecutionReceipt")
 				expect(await hasLegionFormationIntent(roots[0].id)).to.equal(true)
-				const { manifest: formed, lead, worker } = await formPipelineLegion(parent.id)
+				const {
+					manifest: formed,
+					lead,
+					worker,
+				} = await formPipelineLegion(parent.id, { workspacePath: "/workspace/real-test" })
 				await dbPool.flush()
-				const { beginLegionOperation, finishLegionOperation, getLegionOperationEvidence } = await import(
-					"../LegionExecutionReceipt"
-				)
+				const { beginLegionOperation, finishLegionOperation, getLegionOperationEvidence, formatLegionOperationEvidence } =
+					await import("../LegionExecutionReceipt")
 				const receipt = await beginLegionOperation(lead.streamId, "call-1", "write_to_file", {
 					path: "src/a.ts",
 					content: "sensitive content",
 				})
-				expect((await getLegionOperationEvidence([lead.streamId]))[0].status).to.equal("started")
+				expect((await getLegionOperationEvidence([lead.streamId])).receipts[0].status).to.equal("started")
 				let duplicateRejected = false
 				try {
 					await beginLegionOperation(lead.streamId, "call-1", "write_to_file", {})
@@ -2167,12 +3081,111 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				}
 				expect(duplicateRejected).to.equal(true)
 				await finishLegionOperation(lead.streamId, "call-1", receipt, "returned")
+				let missingReceipt = ""
+				try {
+					await finishLegionOperation(lead.streamId, "missing-call", receipt, "returned")
+				} catch (error) {
+					missingReceipt = String(error)
+				}
+				expect(missingReceipt).to.include("receipt is missing")
 				await beginLegionOperation(lead.streamId, "call-2", "apply_patch", {
 					input: "*** Update File: src/b.ts\nsecret patch contents",
 				})
 				const evidence = await getLegionOperationEvidence([lead.streamId])
-				expect(evidence.map((entry) => entry.status)).to.have.members(["started", "returned"])
+				expect(evidence.receipts.map((entry) => entry.status)).to.have.members(["started", "returned"])
+				expect(evidence.receipts.every((entry) => entry.streamId === lead.streamId)).to.equal(true)
 				expect(JSON.stringify(evidence)).to.include("src/b.ts").and.not.include("secret patch contents")
+				await beginLegionOperation(lead.streamId, "second-call-same-path", "apply_patch", {
+					input: "*** Update File: src/b.ts",
+				})
+				const samePath = (await getLegionOperationEvidence([lead.streamId])).receipts.filter((item) =>
+					item.paths.includes("src/b.ts"),
+				)
+				expect(samePath).to.have.length(2)
+				expect(new Set(samePath.map((item) => item.receiptId)).size).to.equal(2)
+				expect(samePath.every((item) => /^[a-f0-9]{64}$/.test(item.receiptId ?? ""))).to.equal(true)
+				expect(
+					(await getLegionOperationEvidence([lead.streamId])).receipts
+						.filter((item) => item.paths.includes("src/b.ts"))
+						.map((item) => item.receiptId)
+						.sort(),
+				).to.deep.equal(samePath.map((item) => item.receiptId).sort())
+				const patchInput = Array.from({ length: 21 }, (_, index) => `*** Update File: src/file-${index}.ts`).join("\n")
+				const largeReceipt = await beginLegionOperation(lead.streamId, "large-patch", "apply_patch", {
+					input: patchInput,
+				})
+				expect(largeReceipt.paths).to.have.length(20)
+				expect(largeReceipt.pathsTruncated).to.equal(true)
+				const largeEvidence = await getLegionOperationEvidence([lead.streamId])
+				expect(largeEvidence.receipts.find((item) => item.paths.includes("src/file-0.ts"))?.pathsTruncated).to.equal(true)
+				expect(JSON.parse(formatLegionOperationEvidence(largeEvidence)).details_truncated).to.equal(true)
+				const competing = await beginLegionOperation(lead.streamId, "call-race", "write_to_file", { path: "race.ts" })
+				const settlements = await Promise.allSettled([
+					finishLegionOperation(lead.streamId, "call-race", competing, "returned"),
+					finishLegionOperation(lead.streamId, "call-race", competing, "uncertain"),
+				])
+				expect(settlements.filter((entry) => entry.status === "fulfilled")).to.have.length(1)
+				expect(settlements.filter((entry) => entry.status === "rejected")).to.have.length(1)
+				const settled = (await getLegionOperationEvidence([lead.streamId])).receipts.find((entry) =>
+					entry.paths.includes("race.ts"),
+				)!
+				expect(settled.status).to.equal(settlements[0].status === "fulfilled" ? "returned" : "uncertain")
+				try {
+					await finishLegionOperation(
+						lead.streamId,
+						"call-race",
+						competing,
+						settled.status === "returned" ? "uncertain" : "returned",
+					)
+					expect.fail("a settled receipt must not be overwritten")
+				} catch (error) {
+					expect(String(error)).to.include("already settled")
+				}
+				const { getPersistentDb } = await import("../../db/Config")
+				const evidenceDb = await getPersistentDb()
+				await evidenceDb
+					.insertInto("agent_memory")
+					.values([
+						...Array.from({ length: 55 }, (_, index) => ({
+							streamId: lead.streamId,
+							key: `legion_op:bulk-${index}`,
+							updatedAt: Date.now() + index,
+							value: JSON.stringify({
+								tool: "read_file",
+								paths: [],
+								status: "returned",
+								startedAt: 1,
+								finishedAt: 2,
+							}),
+						})),
+						{ streamId: lead.streamId, key: "legion_op:corrupt", updatedAt: 0, value: "not-json" },
+						{
+							streamId: lead.streamId,
+							key: "legion_op:missing-finish",
+							updatedAt: 0,
+							value: JSON.stringify({
+								tool: "write_to_file",
+								paths: ["partial.ts"],
+								status: "returned",
+								startedAt: 1,
+							}),
+						},
+						{
+							streamId: lead.streamId,
+							key: "legion_op:bad-shape",
+							updatedAt: 0,
+							value: JSON.stringify({ tool: "read_file", paths: [17], status: "returned", startedAt: 1 }),
+						},
+					])
+					.execute()
+				const bounded = await getLegionOperationEvidence([lead.streamId])
+				expect(bounded.truncated).to.equal(true)
+				expect(bounded.receipts).to.have.length(50)
+				expect(bounded.receipts.some((entry) => entry.status === "started")).to.equal(true)
+				expect(bounded.receipts.some((entry) => entry.malformed && entry.status === "uncertain")).to.equal(true)
+				expect(bounded.receipts.filter((entry) => entry.malformed)).to.have.length(3)
+				const partialReceipt = bounded.receipts.find((entry) => entry.paths.includes("partial.ts"))
+				expect(partialReceipt).to.include({ tool: "write_to_file", status: "uncertain", malformed: true, startedAt: 1 })
 				const owners = await Promise.all([
 					legionCoordinator.acquireFormationDispatchToken(parent.id, formed.formationId),
 					legionCoordinator.acquireFormationDispatchToken(parent.id, formed.formationId),
@@ -2188,8 +3201,95 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				expect(tokens.filter(Boolean)).to.have.length(1)
 				expect(await legionCoordinator.acquireDispatchToken(lead.streamId)).to.equal(false)
 
-				await orchestrator.completeStream(lead.streamId, "Contract ready")
+				await orchestrator.completeStream(lead.streamId, "Contract ready\nHeuristic: use the project fixture")
 				await dbPool.flush()
+				const { legionWorkspaceScope, recallLegionKnowledge } = await import("../LegionKnowledge")
+				expect(await recallLegionKnowledge(legionWorkspaceScope("/workspace/real-test"))).to.include(
+					"use the project fixture",
+				)
+				expect(await recallLegionKnowledge(legionWorkspaceScope("/workspace/other-test"))).not.to.include(
+					"use the project fixture",
+				)
+				const db = await getPersistentDb()
+				const now = Date.now()
+				const makeKnowledge = (id: string, type: string, expiresAt: number | null) => ({
+					id,
+					type,
+					expiresAt,
+					userId: "local",
+					streamId: parent.id,
+					content: id,
+					tags: "[]",
+					embedding: null,
+					confidence: 0.25,
+					hubScore: 0,
+					metadata: null,
+					createdAt: now,
+				})
+				await db
+					.insertInto("agent_knowledge")
+					.values([
+						makeKnowledge("expired-cleanup", "legion_workspace_heuristic", now - 1),
+						makeKnowledge("expired-source", "legion_workspace_heuristic", now - 1),
+						makeKnowledge("expired-target", "legion_workspace_heuristic", now - 1),
+						makeKnowledge("live-target", "legion_workspace_heuristic", now + 60000),
+						makeKnowledge("other-type", "other", now - 1),
+						makeKnowledge("no-expiry", "legion_workspace_heuristic", null),
+					])
+					.execute()
+				await db
+					.insertInto("agent_knowledge_edges")
+					.values([
+						{ sourceId: "expired-source", targetId: "live-target", type: "supports", weight: 1, createdAt: now },
+						{ sourceId: "live-target", targetId: "expired-target", type: "supports", weight: 1, createdAt: now },
+					])
+					.execute()
+				await recallLegionKnowledge(legionWorkspaceScope("/workspace/real-test"))
+				const remaining = await db
+					.selectFrom("agent_knowledge")
+					.select("id")
+					.where("id", "in", [
+						"expired-cleanup",
+						"expired-source",
+						"expired-target",
+						"live-target",
+						"other-type",
+						"no-expiry",
+					])
+					.execute()
+				expect(remaining.map((row) => row.id)).to.have.members([
+					"expired-source",
+					"expired-target",
+					"live-target",
+					"other-type",
+					"no-expiry",
+				])
+				await db
+					.insertInto("agent_knowledge")
+					.values(makeKnowledge("renewed-during-prune", "legion_workspace_heuristic", now - 1))
+					.execute()
+				const flush = dbPool.flush.bind(dbPool)
+				const flushStub = sinon.stub(dbPool, "flush").callsFake(async () => {
+					await flush()
+					await dbPool.push({
+						type: "upsert",
+						table: "agent_knowledge",
+						layer: "infrastructure",
+						values: makeKnowledge("renewed-during-prune", "legion_workspace_heuristic", now + 60000),
+					})
+				})
+				try {
+					expect(await dbPool.pruneExpiredAgentKnowledge("legion_workspace_heuristic", now)).to.equal(0)
+				} finally {
+					flushStub.restore()
+				}
+				await dbPool.flush()
+				const renewed = await db
+					.selectFrom("agent_knowledge")
+					.select("expiresAt")
+					.where("id", "=", "renewed-during-prune")
+					.executeTakeFirst()
+				expect(renewed?.expiresAt).to.equal(now + 60000)
 
 				await orchestrator.failStream(worker.streamId, "handler crashed")
 				await dbPool.flush()
@@ -2198,7 +3298,6 @@ describe("Agent Swarm Auxiliary Feature Suite (Critical Completion Review & Hier
 				expect(manifest.members.some((m) => m.status === "rerouted")).to.equal(true)
 				await dbPool.flush()
 				setDbPath(":memory:")
-				const { getPersistentDb } = await import("../../db/Config")
 				let failure = ""
 				try {
 					await getPersistentDb()

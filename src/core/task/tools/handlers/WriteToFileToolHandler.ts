@@ -2,6 +2,7 @@ import path from "node:path"
 import { setTimeout as setTimeoutPromise } from "node:timers/promises"
 import type { ToolUse } from "@core/assistant-message"
 import { constructNewFileContent, getLineNumberFromCharIndex } from "@core/assistant-message/diff"
+import { EnvironmentIntegrity } from "@core/integrity/EnvironmentIntegrity"
 import { formatResponse } from "@core/prompts/responses"
 import { getWorkspaceBasename, resolveWorkspacePath } from "@core/workspace"
 import { DietCodeSayTool } from "@shared/ExtensionMessage"
@@ -302,6 +303,8 @@ export class WriteToFileToolHandler implements IFullyManagedTool {
 
 			config.taskState.didEditFile = true // used to determine if we should wait for busy terminal to update before sending api request
 			config.taskState.workspaceRevision++
+			config.taskState.trackWorkspaceArtifact(relPath)
+			if (EnvironmentIntegrity.isManifest(relPath)) EnvironmentIntegrity.invalidateCache()
 
 			// Finish owned editor cleanup before any optional tracking wait. An
 			// abandoned tracker cannot later reset a subsequent tool's editor.

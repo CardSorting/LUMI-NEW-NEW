@@ -9,6 +9,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Single source of truth for all Agent Swarm & Legion settings, defaults, clamping bounds, role normalization, and 5-tier configuration precedence.
 
 ### Key Types & Constants
+
 - **`DEFAULT_AGENT_SWARM_CONFIG` (lines 118–137):**
   - `enabled: false`, `criticalCompletionReviewEnabled: false`, `hierarchicalDeferEnabled: false`, `autoDeferBeforeCriticalReview: false`, `allowManualTriggerWhenDisabled: true`, `maxFollowUpReviewPasses: 1`, `maxRemediationPasses: 1`, `defaultDeferBoundary: "safe_boundary"`, `legionEnabled: false`, `legionClassificationStrategy: "adaptive"`, `legionMaxConcurrency: 4`, `legionAutoFailoverEnabled: true`, `legionRequireSynthesisGate: true`.
 - **`LegionSpecialistRole` & `normalizeLegionSpecialistRole` (lines 10–37):**
@@ -16,6 +17,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
   - Maps the legacy mixed-case alias `"legion_Trends_ux"` → `"legion_ux_ergonomics"` ([ADR-0011](../adr/ADR-0011-legacy-role-alias.md)).
 
 ### Critical Functions & Why They Exist
+
 - **`getExplicitStateManagerSetting<K>` (lines 268–317):**
   - **What it does:** Checks `StateManager.getGlobalStateKey` and `StateManager.getTaskSettingsKey` **only after** verifying via `hasExplicitValueInRecord` (`taskSettings` / `globalStateCache` inspection) or VS Code's `workspace.getConfiguration("lumi").inspect(...)` that the user or task actually persisted a value.
   - **What breaks if you remove it:** `StateManager.initialize()` pre-fills its in-memory cache with `DEFAULT_SETTINGS` (`false`) before reading disk. If `loadStateManagerConfig()` blindly calls `stateManager.getGlobalSettingsKey("agentSwarmEnabled")`, it gets `false` and **clobbers** a user's `true` in `settings.json`! (See [ADR-0006](../adr/ADR-0006-config-precedence-and-explicit-detection.md), [PM-004](../postmortems/PM-004-statemanager-defaults-clobber-settings.md).)
@@ -36,16 +38,18 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Cooperative suspension, multi-level hierarchy barrier synchronization, control message inbox, durable checkpoints, and idempotent resume.
 
 ### Storage Keys Owned (`HIERARCHICAL_DEFER_STORAGE_KEYS`, lines 18–26)
-| Key in `agent_memory` | Stream ID Owner | Contents |
-|---|---|---|
-| `stream_suspension_state` | Target `streamId` | `StreamSuspensionRecord` (`state`, `acceptingNewWork`, `pendingChildStreamIds`, `acknowledgedChildStreamIds`, `pipelineId`, etc.) |
-| `stream_execution_checkpoint` | Target `streamId` | `StreamExecutionCheckpoint` (`currentStepIndex`, `completedStepReceipts`, `pendingTaskIds`, `SafeBoundaryType`, etc.) |
-| `stream_control_inbox` | Target `streamId` | `StreamControlMessage[]` (`suspend`, `resume`, `prepare_review`, `release_barrier`) |
-| `stream_step_receipts` | Target `streamId` | `Record<string, StepReceipt>` (prevents re-executing completed steps on resume) |
-| `pipeline_defer_state:<pipelineId>` | Root `streamId` | `PipelineSuspensionState` (`phase`, `childStreamIds`, `pendingAckStreamIds`, `acknowledgedStreamIds`) |
-| `active_pipeline_id` | Root or child `streamId` | String pointer to the active `pipelineId` |
+
+| Key in `agent_memory`               | Stream ID Owner          | Contents                                                                                                                          |
+| ----------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `stream_suspension_state`           | Target `streamId`        | `StreamSuspensionRecord` (`state`, `acceptingNewWork`, `pendingChildStreamIds`, `acknowledgedChildStreamIds`, `pipelineId`, etc.) |
+| `stream_execution_checkpoint`       | Target `streamId`        | `StreamExecutionCheckpoint` (`currentStepIndex`, `completedStepReceipts`, `pendingTaskIds`, `SafeBoundaryType`, etc.)             |
+| `stream_control_inbox`              | Target `streamId`        | `StreamControlMessage[]` (`suspend`, `resume`, `prepare_review`, `release_barrier`)                                               |
+| `stream_step_receipts`              | Target `streamId`        | `Record<string, StepReceipt>` (prevents re-executing completed steps on resume)                                                   |
+| `pipeline_defer_state:<pipelineId>` | Root `streamId`          | `PipelineSuspensionState` (`phase`, `childStreamIds`, `pendingAckStreamIds`, `acknowledgedStreamIds`)                             |
+| `active_pipeline_id`                | Root or child `streamId` | String pointer to the active `pipelineId`                                                                                         |
 
 ### Critical Methods & Invariants
+
 - **`withPipelineLock(pipelineId, fn)` (lines 222–239):**
   - Per-pipeline in-process Promise mutex (`this.pipelineLocks`). Serializes concurrent calls to `acknowledgeChildSuspension` and `reconcileAfterStreamFailure` so two children finishing in the same millisecond never clobber each other's acknowledgement in `pipeline_defer_state:<pipelineId>` ([ADR-0004](../adr/ADR-0004-suspension-barrier-and-ancestor-walk.md)).
 - **`collectHierarchyStreams(rootStreamId)` (lines 1185–1225):**
@@ -55,6 +59,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 - **`reconcilePipelineBarrier(rootStreamId, pipelineId)` (lines 760–866):**
   - Re-checks `pendingAckStreamIds` against both `acknowledgedStreamIds` and `agent_streams.status` (`completed` / `failed`).
   - **CRITICAL GUARD (lines 768–775, [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md)):**
+
     ```ts
     if (
       !pipeline ||
@@ -63,7 +68,8 @@ This document walks you through every file that makes up Agent Swarm & The Legio
       return null;
     }
     ```
-    *What breaks if you weaken this guard:* If a pipeline is deferred and then resumed (`phase: "resumed"`), and a child later completes (`completeStream` → `reconcileAfterStreamFailure`), `reconcilePipelineBarrier` will think the pipeline just finished waiting for children and will **re-suspend the already-resumed parent stream**!
+
+    _What breaks if you weaken this guard:_ If a pipeline is deferred and then resumed (`phase: "resumed"`), and a child later completes (`completeStream` → `reconcileAfterStreamFailure`), `reconcilePipelineBarrier` will think the pipeline just finished waiting for children and will **re-suspend the already-resumed parent stream**!
 - **`reconcileAfterStreamFailure(streamId, reason)` (lines 702–758):**
   - Called automatically by `Orchestrator.completeStream` and `Orchestrator.failStream`. Walks up `parentId` ancestors and reconciles any waiting barrier so a crashed or completed child never deadlocks its parent.
 
@@ -74,6 +80,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Bounded 1+1 adversarial review at task completion, strict separation of verified defects vs. unverified concerns, corrective task dispatch, and final coordinator report formatting.
 
 ### Critical Methods & Invariants
+
 - **`classifyFindings(candidates)` (lines 204–264):**
   - Splits `ReviewFindingInput[]` into `verifiedDefects` and `unverifiedConcerns`.
   - A finding is a `verified_defect` **if and only if** `category === "verified_defect"` (or `blocking === true`) **and** it supplies non-empty `evidenceRefs` (or a concrete `recommendedFix`/`description` backed by audit evidence). Speculative items without evidence are downgraded to `unverified_concern`.
@@ -91,17 +98,19 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Specialist role registry, deterministic task classification, stage-ordered formation, file-reservation conflict avoidance, automatic stage progression on stream completion, bounded failover on stream failure, and synthesis reporting.
 
 ### Key Constants & Registry
+
 - **`LEGION_SPECIALIST_REGISTRY` (lines 269–540):**
   - Declarative profiles for all 7 specialist archetypes: `role`, `title`, `codename`, `subagentType`, `description`, `capabilities`, `preferredLayers`, `defaultExecutionBoundary`, `keywords` (weighted), and `filePatterns` (regexes).
 - **`LegionExecutionStageName` (line 66):**
   1. `"leadAndRecon"`
   2. `"parallelExecution"`
   3. `"verificationAndHardening"`
-  (Followed by automated stage synthesis into conductor handoff).
+     (Followed by automated stage synthesis into conductor handoff).
 - **`LEGION_MAX_ATTEMPTS_PER_SLOT = 2` (line 141):**
   - Initial specialist spawn (`attempt = 1`) + at most 1 failover reroute (`attempt = 2`).
 
 ### Critical Methods & Invariants
+
 - **`withFormationLock(formationId, fn)` (lines 620–637):**
   - Per-formation in-process Promise mutex (`this.formationLocks`). Prevents parallel specialists finishing/failing simultaneously from racing on `legion_formation:<formationId>`.
 - **`classifyTaskForLegion(input)` (lines 738–949):**
@@ -113,6 +122,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
   - Dispatches Stage 1 (`leadAndRecon`) tasks immediately (`status: "active"`) while queueing downstream stage members (`status: "queued"`).
 - **`reconcileSpecialistStreamLifecycleUnlocked` (lines 1501–1780):**
   - **CRITICAL TERMINAL-STATE GUARD (lines 1530–1545, [PM-009](../postmortems/PM-009-terminal-state-flip-and-unwired-lifecycle.md)):**
+
     ```ts
     if (
       member.status === "completed" ||
@@ -122,7 +132,8 @@ This document walks you through every file that makes up Agent Swarm & The Legio
       return { ... }; // Terminal states are final and absorbing!
     }
     ```
-    *What breaks if you change this to `if (member.status === event)`:* Calling `failStream` twice on the same failed stream will see `member.status === "rerouted"` on the second call (`"rerouted" !== "failed"`), overwrite `"rerouted"` to `"failed"`, and increment `failedStreams` even though a fallback specialist was already spawned! (Proven by Mutation M1 in [04-failure-modes-and-drills.md](04-failure-modes-and-drills.md).)
+
+    _What breaks if you change this to `if (member.status === event)`:_ Calling `failStream` twice on the same failed stream will see `member.status === "rerouted"` on the second call (`"rerouted" !== "failed"`), overwrite `"rerouted"` to `"failed"`, and increment `failedStreams` even though a fallback specialist was already spawned! (Proven by Mutation M1 in [04-failure-modes-and-drills.md](04-failure-modes-and-drills.md).)
 
 ---
 
@@ -131,6 +142,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** The public façade (`AgentOrchestrator`) consumed by the rest of LUMI. Connects stream/task lifecycle events to the 3 Agent Swarm engines.
 
 ### Critical Hooks & Invariants
+
 - **`ensureStreamAcceptingWork(streamId, operationName)` (lines 81–99):**
   - Called at the top of `dispatchTask`, `spawnSubAgent`, and `delegateWork`. Throws `Stream <id> is currently suspended (<state>) and cannot accept new work (<op>)` if `acceptingNewWork === false` (unless `bypassSuspensionCheck: true` is passed for corrective review tasks).
 - **`completeStream(streamId, summary)` (lines 287–362):**
@@ -154,7 +166,9 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Write-behind batching pool and per-agent shadow overlay manager over `better-sqlite3`.
 
 ### Critical Invariants ([ADR-0003](../adr/ADR-0003-durable-state-in-agent-memory.md), [ADR-0010](../adr/ADR-0010-direct-writes-for-shared-rows.md))
+
 - **`TABLE_FK_ORDER` (lines 34–43):**
+
   ```ts
   const TABLE_FK_ORDER: Record<string, number> = {
     users: 0,
@@ -167,6 +181,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
     agent_memory: 7,
   };
   ```
+
   `flush()` sorts by `TABLE_FK_ORDER` **before** `LAYER_PRIORITY` so parent rows in `agent_streams` (`5`) are always inserted before child rows in `agent_tasks` (`6`) and `agent_memory` (`7`), preventing `SqliteError: FOREIGN KEY constraint failed` ([PM-003](../postmortems/PM-003-flush-order-layer-priority.md)).
 - **Composite-Key Upserts on `agent_memory`:**
   `agent_memory` has a composite primary key `PRIMARY KEY (streamId, key)`. Every `upsert` on `agent_memory` **must** specify `conflictTarget: ["streamId", "key"]` and `where: [{ column: "streamId", value: ... }, { column: "key", value: ... }]` ([PM-002](../postmortems/PM-002-upsert-without-conflict-target.md)).
@@ -193,6 +208,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Autonomous specialist loop execution, tool sandboxing, command settlement tracking, and parent context integration.
 
 ### Key Components & Invariants
+
 - **`LegionAgentHost.ts`:**
   - Manages independent LLM client conversations for specialists.
   - Implements budget capping (`maxTokens`, `maxCost`) and heuristic token estimation when usage chunks are omitted by providers or return 0 tokens.
@@ -219,6 +235,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Provide the parent agent with explicit specialist conductor capabilities, auto-approval, prompt instructions, and human-observable streaming feedback.
 
 ### Key Components & Invariants
+
 - **`EngageSwarmHandler.ts` (`src/core/task/tools/handlers/`):**
   - Implements `IToolHandler` for `DietCodeDefaultTool.ENGAGE_SWARM`.
   - Validates `objective` and checks that Swarm or Legion is enabled.
@@ -253,6 +270,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Protect specialist and orchestrator tool execution from stream snapshot duplication, interleaved call ID loss, and futile retry loops across model streaming endpoints.
 
 ### Key Components & Invariants
+
 - **`StreamResponseHandler.ts` (`src/core/task/`):**
   - `extractJsonRoots(raw: string)`: State-machine scanner parsing sequential complete JSON roots from stream buffers. Accurately tracks nested braces, brackets, quotes, escapes, and string literals with braces (e.g. `awk '{print $1}'`).
   - `ToolUseHandler.processToolUseDelta`: Stream-time deduplication; checks prefix slicing and drops identical duplicate complete JSON roots (`deepEqual`).
@@ -269,6 +287,7 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 **Purpose:** Defend against VS Code shell integration deadlocks, interactive stdin freezing, and file reservation bypasses caused by models issuing terminal heredoc file creations (`cat <<'EOF'`, `tee`, `echo >`).
 
 ### Key Components & Invariants
+
 - **`heredocPolicy.ts` (`src/integrations/terminal/`):**
   - `findTopLevelHeredocs(command: string)`: Shell-token scanner tracking single quotes, double quotes, escapes, and arithmetic expansions (`$((...))` / `((...))`). Accurately detects top-level `<<` heredoc operators while ignoring arithmetic bitwise shifts and quoted literals.
   - `detectHeredocFileRedirection(command: string)`: Detects file creation across all shell variations: redirection before delimiter (`cat > file << 'EOF'`), tee before delimiter (`tee file << 'EOF'`, `sudo tee`), redirection on delimiter line (`cat << 'EOF' > file`), piped heredocs (`cat << 'EOF' | sudo tee file`), and delimiter line redirection (`EOF > file`). Handles quoted filenames and filters `/dev/null`. Returns `{ isHeredocFileWrite, targetFiles, reason }` directing the model to `write_to_file`.
@@ -283,6 +302,82 @@ This document walks you through every file that makes up Agent Swarm & The Legio
 - **`VscodeTerminalProcess.ts` & `VscodeTerminalManager.ts` (`src/hosts/vscode/terminal/`):**
   - Multiline shell integration circuit breaker: In `VscodeTerminalProcess.run`, if `isMultilineHeredocCommand(command)` is true under interactive shell integration, safely falls back to a supervised managed terminal if available, or throws an error refusing execution to prevent terminal deadlock.
   - Fast-path microtask deferral: `VscodeTerminalManager.runCommand` defers dispatch for multiline heredocs to ensure output and completion listeners attach prior to execution.
+
+---
+
+## 12. Terminal File Read Policy Engine & Token Decoupling (`terminalFileReadPolicy.ts`, `LegionAgentHost.ts`)
+
+**Purpose:** Stop terminal commands (`cat`, `head`, `tail`, `more`, `less`) from dumping file contents into the user terminal, and prevent premature specialist team token budget exhaustion.
+
+### Key Components & Invariants
+
+- **`terminalFileReadPolicy.ts` (`src/integrations/terminal/`):**
+  - `splitTopLevelStatements(command)`: Splits compound shell pipelines and unrolls subshell substitutions.
+  - `detectTerminalFileRead(command)`: Detects commands reading files to terminal stdout, distinguishing real streaming pipes (`cat f | grep ...`) from terminal file dumps (`cat f`, `cat f | head`). Detects interactive stdin traps (`cat > file`).
+  - Whitelists kernel info (`/proc/*`, `/sys/*`, `/etc/os-release`) and non-blocking streaming (`tail -f`).
+- **`LegionAgentHost.ts`:**
+  - Token budget decoupling: `budgetExceeded()` checks `usedTokens` only when `options.maxTokens !== undefined`, removing the hardcoded 100k token ceiling that starved multi-turn teams after 5–6 turns.
+  - Conductor prompt parity: injects File Reading rules into `LEGION_CORE_RULES`, `rules.ts`, `editing_files.ts`, and `execute_command.ts`.
+
+---
+
+## 13. Dynamic Project Knowledge & Scoped Credential Sanitization (`src/infrastructure/ai/LegionKnowledge.ts`)
+
+**Purpose:** Durable project-level heuristic memory across agent runs without credential leakage or cross-workspace contamination.
+
+### Key Components & Invariants
+
+- **`legionWorkspaceScope(cwd)`:** Computes SHA-256 hash of the resolved workspace directory path.
+- **`isReusableLegionObservation(text)`:** Validates observation length (1..500 chars), single-line structure, and absence of sensitive keywords or `CREDENTIAL_PATTERNS` regex matches (GitHub, OpenAI, Anthropic, AWS, GCP, Slack, JWT, URL basic auth, query tokens).
+- **`recallLegionKnowledge(scope)` / `rememberLegionKnowledge(scope, streamId, items)`:** Persists heuristics in `agent_knowledge` with a 30-day TTL (`LEGION_KNOWLEDGE_TTL_MS`), sorted by recency and capped at 20 items per scope.
+- **`BufferedDbPool.pruneExpiredAgentKnowledge(type, now)`:** Atomic deletion of expired knowledge rows with flush and state mutex protection.
+
+---
+
+## 14. Workspace Environment Integrity & Manifest Fingerprinting (`src/core/integrity/EnvironmentIntegrity.ts`)
+
+**Purpose:** Ensure toolchain and dependency leases accurately reflect disk changes without redundant probe overhead.
+
+### Key Components & Invariants
+
+- **`getManifestFingerprint()`:** Deterministic SHA-256 digest of `size`, `mtimeMs`, and `ctimeMs` across project markers (`package.json`, `Cargo.toml`, etc.) and version manifests (`.nvmrc`, `pyproject.toml`, `setup.py`, `build.gradle.kts`, `rust-toolchain`).
+- **`EnvironmentIntegrity.isManifest(filePath)`:** Checks if a modified file is a recognized manifest.
+- **Reactive Cache Invalidation:** Wired into `ApplyPatchHandler.ts`, `WriteToFileToolHandler.ts`, and `src/core/storage/disk.ts` to call `EnvironmentIntegrity.invalidateCache()`.
+- **Generational Probe Tracking:** A `generation` counter and WeakRef registry detect concurrent file edits during active validation probes, retrying automatically.
+- **PATH Shadowing Alerts:** Compares canonical `realpath` of `process.execPath` vs PATH-resolved Node binaries to warn when execution environments diverge.
+
+---
+
+## 15. Terminal Supervision, Action Execution Fencing & View Epoch Ownership (`src/integrations/terminal/`, `src/core/task/`)
+
+**Purpose:** Prevent concurrent process collisions, dropped terminal exit guessing, and UI view pollution across task switches.
+
+### Key Components & Invariants
+
+- **`SupervisedShell.ts`:** `onObservationError` logs post-spawn stream errors without assuming process death. Process cancellation waits for `child.spawn` before sending kill signals (`taskkill /T /F` or POSIX `kill -TERM`/`-KILL`).
+- **`commandOutcome.ts`:** Strict exit code evaluation: only observed `exitCode === 0` denotes `completed`; missing exit codes without signals remain `unconfirmed`.
+- **`ActionExecutionRegistry.ts`:** Unconfirmed commands retain semantic fences, blocking duplicate execution attempts. `commandObserved` protects fences from delayed foreground snapshots. Surfaces `unresolved_commands` and `unresolved_actions` in `ExecutionState.ts`.
+- **`CommandExecutor.ts`:** View epoch checks prevent stale background output readers from publishing into replacement chat rows; replayed execution IDs mark new rows `not_started`.
+- **`BufferedDbPool.ts`:** Throws `ShadowCommitError` to retain uncommitted shadows on failure; `stop()` rejects shutdown while uncommitted shadows exist; applies SQLite column affinities (`applyAffinity`) and value comparison ordering (`compareSqliteValues`) in buffered queries.
+
+---
+
+## 16. Surrogate-Safe Handoff Sanitization & Two-Phase Formation Reservations (`src/core/task/legion/`, `src/infrastructure/ai/`)
+
+**Purpose:** Protect specialist prompt handoffs from malformed XML, context overflow, duplicate team creation races, and unconfirmed settlement failures.
+
+### Key Components & Invariants
+
+- **`LegionHandoff.ts`:**
+  - `formatLegionHandoffText(text, maxBytes)`: Escapes `<` and `>`, caps UTF-8 byte length to 12 KB using binary search, and guards UTF-16 surrogate pairs against midpoint splitting.
+  - `legionHandoffStatus(status)`: Validates status against `^[a-z_]{1,40}$`, falling back to `"unknown"`.
+- **Two-Phase Formation Reservations (`LegionCoordinator.ts`, `LegionExecutionReceipt.ts`):**
+  - `acquireFormationReservation` and `acquireAutomaticFormationToken` prevent duplicate parallel team formations across concurrent triggers.
+  - `hasOutstandingFormationReservation` and `hasLegionFormationIntent` provide durable verification.
+- **`needs_reconciliation` State Machine (`LegionPipelineRunner.ts`):**
+  - When specialist host termination or SQLite settlement cannot be confirmed, transitions to `needs_reconciliation` and keeps members in `running` status, preventing duplicate failovers.
+- **Skills System Hardening (`skills.ts`, `LegionAgentHost.ts`):**
+  - Skill discovery and loading support `AbortSignal` for immediate cancellation; system prompts frame skill descriptions as untrusted catalog data; specialist skill catalogs are size-capped.
 
 ---
 

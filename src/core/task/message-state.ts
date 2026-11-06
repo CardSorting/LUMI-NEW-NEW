@@ -5,13 +5,18 @@ import Mutex from "p-mutex"
 import { findLastIndex } from "@/shared/array"
 import { combineApiRequests } from "@/shared/combineApiRequests"
 import { combineCommandSequences } from "@/shared/combineCommandSequences"
-import { DietCodeMessage } from "@/shared/ExtensionMessage"
+import { type DietCodeApiReqInfo, DietCodeMessage } from "@/shared/ExtensionMessage"
 import { getApiMetrics } from "@/shared/getApiMetrics"
 import { HistoryItem } from "@/shared/HistoryItem"
 import { DietCodeStorageMessage } from "@/shared/messages/content"
 import { Logger } from "@/shared/services/Logger"
 import { getCwd, getDesktopDir } from "@/utils/path"
-import { ensureTaskDirectoryExists, saveApiConversationHistory, saveDietCodeMessages } from "../storage/disk"
+import {
+	ensureTaskDirectoryExists,
+	saveApiConversationHistory,
+	saveDietCodeMessages,
+	saveDietCodeMessagesStrict,
+} from "../storage/disk"
 import { TaskState } from "./TaskState"
 
 // Event types for dietcodeMessages changes
@@ -61,6 +66,7 @@ export class MessageStateHandler extends EventEmitter<MessageStateHandlerEvents>
 	// operations try to modify message state simultaneously
 	// This follows the same pattern as Task.stateMutex for consistency
 	private stateMutex = new Mutex()
+	private usageHistoryRefreshTimer?: ReturnType<typeof setTimeout>
 
 	constructor(params: MessageStateHandlerParams) {
 		super()
@@ -176,6 +182,52 @@ export class MessageStateHandler extends EventEmitter<MessageStateHandlerEvents>
 		})
 	}
 
+	/** Persist cumulative specialist usage under the message lock; write errors must reach the budget guard. */
+	async recordSpecialistUsageStrict(
+		messageTs: number,
+		baseline: DietCodeApiReqInfo["specialistUsage"],
+		usage: NonNullable<DietCodeApiReqInfo["specialistUsage"]>,
+	): Promise<void> {
+		await this.withStateLock(async () => {
+			const index = this.dietcodeMessages.findIndex(
+				(message) => message.ts === messageTs && message.say === "api_req_started",
+			)
+			if (index < 0) throw new Error("Specialist usage message is no longer available")
+			const previousMessage = this.dietcodeMessages[index]
+			const info: DietCodeApiReqInfo = JSON.parse(previousMessage.text || "{}")
+			const value = (key: "tokensIn" | "tokensOut" | "cacheWrites" | "cacheReads" | "cost") =>
+				Math.max(info.specialistUsage?.[key] ?? 0, (baseline?.[key] ?? 0) + (usage[key] ?? 0))
+			const message = {
+				...previousMessage,
+				text: JSON.stringify({
+					...info,
+					specialistUsage: {
+						tokensIn: value("tokensIn"),
+						tokensOut: value("tokensOut"),
+						cacheWrites: value("cacheWrites"),
+						cacheReads: value("cacheReads"),
+						cost: value("cost"),
+					},
+				}),
+			}
+			const next = [...this.dietcodeMessages]
+			next[index] = message
+			await saveDietCodeMessagesStrict(this.taskId, next)
+			this.dietcodeMessages[index] = message
+			this.emitDietCodeMessagesChanged({ type: "update", messages: this.dietcodeMessages, index, previousMessage, message })
+		})
+		// Coalesce frequent usage updates so secondary history writes do not queue
+		// behind every strict save. The authoritative message write has completed.
+		clearTimeout(this.usageHistoryRefreshTimer)
+		this.usageHistoryRefreshTimer = setTimeout(() => {
+			this.usageHistoryRefreshTimer = undefined
+			void this.saveDietCodeMessagesAndUpdateHistory().catch((error) =>
+				Logger.warn("Could not refresh specialist usage history:", error),
+			)
+		}, 250)
+		this.usageHistoryRefreshTimer.unref?.()
+	}
+
 	async addToApiConversationHistory(message: DietCodeStorageMessage) {
 		// Protect with mutex to prevent concurrent modifications from corrupting data (RC-4)
 		return await this.withStateLock(async () => {
@@ -245,6 +297,31 @@ export class MessageStateHandler extends EventEmitter<MessageStateHandlerEvents>
 
 			// Capture previous state before mutation
 			const previousMessage = { ...this.dietcodeMessages[index] }
+			if (previousMessage.say === "api_req_started" && typeof updates.text === "string") {
+				const previous: DietCodeApiReqInfo = JSON.parse(previousMessage.text || "{}")
+				if (previous.specialistUsage) {
+					const next: DietCodeApiReqInfo = JSON.parse(updates.text || "{}")
+					if (!next.specialistUsage) {
+						next.specialistUsage = previous.specialistUsage
+					} else {
+						const value = (key: "tokensIn" | "tokensOut" | "cacheWrites" | "cacheReads" | "cost") => {
+							const prior = previous.specialistUsage?.[key] ?? 0
+							const incoming = next.specialistUsage?.[key] ?? 0
+							if (!Number.isFinite(prior) || !Number.isFinite(incoming) || prior < 0 || incoming < 0)
+								throw new Error("Invalid specialist usage in API message update")
+							return Math.max(prior, incoming)
+						}
+						next.specialistUsage = {
+							tokensIn: value("tokensIn"),
+							tokensOut: value("tokensOut"),
+							cacheWrites: value("cacheWrites"),
+							cacheReads: value("cacheReads"),
+							cost: value("cost"),
+						}
+					}
+					updates = { ...updates, text: JSON.stringify(next) }
+				}
+			}
 
 			// Apply updates to the message
 			Object.assign(this.dietcodeMessages[index], updates)

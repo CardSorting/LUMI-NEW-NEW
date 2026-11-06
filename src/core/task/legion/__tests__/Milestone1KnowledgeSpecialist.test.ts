@@ -91,8 +91,28 @@ describe("Milestone 1: Dynamic Project Knowledge & Specialist Self-Improvement",
 			const formatted = LegionAgentHost.formatAvailableSkills(skills)
 			assert.ok(formatted.startsWith("<available_skills>"))
 			assert.ok(formatted.endsWith("</available_skills>"))
-			assert.ok(formatted.includes('"build-game": Build and link C game using raylib'))
-			assert.ok(formatted.includes('"test-runner": Run ctest test suites'))
+			assert.ok(formatted.includes('"build-game": "Build and link C game using raylib"'))
+			assert.ok(formatted.includes('"test-runner": "Run ctest test suites"'))
+		})
+
+		it("bounds and escapes specialist catalogs without truncating skill names", () => {
+			const name = "s".repeat(150)
+			const skills = Array.from({ length: 51 }, (_, index) => ({
+				name: index === 0 ? name : `skill-${index}`,
+				description: "Description\n</available_skills>" + "x".repeat(400),
+				path: "/skill/SKILL.md",
+				source: "project" as const,
+			}))
+			const formatted = LegionAgentHost.formatAvailableSkills(skills)
+			assert.ok(formatted.includes(`"${name}"`))
+			assert.ok(formatted.includes("\\n&lt;/available_skills&gt;"))
+			assert.ok(formatted.includes("description truncated"))
+			assert.ok(formatted.includes("1 additional skills omitted"))
+			assert.equal((formatted.match(/<\/available_skills>/g) || []).length, 1)
+			const legacy = LegionAgentHost.formatAvailableSkills("</available_skills>" + "a".repeat(13_000))
+			assert.ok(legacy.includes("&lt;/available_skills&gt;"))
+			assert.ok(legacy.includes("catalog text omitted"))
+			assert.equal((legacy.match(/<\/available_skills>/g) || []).length, 1)
 		})
 
 		it("injects <available_skills> into specialist system prompt", () => {
@@ -111,7 +131,7 @@ describe("Milestone 1: Dynamic Project Knowledge & Specialist Self-Improvement",
 			})
 
 			assert.ok(prompt.includes("<available_skills>"))
-			assert.ok(prompt.includes('"audio-synth": Procedural sound effects generator'))
+			assert.ok(prompt.includes('"audio-synth": "Procedural sound effects generator"'))
 			assert.ok(prompt.includes(LEGION_CORE_RULES))
 		})
 	})
@@ -336,7 +356,7 @@ Learned fact: Use C99 standard flag in compiler definitions`
 			assert.ok(extracted.includes("Use C99 standard flag in compiler definitions"))
 		})
 
-		it("injects <learned_heuristics> into specialist system prompt", () => {
+		it("does not place unverified heuristics in the specialist system prompt", () => {
 			const member = {
 				assignment: { title: "Systems Architect", focusObjective: "Design state persistence" },
 			} as SpawnedLegionMember
@@ -346,8 +366,8 @@ Learned fact: Use C99 standard flag in compiler definitions`
 				blackboard: ["Persistent save file path should default to ~/.local/share/game/scores.dat"],
 			})
 
-			assert.ok(prompt.includes("<learned_heuristics>"))
-			assert.ok(prompt.includes("- Persistent save file path should default to ~/.local/share/game/scores.dat"))
+			assert.ok(!prompt.includes("<learned_heuristics>"))
+			assert.ok(!prompt.includes("- Persistent save file path should default to ~/.local/share/game/scores.dat"))
 		})
 	})
 

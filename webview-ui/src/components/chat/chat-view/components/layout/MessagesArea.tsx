@@ -16,6 +16,8 @@ interface MessagesAreaProps {
 	messageHandlers: MessageHandlers
 }
 
+const messageListComponents = { Footer: () => <div className="min-h-1" /> }
+
 /**
  * The scrollable messages area with virtualized list
  * Handles rendering of chat rows and browser sessions
@@ -173,14 +175,6 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 		],
 	)
 
-	// Keep footer as a simple spacer. Thinking loading is rendered as an in-list row.
-	const virtuosoComponents = useMemo(
-		() => ({
-			Footer: () => <div className="min-h-1" />,
-		}),
-		[],
-	)
-
 	return (
 		<div className="overflow-hidden flex flex-col h-full">
 			<div className="grow flex" ref={scrollContainerRef}>
@@ -194,7 +188,7 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 					}}
 					atBottomThreshold={10} // trick to make sure virtuoso re-renders when task changes, and we use initialTopMostItemIndex to start at the bottom
 					className="scrollable grow overflow-y-scroll"
-					components={virtuosoComponents}
+					components={messageListComponents}
 					data={displayedGroupedMessages}
 					// increasing top by 3_000 to prevent jumping around when user collapses a row
 					increaseViewportBy={{

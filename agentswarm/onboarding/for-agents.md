@@ -21,18 +21,23 @@ Read this fully before modifying anything under `src/infrastructure/ai/`, `src/i
 4. **Terminal states are final.** `completed`, `failed`, `rerouted` are never flipped by later events.
 5. **Bounded loops only.** Review = 1+1. Failover = max 2 attempts per slot. If you add a loop, add a bound and a test.
 6. **Fix root causes, not symptoms.** No monkey patches (e.g. don't mutate test mocks to hide a real-pool bug).
-7. **Never claim done without evidence.** "Done" = a command you ran and its output. Reports from other agents are *claims*, not evidence.
+7. **Never claim done without evidence.** "Done" = a command you ran and its output. Reports from other agents are _claims_, not evidence.
 8. **Streaming hygiene & circuit-breaking.** Provider streaming handlers slice done snapshots against accumulated deltas; `StreamResponseHandler` self-heals identical duplicate JSON roots; transport decoding errors circuit-break with `safeToRetry: false` ([ADR-0014](../adr/ADR-0014-tool-argument-stream-deduplication-and-self-healing-parser.md), [PM-015](../postmortems/PM-015-tool-argument-snapshot-concatenation-and-stream-decoding-loop.md)).
 9. **Terminal safety & prompt parity.** Never create or edit files via terminal heredoc redirection (`cat <<'EOF' > file`, `tee`, `echo >`). Use `write_to_file` or `replace_in_file` directly. Terminal commands run non-interactively without stdin; heredocs deadlock VS Code shell integration and are intercepted before execution ([ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-parity.md), [PM-016](../postmortems/PM-016-terminal-heredoc-deadlock-and-prompt-parity.md)).
+10. **Terminal file read defense.** Never dump files to terminal stdout (`cat`, `head`, `tail`, `more`, `less`). Use `read_file` directly. Terminal file reads are intercepted before execution ([ADR-0016](../adr/ADR-0016-terminal-file-read-defense-budget-starvation-and-conductor-prompt-parity.md), [PM-017](../postmortems/PM-017-terminal-file-dump-specialist-starvation-and-conductor-fallback.md)).
+11. **Dynamic project knowledge & credential scrubbing.** Observations shared to blackboard are scoped by SHA-256 workspace hash and scrubbed of credentials via `CREDENTIAL_PATTERNS`. Single-line heuristics only (≤500 chars) ([ADR-0017](../adr/ADR-0017-dynamic-project-knowledge-blackboard-and-credential-sanitization.md)).
+12. **Workspace environment integrity.** Edits to manifest files (`package.json`, `.nvmrc`, etc.) reactively invalidate environment leases; never assume cached toolchain versions survive manifest modifications ([ADR-0018](../adr/ADR-0018-workspace-environment-integrity-and-manifest-fingerprinting.md)).
+13. **Supervised shell & action fences.** Losing terminal observation is not evidence of process death. Disconnected processes produce `unconfirmed` status and retain execution fences until reconciled ([ADR-0019](../adr/ADR-0019-terminal-supervision-action-fencing-and-shadow-commit-retention.md), [PM-018](../postmortems/PM-018-unconfirmed-command-outcome-fencing-and-replacement-view-pollution.md)).
+14. **Handoff sanitization & reconciliation.** Specialist handoffs are size-capped (12 KB) XML-escaped text; settlement failures halt the pipeline in `needs_reconciliation` with member stream in `running` status ([ADR-0020](../adr/ADR-0020-legion-handoff-sanitization-two-phase-reservation-and-unsettled-reconciliation.md), [PM-019](../postmortems/PM-019-unpersisted-specialist-settlement-and-formation-dispatch-race.md)).
 
 ## 2. Persistence rules (the #1 source of past bugs)
 
-| Do | Don't |
-|---|---|
-| `dbPool.push({ type:"upsert", table:"agent_memory", conflictTarget:["streamId","key"], where:[{column:"streamId",…},{column:"key",…}], values:{…}, layer:"infrastructure" })` | Upsert on `agent_memory` without `conflictTarget` (it defaults to `id`, which doesn't exist) |
-| `dbPool.push(op)` (no agent id) for rows other streams/parents must read, and for `agent_streams` inserts | `dbPool.push(op, childStreamId)` for an `agent_streams` insert — traps it in a shadow buffer; dependents flush first → **FK failure** |
-| Read with `selectWhere` and filter by **active** owner when checking reservations | `selectOne` on a non-unique key (first row only) |
-| Verify against the **real** SQLite pool (`dbPool.flush()`) | Trust the in-memory mock for persistence correctness |
+| Do                                                                                                                                                                            | Don't                                                                                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `dbPool.push({ type:"upsert", table:"agent_memory", conflictTarget:["streamId","key"], where:[{column:"streamId",…},{column:"key",…}], values:{…}, layer:"infrastructure" })` | Upsert on `agent_memory` without `conflictTarget` (it defaults to `id`, which doesn't exist)                                          |
+| `dbPool.push(op)` (no agent id) for rows other streams/parents must read, and for `agent_streams` inserts                                                                     | `dbPool.push(op, childStreamId)` for an `agent_streams` insert — traps it in a shadow buffer; dependents flush first → **FK failure** |
+| Read with `selectWhere` and filter by **active** owner when checking reservations                                                                                             | `selectOne` on a non-unique key (first row only)                                                                                      |
+| Verify against the **real** SQLite pool (`dbPool.flush()`)                                                                                                                    | Trust the in-memory mock for persistence correctness                                                                                  |
 
 Background: [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md), [PM-002](../postmortems/PM-002-upsert-without-conflict-target.md), [PM-008](../postmortems/PM-008-stale-reservation-false-positives.md).
 
@@ -44,25 +49,12 @@ Background: [PM-001](../postmortems/PM-001-shadow-buffer-foreign-key-failure.md)
 
 ## 4. After you edit — verification protocol
 
-Run all of these and **paste/keep the output** in your report (expect **291 passing tests**):
+Run all of these and **paste/keep the output** in your report (expect **455 passing tests** in `npm run test:swarm` and **465 passing** in `npm run test:execution`):
 
 ```bash
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
-npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
-  --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
-  src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
-  src/infrastructure/ai/__tests__/Orchestrator.test.ts \
-  "src/core/task/legion/__tests__/*.test.ts" \
-  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
-  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
-  src/shared/storage/__tests__/state-keys.test.ts \
-  src/core/api/__tests__/openai-codex.streaming.test.ts \
-  src/core/task/__tests__/StreamResponseHandler.test.ts \
-  src/integrations/terminal/__tests__/heredocPolicy.test.ts \
-  src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts \
-  src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts \
-  src/hosts/vscode/terminal/TerminalOutputDecoder.test.ts \
-  src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts
+npm run test:swarm
+npm run test:execution
 (cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 npx biome lint --diagnostic-level=error <touched files>
 ```
@@ -79,12 +71,11 @@ State, per claim: **Verified** (command + result) or **Unverified** (why). List 
 
 ## 7. Quick API reference (`AgentOrchestrator`)
 
-| Capability | Methods |
-|---|---|
-| Toggle/state | `isAuxiliaryFeatureEnabled`, (`AgentSwarmConfig`) `toggleAgentSwarmFeature`, `setAgentSwarmAgentOverride`, `setAgentSwarmTaskOverride` |
-| Defer | `deferAgent`, `registerInFlightOperation`, `completeInFlightAndYield`, `deferPipeline`, `getDeferredPipelineStatus`, `getAgentDeferStatus`, `resumeAgent`, `resumePipeline` |
-| Review | `runCriticalCompletionReview`, `recallLastCriticalCompletionReview` |
-| Legion | `classifyTaskForLegion`, `formLegion`, `spawnSpecialistSubagent`, `spawnRemediationLegionForReview`, `getLegionStageProgression`, `synthesizeLegionExecutionReport`, `rerouteFailedLegionSpecialist`, `recallLastLegionFormation`, `getStreamSpecialistProfile` |
-| Conductor | `engage_swarm` (native tool), `runLegionPipeline`, `formatLegionProgressMessage` |
-| Lifecycle hooks (automatic) | `completeStream` / `failStream` → Legion `settleSpecialistStream` (no-op for non-Legion streams) |
-
+| Capability                  | Methods                                                                                                                                                                                                                                                         |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Toggle/state                | `isAuxiliaryFeatureEnabled`, (`AgentSwarmConfig`) `toggleAgentSwarmFeature`, `setAgentSwarmAgentOverride`, `setAgentSwarmTaskOverride`                                                                                                                          |
+| Defer                       | `deferAgent`, `registerInFlightOperation`, `completeInFlightAndYield`, `deferPipeline`, `getDeferredPipelineStatus`, `getAgentDeferStatus`, `resumeAgent`, `resumePipeline`                                                                                     |
+| Review                      | `runCriticalCompletionReview`, `recallLastCriticalCompletionReview`                                                                                                                                                                                             |
+| Legion                      | `classifyTaskForLegion`, `formLegion`, `spawnSpecialistSubagent`, `spawnRemediationLegionForReview`, `getLegionStageProgression`, `synthesizeLegionExecutionReport`, `rerouteFailedLegionSpecialist`, `recallLastLegionFormation`, `getStreamSpecialistProfile` |
+| Conductor                   | `engage_swarm` (native tool), `runLegionPipeline`, `formatLegionProgressMessage`                                                                                                                                                                                |
+| Lifecycle hooks (automatic) | `completeStream` / `failStream` → Legion `settleSpecialistStream` (no-op for non-Legion streams)                                                                                                                                                                |

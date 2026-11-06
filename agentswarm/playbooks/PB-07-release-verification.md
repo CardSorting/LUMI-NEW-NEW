@@ -4,25 +4,11 @@
 # 1. Types
 npx tsc --noEmit && npx tsc -b webview-ui --pretty false
 
-# 2. Backend suites (expect 315 passing tests across Auxiliary, Orchestrator, Legion Host/Adapter/Task, Engage Swarm, ToolSet Discovery, State Keys, Codex Streaming deduplication, StreamResponseHandler self-healing, terminal heredoc policy, terminal file read defense, command approval interception, and terminal process lifecycle; 332 total swarm verification suite)
-npx cross-env TS_NODE_PROJECT=./tsconfig.unit-test.json mocha --no-config --timeout 20000 \
-  --require ts-node/register --require tsconfig-paths/register --require ./src/test/requires.cjs \
-  src/infrastructure/ai/__tests__/AgentSwarmAuxiliary.test.ts \
-  src/infrastructure/ai/__tests__/Orchestrator.test.ts \
-  "src/core/task/legion/__tests__/*.test.ts" \
-  src/core/task/tools/handlers/__tests__/EngageSwarmHandler.test.ts \
-  src/core/prompts/system-prompt/__tests__/DietCodeToolSetSwarm.test.ts \
-  src/shared/storage/__tests__/state-keys.test.ts \
-  src/core/api/__tests__/openai-codex.streaming.test.ts \
-  src/core/task/__tests__/StreamResponseHandler.test.ts \
-  src/integrations/terminal/__tests__/heredocPolicy.test.ts \
-  src/integrations/terminal/__tests__/terminalFileReadPolicy.test.ts \
-  src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts \
-  src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts \
-  src/hosts/vscode/terminal/TerminalOutputDecoder.test.ts \
-  src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts
+# 2. Backend suites (expect 455 passing tests via npm run test:swarm, and 465 passing tests via npm run test:execution)
+npm run test:swarm
+npm run test:execution
 
-# 3. Settings UI (expect 7 passing tests)
+# 3. Settings UI (expect 7 passing tests; 32 passing in full execution reliability suite)
 (cd webview-ui && npx vitest run src/components/settings/sections/FeatureSettingsSection.test.tsx)
 
 # 4. Lint (error level) on touched files

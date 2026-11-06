@@ -51,6 +51,18 @@ type LooseSelectQuery = {
 
 export type Increment = { _type: "increment"; value: number }
 
+export class ShadowCommitError extends Error {
+	constructor(
+		readonly agentId: string,
+		cause: unknown,
+	) {
+		super(`Transaction shadow ${agentId} was retained after commit failed. Retry commitWork or explicitly roll it back.`, {
+			cause,
+		})
+		this.name = "ShadowCommitError"
+	}
+}
+
 export type WriteOp = {
 	type: "insert" | "update" | "delete" | "upsert"
 	table: keyof Schema
@@ -75,6 +87,67 @@ const LAYER_PRIORITY: Record<DbLayer, number> = {
 function normalizeWhere(where: WhereCondition | WhereCondition[] | undefined): WhereCondition[] {
 	if (!where) return []
 	return Array.isArray(where) ? where : [where]
+}
+
+type ColumnAffinity = "text" | "numeric" | "blob"
+
+function applyAffinity(value: unknown, affinity?: ColumnAffinity): unknown {
+	if (affinity === "text" && typeof value === "number") return String(value)
+	if (affinity === "numeric" && typeof value === "string") {
+		const trimmed = value.trim()
+		if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
+			const number = Number(trimmed)
+			if (Number.isFinite(number)) return number
+		}
+	}
+	return value
+}
+
+/** Evaluate supported predicates for buffered rows using their SQLite column affinity. */
+function matchesWhere(
+	row: Record<string, unknown>,
+	conditions: WhereCondition[],
+	affinities: Map<string, ColumnAffinity>,
+): boolean {
+	return conditions.every(({ column, value, operator }) => {
+		const affinity = affinities.get(column)
+		const actual = applyAffinity(row[column] ?? null, affinity)
+		const expected = applyAffinity(value, affinity)
+		const op = (operator || "=").toUpperCase()
+		if (Array.isArray(value)) return actual !== null && value.some((item) => actual === applyAffinity(item, affinity))
+		if (op === "IS") return actual === expected
+		if (op === "IS NOT") return actual !== expected
+		if (actual === null || expected === null) return false
+		if (op === "=") return actual === expected
+		if (op === "!=") return actual !== expected
+		if (op === "LIKE") {
+			const fold = (s: string) => s.replace(/[A-Z]/g, (char) => char.toLowerCase())
+			const escaped = fold(String(value))
+				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+				.replace(/%/g, "[\\s\\S]*")
+				.replace(/_/g, "[\\s\\S]")
+			return new RegExp(`^${escaped}(?![\\s\\S])`, "u").test(fold(String(actual)))
+		}
+		if (op === "IN" || op === "UNSAFE_IN") return actual === expected
+		const comparison = compareSqliteValues(actual, expected)
+		if (op === ">") return comparison > 0
+		if (op === "<") return comparison < 0
+		if (op === ">=") return comparison >= 0
+		if (op === "<=") return comparison <= 0
+		return false
+	})
+}
+
+/** SQLite orders NULL, numbers, text (binary collation), then blobs. */
+function compareSqliteValues(left: unknown, right: unknown): number {
+	const rank = (value: unknown) => (value == null ? 0 : typeof value === "number" ? 1 : Buffer.isBuffer(value) ? 3 : 2)
+	const leftRank = rank(left)
+	const rightRank = rank(right)
+	if (leftRank !== rightRank) return leftRank - rightRank
+	if (leftRank === 0) return 0
+	if (leftRank === 1) return (left as number) - (right as number)
+	if (leftRank === 3) return Buffer.compare(left as Buffer, right as Buffer)
+	return Buffer.compare(Buffer.from(String(left)), Buffer.from(String(right)))
 }
 
 /**
@@ -108,6 +181,9 @@ export class BufferedDbPool {
 	private warmedIndices = new Set<string>() // Level 9: Authoritative Memory Indices
 	private started = false
 	private stopped = false
+	private flushFailure: unknown = null
+	private retainedCommitShadows = new Set<string>()
+	private stopPromise: Promise<void> | null = null
 	private nextOpSeq = 0
 
 	constructor() {
@@ -127,7 +203,7 @@ export class BufferedDbPool {
 	 * Adaptive flush scheduling.
 	 */
 	private scheduleFlush(delay = 10) {
-		if (this.stopped) return
+		if (this.stopped || this.flushFailure) return
 		if (this.flushTimeout) {
 			if (this.currentFlushDelay !== null && this.currentFlushDelay <= delay) {
 				return
@@ -139,6 +215,7 @@ export class BufferedDbPool {
 		this.flushTimeout = setTimeout(async () => {
 			this.currentFlushDelay = null
 			this.flushTimeout = null
+			if (this.flushFailure) return
 			try {
 				await this.flush()
 			} catch (flushErr) {
@@ -178,25 +255,33 @@ export class BufferedDbPool {
 	}
 
 	private ensureStarted() {
-		if (!this.started || this.stopped) this.startFlushLoop()
+		if (this.started && this.stopped)
+			throw new Error("Database shutdown is in progress or needs retry; new work is not accepted.")
+		if (!this.started) this.startFlushLoop()
 	}
 
 	private async cleanupShadows() {
 		const release = await this.stateMutex.acquire()
-		let shadowAgentIds: string[] = []
+		let emptyShadows = new Map<
+			string,
+			{ ops: WriteOp[]; affectedFiles: Set<string>; lastUpdated: number; checksum: string }
+		>()
 		try {
 			if (this.agentShadows.size === 0) return
-			shadowAgentIds = Array.from(this.agentShadows.keys())
+			emptyShadows = new Map(
+				[...this.agentShadows].filter(([, shadow]) => shadow.ops.length === 0 && shadow.affectedFiles.size === 0),
+			)
 		} finally {
 			release()
 		}
+		if (!emptyShadows.size) return
 
 		try {
 			const db = await this.ensureDb()
 			const terminated = await db
 				.selectFrom("agent_streams")
 				.select(["id", "status"])
-				.where("id", "in", shadowAgentIds)
+				.where("id", "in", [...emptyShadows.keys()])
 				.where("status", "in", ["completed", "failed"])
 				.execute()
 
@@ -204,7 +289,15 @@ export class BufferedDbPool {
 				const releaseClean = await this.stateMutex.acquire()
 				try {
 					for (const row of terminated) {
-						this.agentShadows.delete(row.id)
+						const shadow = this.agentShadows.get(row.id)
+						if (
+							shadow === emptyShadows.get(row.id) &&
+							shadow &&
+							shadow.ops.length === 0 &&
+							shadow.affectedFiles.size === 0 &&
+							!this.retainedCommitShadows.has(row.id)
+						)
+							this.agentShadows.delete(row.id)
 					}
 				} finally {
 					releaseClean()
@@ -219,6 +312,7 @@ export class BufferedDbPool {
 		this.ensureStarted()
 		const release = await this.stateMutex.acquire()
 		try {
+			if (this.stopped) throw new Error("Database shutdown is in progress; new work is not accepted.")
 			if (!this.agentShadows.has(agentId)) {
 				this.agentShadows.set(agentId, {
 					ops: [],
@@ -306,6 +400,10 @@ export class BufferedDbPool {
 	}
 
 	public async pushBatch(ops: WriteOp[], agentId?: string, affectedFile?: string) {
+		if (this.flushFailure)
+			throw new Error("Database writes are blocked by a failed flush. Resolve the failure and retry flush.", {
+				cause: this.flushFailure,
+			})
 		this.ensureStarted()
 		const enqueueStart = performance.now()
 		let currentBufferLength = 0
@@ -329,6 +427,11 @@ export class BufferedDbPool {
 			if (!shadow) {
 				const release = await this.stateMutex.acquire()
 				try {
+					if (this.stopped) throw new Error("Database shutdown is in progress; new work is not accepted.")
+					if (this.flushFailure)
+						throw new Error("Database writes are blocked by a failed flush. Resolve the failure and retry flush.", {
+							cause: this.flushFailure,
+						})
 					shadow = this.agentShadows.get(agentId) ?? {
 						ops: [],
 						affectedFiles: new Set<string>(),
@@ -356,12 +459,14 @@ export class BufferedDbPool {
 				.digest("hex")
 		} else {
 			if (ops.length > 0) {
-				let tableBuffer = this.activeBuffer.get(ops[0].table)
-				if (!tableBuffer) {
-					tableBuffer = []
-					this.activeBuffer.set(ops[0].table, tableBuffer)
+				for (const op of ops) {
+					let tableBuffer = this.activeBuffer.get(op.table)
+					if (!tableBuffer) {
+						tableBuffer = []
+						this.activeBuffer.set(op.table, tableBuffer)
+					}
+					tableBuffer.push(op)
 				}
-				tableBuffer.push(...ops)
 				this.activeBufferSize += ops.length
 				currentBufferLength = this.activeBufferSize
 			}
@@ -382,12 +487,22 @@ export class BufferedDbPool {
 	}
 
 	public async commitWork(agentId: string, _validator?: unknown) {
+		if (this.flushFailure)
+			throw new Error("Database writes are blocked by a failed flush. Resolve the failure and retry flush.", {
+				cause: this.flushFailure,
+			})
 		this.ensureStarted()
 		let shadowOpsCount = 0
 		const release = await this.stateMutex.acquire()
 		try {
+			if (this.stopped) throw new Error("Database shutdown is in progress; new work is not accepted.")
+			if (this.flushFailure)
+				throw new Error("Database writes are blocked by a failed flush. Resolve the failure and retry flush.", {
+					cause: this.flushFailure,
+				})
 			const shadow = this.agentShadows.get(agentId)
 			this.agentShadows.delete(agentId)
+			this.retainedCommitShadows.delete(agentId)
 			if (shadow && shadow.ops.length > 0) {
 				shadowOpsCount = shadow.ops.length
 				for (const op of shadow.ops) {
@@ -417,6 +532,7 @@ export class BufferedDbPool {
 		const release = await this.stateMutex.acquire()
 		try {
 			this.agentShadows.delete(agentId)
+			this.retainedCommitShadows.delete(agentId)
 		} finally {
 			release()
 		}
@@ -429,14 +545,22 @@ export class BufferedDbPool {
 	public async runTransaction<T>(callback: (agentId: string) => Promise<T>): Promise<T> {
 		const agentId = `trx-${crypto.randomUUID()}`
 		await this.beginWork(agentId)
+		let result: T
 		try {
-			const result = await callback(agentId)
-			await this.commitWork(agentId)
-			return result
+			result = await callback(agentId)
 		} catch (e) {
 			await this.rollbackWork(agentId)
 			throw e
 		}
+		// A commit failure does not mean the callback failed. Keep its shadow
+		// available for reconciliation instead of silently discarding completed work.
+		try {
+			await this.commitWork(agentId)
+		} catch (error) {
+			this.retainedCommitShadows.add(agentId)
+			throw new ShadowCommitError(agentId, error)
+		}
+		return result
 	}
 
 	public async flush() {
@@ -483,18 +607,21 @@ export class BufferedDbPool {
 						agent_knowledge: 9,
 						agent_knowledge_edges: 10,
 					}
-					opsToFlush = Array.from(dirtyBuffer.values())
-						.flat()
-						.sort((a, b) => {
-							const fkA = TABLE_FK_ORDER[a.table]
-							const fkB = TABLE_FK_ORDER[b.table]
-							if (fkA !== undefined && fkB !== undefined && fkA !== fkB) return fkA - fkB
-							const pA = LAYER_PRIORITY[a.layer ?? "plumbing"]
-							const pB = LAYER_PRIORITY[b.layer ?? "plumbing"]
-							if (pA !== pB) return pA - pB
-							if (a.table !== b.table) return (a.table as string).localeCompare(b.table as string)
-							return (a.opSeq ?? 0) - (b.opSeq ?? 0)
-						})
+					const pendingOps = Array.from(dirtyBuffer.values()).flat()
+					const tablePriority = new Map<keyof Schema, number>()
+					for (const op of pendingOps) {
+						const priority = LAYER_PRIORITY[op.layer ?? "plumbing"]
+						tablePriority.set(op.table, Math.min(tablePriority.get(op.table) ?? priority, priority))
+					}
+					opsToFlush = pendingOps.sort((a, b) => {
+						const fkA = TABLE_FK_ORDER[a.table] ?? Number.MAX_SAFE_INTEGER
+						const fkB = TABLE_FK_ORDER[b.table] ?? Number.MAX_SAFE_INTEGER
+						if (fkA !== fkB) return fkA - fkB
+						const priority = tablePriority.get(a.table)! - tablePriority.get(b.table)!
+						if (priority !== 0) return priority
+						if (a.table !== b.table) return (a.table as string).localeCompare(b.table as string)
+						return (a.opSeq ?? 0) - (b.opSeq ?? 0)
+					})
 				} else if (this.inFlightOps.size > 0) {
 					opsToFlush = Array.from(this.inFlightOps.values()).flat()
 				}
@@ -550,6 +677,7 @@ export class BufferedDbPool {
 				this.inFlightOps.clear()
 				this.inFlightSize = 0
 				this.inFlightIndex.clear()
+				this.flushFailure = null
 			} finally {
 				releaseStateClear()
 			}
@@ -567,23 +695,27 @@ export class BufferedDbPool {
 
 			if (!isRetryable) {
 				Logger.error("[DbPool] Non-retryable flush failure:", err)
+				this.flushFailure = e
+				if (this.flushTimeout) clearTimeout(this.flushTimeout)
+				this.flushTimeout = null
+				this.currentFlushDelay = null
 			}
 
 			const releaseStateFail = await this.stateMutex.acquire()
 			try {
-				if (isRetryable) {
-					for (const op of opsToFlush) {
-						let tableBuffer = this.activeBuffer.get(op.table)
-						if (!tableBuffer) {
-							tableBuffer = []
-							this.activeBuffer.set(op.table, tableBuffer)
-						}
-						tableBuffer.unshift(op)
-						this.activeBufferSize++
-
-						// Level 7: Restore index
-						this.addStatusIndex(op, this.activeIndex)
+				// Prepending in reverse keeps older operations in their original order
+				// ahead of writes admitted while the failed flush was in flight.
+				for (const op of [...opsToFlush].reverse()) {
+					let tableBuffer = this.activeBuffer.get(op.table)
+					if (!tableBuffer) {
+						tableBuffer = []
+						this.activeBuffer.set(op.table, tableBuffer)
 					}
+					tableBuffer.unshift(op)
+					this.activeBufferSize++
+
+					// Level 7: Restore index
+					this.addStatusIndex(op, this.activeIndex)
 				}
 				this.inFlightOps.clear()
 				this.inFlightSize = 0
@@ -650,6 +782,51 @@ export class BufferedDbPool {
 		return group.length
 	}
 
+	/** Remove expired, unreferenced observations without racing buffered writes. */
+	public async pruneExpiredAgentKnowledge(type: string, now: number): Promise<number> {
+		await this.flush()
+		const db = await this.ensureDb()
+		const releaseFlush = await this.flushMutex.acquire()
+		try {
+			const releaseState = await this.stateMutex.acquire()
+			try {
+				// A write queued after the flush may renew a row or add an edge.
+				// Leave cleanup for a later pass rather than racing that write.
+				if (this.activeBufferSize || this.inFlightSize) return 0
+				const result = await db
+					.deleteFrom("agent_knowledge")
+					.where("type", "=", type)
+					.where("expiresAt", "<=", now)
+					.where((eb) =>
+						eb.not(
+							eb.exists(
+								eb
+									.selectFrom("agent_knowledge_edges")
+									.select("sourceId")
+									.whereRef("sourceId", "=", "agent_knowledge.id"),
+							),
+						),
+					)
+					.where((eb) =>
+						eb.not(
+							eb.exists(
+								eb
+									.selectFrom("agent_knowledge_edges")
+									.select("targetId")
+									.whereRef("targetId", "=", "agent_knowledge.id"),
+							),
+						),
+					)
+					.executeTakeFirst()
+				return Number(result.numDeletedRows)
+			} finally {
+				releaseState()
+			}
+		} finally {
+			releaseFlush()
+		}
+	}
+
 	public async selectWhere<T extends keyof Schema>(
 		table: T,
 		where: WhereCondition | WhereCondition[],
@@ -664,17 +841,37 @@ export class BufferedDbPool {
 		const release = await this.stateMutex.acquire()
 		try {
 			const conditions = normalizeWhere(where)
-			const statusCond = conditions.find(
-				(c) => (c.column === "status" || c.column === "type") && (c.operator === "=" || !c.operator),
-			)
-			const indexKey = statusCond ? `${table as string}:${statusCond.column}:${statusCond.value}` : null
-			const isWarmed = indexKey && this.warmedIndices.has(indexKey)
-
+			const overlays = [
+				...(this.inFlightOps.get(table) || []),
+				...(this.activeBuffer.get(table) || []),
+				...(agentId ? this.agentShadows.get(agentId)?.ops.filter((op) => op.table === table) || [] : []),
+			]
+			const affinities = new Map<string, ColumnAffinity>()
+			if (overlays.length) {
+				const columns = this.getStatement("SELECT name, type FROM pragma_table_info(?)").all(table) as Array<{
+					name: string
+					type: string
+				}>
+				for (const column of columns) {
+					const declared = column.type.toUpperCase()
+					const affinity: ColumnAffinity = /INT|REAL|FLOA|DOUB/.test(declared)
+						? "numeric"
+						: /CHAR|CLOB|TEXT/.test(declared)
+							? "text"
+							: !declared || declared.includes("BLOB")
+								? "blob"
+								: "numeric"
+					affinities.set(column.name, affinity)
+				}
+			}
+			// Updates can bring previously non-matching rows into the result, and
+			// upserts need the original row to merge against their conflict target.
+			const needsBaseline = overlays.some((op) => op.type === "update" || op.type === "upsert")
 			let diskResults: Schema[T][] = []
-			if (!isWarmed) {
+			{
 				let query = db.selectFrom(table as never).selectAll() as unknown as LooseSelectQuery
-				for (const cond of conditions) {
-					const opStr: QueryOperator = cond.operator || "="
+				for (const cond of needsBaseline ? [] : conditions) {
+					const opStr = (cond.operator || "=").toLowerCase()
 					if (Array.isArray(cond.value)) {
 						query = query.where(cond.column, "in", cond.value)
 					} else {
@@ -685,28 +882,17 @@ export class BufferedDbPool {
 				if (options?.orderBy) {
 					query = query.orderBy(options.orderBy.column, options.orderBy.direction)
 				}
-				if (options?.limit) {
+				// Pending overlays can remove or reorder rows. Limiting the disk query
+				// first would hide rows needed to fill the final result.
+				if (options?.limit && overlays.length === 0) {
 					query = query.limit(options.limit)
 				}
 				diskResults = (await query.execute()) as Schema[T][]
 			}
 
-			const applyOps = (ops: WriteOp[], sourceIndex: Map<string, Set<WriteOp>> | undefined, target: Schema[T][]) => {
-				// Level 7: Fast-Path Status Indexing
-				const statusCond = conditions.find(
-					(c) => (c.column === "status" || c.column === "type") && (c.operator === "=" || !c.operator),
-				)
-				let tableOps: Iterable<WriteOp> = []
-
-				if (statusCond && sourceIndex) {
-					const key = `${statusCond.column}:${statusCond.value}`
-					const set = sourceIndex.get(key)
-					tableOps = set || []
-				} else {
-					tableOps = ops
-				}
-
-				for (const op of tableOps) {
+			const applyOps = (ops: WriteOp[], target: Schema[T][]) => {
+				// Status indexes do not contain deletes or updates away from a status.
+				for (const op of ops) {
 					// Additional safety check if we're using a full buffer instead of an index
 					if (op.table !== table) continue
 
@@ -724,48 +910,15 @@ export class BufferedDbPool {
 
 					const opWhere = normalizeWhere(op.where)
 
-					// Pre-compute Sets for IN operators to O(1) lookup
-					const inSets = opWhere.map((c) => {
-						if (c.operator?.toUpperCase() === "IN" && Array.isArray(c.value)) {
-							return new Set(c.value as unknown[])
-						}
-						return null
-					})
-
-					const matches = (r: unknown, queryConditions: WhereCondition[]) => {
-						const row = r as Record<string, unknown>
-						if (queryConditions.length === 0) return true
-						return queryConditions.every((c, idx) => {
-							const val = row[c.column]
-							const opStr = (c.operator || "=").toUpperCase()
-
-							if (opStr === "IN") {
-								// If this is matching against the op's where, use the pre-computed set
-								// If this is matching against the SELECT's where, just use the array
-								if (queryConditions === opWhere) {
-									const set = inSets[idx]
-									if (set) return set.has(val as string | number)
-								}
-								if (Array.isArray(c.value)) return (c.value as unknown[]).includes(val)
-								return val === c.value
-							}
-							if (opStr === "=") return val === c.value
-							if (opStr === "!=") return val !== c.value
-							if (opStr === ">") return Number(val) > Number(c.value)
-							if (opStr === "<") return Number(val) < Number(c.value)
-							if (opStr === ">=") return Number(val) >= Number(c.value)
-							if (opStr === "<=") return val !== null && Number(val) <= Number(c.value)
-							return false
-						})
-					}
+					const matches = (row: unknown, predicate: WhereCondition[]) =>
+						matchesWhere(row as Record<string, unknown>, predicate, affinities)
 
 					if (op.type === "insert" && op.values) {
 						const newRow = { ...op.values } as unknown as Schema[T]
-						if (matches(newRow, conditions)) target.push(newRow)
+						target.push(newRow)
 					} else if (op.type === "upsert" && op.values) {
 						const pkMatch = (r: unknown) => {
 							const row = r as Record<string, unknown>
-							if (opWhere.length > 0) return matches(row, opWhere)
 							if (op.conflictTarget) {
 								const targets = Array.isArray(op.conflictTarget) ? op.conflictTarget : [op.conflictTarget]
 								const vals = op.values as Record<string, unknown>
@@ -782,26 +935,18 @@ export class BufferedDbPool {
 							const existing = target[existingIdx]
 							if (existing) {
 								const next = applyValues(existing, op.values as Record<string, unknown>, op.hasIncrements)
-								if (matches(next, conditions)) {
-									target[existingIdx] = next
-								} else {
-									target.splice(existingIdx, 1)
-								}
+								target[existingIdx] = next
 							}
 						} else {
 							const newRow = { ...op.values } as unknown as Schema[T]
-							if (matches(newRow, conditions)) target.push(newRow)
+							target.push(newRow)
 						}
 					} else if (op.type === "update" && op.values) {
 						for (let i = target.length - 1; i >= 0; i--) {
 							const existing = target[i]
 							if (existing && matches(existing, opWhere)) {
 								const next = applyValues(existing, op.values as Record<string, unknown>, op.hasIncrements)
-								if (matches(next, conditions)) {
-									target[i] = next
-								} else {
-									target.splice(i, 1)
-								}
+								target[i] = next
 							}
 						}
 					} else if (op.type === "delete") {
@@ -814,12 +959,14 @@ export class BufferedDbPool {
 			}
 
 			let finalResults = [...diskResults]
-			applyOps(this.inFlightOps.get(table) || [], this.inFlightIndex.get(table), finalResults)
-			applyOps(this.activeBuffer.get(table) || [], this.activeIndex.get(table), finalResults)
+			applyOps(this.inFlightOps.get(table) || [], finalResults)
+			applyOps(this.activeBuffer.get(table) || [], finalResults)
 			if (agentId) {
 				const shadow = this.agentShadows.get(agentId)
-				if (shadow) applyOps(shadow.ops, undefined, finalResults)
+				if (shadow) applyOps(shadow.ops, finalResults)
 			}
+			if (overlays.length)
+				finalResults = finalResults.filter((row) => matchesWhere(row as Record<string, unknown>, conditions, affinities))
 
 			if (options?.orderBy) {
 				const col = options.orderBy.column as string
@@ -827,10 +974,11 @@ export class BufferedDbPool {
 				finalResults.sort((a, b) => {
 					const valA = (a as Record<string, unknown>)[col]
 					const valB = (b as Record<string, unknown>)[col]
-					if (valA === undefined || valB === undefined || valA === null || valB === null) return 0
-					if (valA < valB) return dir === "asc" ? -1 : 1
-					if (valA > valB) return dir === "asc" ? 1 : -1
-					return 0
+					const comparison = compareSqliteValues(
+						applyAffinity(valA, affinities.get(col)),
+						applyAffinity(valB, affinities.get(col)),
+					)
+					return dir === "asc" ? comparison : -comparison
 				})
 			}
 			if (options?.limit) finalResults = finalResults.slice(0, options.limit)
@@ -1137,9 +1285,28 @@ export class BufferedDbPool {
 		return this.selectWhere(table, [], agentId)
 	}
 
-	public async stop() {
-		if (this.stopped) return
-		this.stopped = true
+	public stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise
+		const stopping = this.stopInternal()
+		this.stopPromise = stopping
+		void stopping
+			.finally(() => {
+				if (this.stopPromise === stopping) this.stopPromise = null
+			})
+			.catch(() => {})
+		return stopping
+	}
+
+	private async stopInternal() {
+		if (this.stopped && !this.started) return
+		const release = await this.stateMutex.acquire()
+		try {
+			if (this.agentShadows.size || this.retainedCommitShadows.size)
+				throw new Error("Database shutdown blocked: transaction shadows need commit or explicit rollback.")
+			this.stopped = true
+		} finally {
+			release()
+		}
 		if (this.flushInterval) clearInterval(this.flushInterval)
 		if (this.cleanupInterval) clearInterval(this.cleanupInterval)
 		if (this.flushTimeout) clearTimeout(this.flushTimeout)

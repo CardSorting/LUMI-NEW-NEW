@@ -62,6 +62,23 @@ function busyState(): ExecutionState {
 }
 
 describe("bounded execution context", () => {
+	it("reports recovered unresolved actions separately from live work", () => {
+		const state = busyState()
+		state.actions.unresolved = [
+			{
+				execution_id: "recovered",
+				kind: "command",
+				label: "build",
+				owner: "helper:me",
+				status: "unconfirmed",
+				recovery: { previousStatus: "running", observedAt: 1, authority: "none" },
+			},
+		]
+		const result = snapshot(formatExecutionState(state, "helper:me"))
+		assert.equal(result.totals.unresolved_actions, 1)
+		assert.equal(result.actions.unresolved[0].execution_id, "recovered")
+		assert.equal(result.omitted.unresolved_actions, 0)
+	})
 	it("caps bytes after JSON escaping and Unicode while retaining own work and honest omission counts", () => {
 		const state = busyState()
 		const original = JSON.stringify(state)

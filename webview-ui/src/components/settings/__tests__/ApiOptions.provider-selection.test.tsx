@@ -60,4 +60,41 @@ describe("API provider selection", () => {
 		fireEvent.keyDown(input, { key: "Enter" })
 		expect(handleModeFieldChange).not.toHaveBeenCalled()
 	})
+
+	it("exposes keyboard navigation and can reopen the provider list after Escape", () => {
+		render(<ApiOptions currentMode="act" showModelOptions />)
+		const input = screen.getByRole("combobox")
+		expect(input).toHaveAttribute("aria-expanded", "false")
+		fireEvent.focus(input)
+		expect(input).toHaveAttribute("aria-expanded", "true")
+		expect(input).toHaveAttribute("aria-controls", screen.getByRole("listbox").id)
+		fireEvent.keyDown(input, { key: "ArrowDown" })
+		const selected = screen.getByRole("option", { selected: true })
+		expect(input).toHaveAttribute("aria-activedescendant", selected.id)
+		fireEvent.keyDown(input, { key: "Escape" })
+		expect(input).toHaveAttribute("aria-expanded", "false")
+		fireEvent.keyDown(input, { key: "ArrowDown" })
+		expect(input).toHaveAttribute("aria-expanded", "true")
+	})
+
+	it("explains when a provider search has no matches", () => {
+		render(<ApiOptions currentMode="act" showModelOptions />)
+		const input = screen.getByRole("combobox")
+		fireEvent.focus(input)
+		fireEvent.input(input, { target: { value: "no-such-provider-12345" } })
+		expect(screen.getByRole("option", { name: "No providers found." })).toHaveAttribute("aria-disabled", "true")
+	})
+
+	it.each(["requesty", "together", "fireworks", "openai", "nebius"])(
+		"identifies unavailable saved provider %s without silently selecting OpenRouter",
+		(provider) => {
+			vi.mocked(useExtensionState).mockReturnValue({
+				apiConfiguration: { actModeApiProvider: provider },
+			} as unknown as ReturnType<typeof useExtensionState>)
+			render(<ApiOptions currentMode="act" showModelOptions />)
+			expect(screen.getByRole("combobox")).toHaveValue(provider)
+			expect(screen.getByRole("alert")).toHaveTextContent(`configured provider “${provider}” is unavailable`)
+			expect(handleModeFieldChange).not.toHaveBeenCalled()
+		},
+	)
 })

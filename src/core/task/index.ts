@@ -45,6 +45,7 @@ import {
 	getSavedApiConversationHistory,
 	getSavedDietCodeMessages,
 } from "@core/storage/disk"
+import { formatLegionHandoffText, legionHandoffStatus } from "@core/task/legion/LegionHandoff"
 import { releaseTaskLock } from "@core/task/TaskLockUtils"
 import { isMultiRootEnabled } from "@core/workspace/multi-root-utils"
 import { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
@@ -73,7 +74,7 @@ import {
 	DietCodeSay,
 	TaskAuditMetadata,
 } from "@shared/ExtensionMessage"
-import { getApiMetrics } from "@shared/getApiMetrics"
+import { getApiMetrics, hasValidApiUsage } from "@shared/getApiMetrics"
 import { HistoryItem } from "@shared/HistoryItem"
 import { inferAgentModeFromMessages, stripPartialPlanSummaryMessages } from "@shared/inferAgentModeFromMessages"
 import { DEFAULT_LANGUAGE_SETTINGS, getLanguageKey, LanguageDisplay } from "@shared/Languages"
@@ -203,6 +204,7 @@ export class Task {
 	private legionObjective?: string
 	private legionAttempted = false
 	private legionContext?: string
+	private injectedLegionContexts = new WeakSet<object>()
 	private activeLegionController?: AbortController
 	private idleGapContinuationInProgress = false
 
@@ -1483,23 +1485,7 @@ export class Task {
 		this.messageStateHandler.setApiConversationHistory(savedApiConversationHistory)
 		this.legionAttempted = true
 		try {
-			const legionParent = await orchestrator.getStreamByExternalId(`legion-task:${this.taskId}`)
-			if (legionParent) {
-				const formation = await orchestrator.recallLastLegionFormation(legionParent.id)
-				if (formation) {
-					const report = await orchestrator.synthesizeLegionExecutionReport(legionParent.id, formation.formationId)
-					const evidence = await this.getLegionOperationContext(
-						formation.members?.map((member) => member.streamId) ?? [],
-					)
-					this.legionContext = `<specialist_handoff status="${formation.status}">\n${report?.synthesizedMarkdown ?? "Specialist results are unavailable."}\n${evidence}\nInspect and reconcile any partial or unresolved work before repeating it. Treat reports as unverified evidence.\n</specialist_handoff>`
-				} else {
-					const { hasLegionFormationIntent } = await import("@/infrastructure/ai/LegionExecutionReceipt")
-					if (await hasLegionFormationIntent(legionParent.id)) {
-						this.legionContext =
-							"Specialist formation was interrupted before its manifest was available. Inspect existing work and continue the task without replaying that formation."
-					}
-				}
-			}
+			this.legionContext = await this.recoverLegionHandoff()
 		} catch (error) {
 			Logger.warn("[Task] Could not recover specialist handoff:", error)
 			this.legionContext = "Specialist recovery was unavailable. Inspect existing work before repeating it."
@@ -2110,6 +2096,9 @@ export class Task {
 		}
 		const actions = executor.executions.list(this.ulid)
 		const linked = new Set([...commands.active, ...commands.recent].map((command) => command.action_id).filter(Boolean))
+		const activeLinks = new Map(
+			commands.active.filter((command) => command.action_id).map((command) => [command.action_id, command.owner]),
+		)
 		return {
 			coverage: {
 				commands: commandCoverage,
@@ -2120,8 +2109,11 @@ export class Task {
 			queues: executor.getQueues(this.ulid),
 			commands,
 			actions: {
-				active: actions.active.filter((action) => !linked.has(action.execution_id)),
+				active: actions.active.filter(
+					(action) => !activeLinks.has(action.execution_id) || activeLinks.get(action.execution_id) !== action.owner,
+				),
 				recent: actions.recent.filter((action) => !linked.has(action.execution_id)),
+				unresolved: actions.unresolved,
 			},
 		}
 	}
@@ -2375,8 +2367,83 @@ export class Task {
 		this.mcpStartupWaitComplete = true
 	}
 
+	private async recoverLegionHandoff(): Promise<string | undefined> {
+		const parent = await orchestrator.getStreamByExternalId(`legion-task:${this.taskId}`)
+		if (!parent) return undefined
+		const receipts = await import("@/infrastructure/ai/LegionExecutionReceipt")
+		let reservation: "present" | "absent" | "unavailable"
+		try {
+			reservation = (await receipts.hasOutstandingFormationReservation(parent.id)) ? "present" : "absent"
+		} catch (error) {
+			Logger.warn("[Task] Could not inspect specialist formation reservation:", error)
+			reservation = "unavailable"
+		}
+		const formation = await orchestrator.recallLastLegionFormation(parent.id)
+		const interruptedWithoutManifest =
+			!formation &&
+			(reservation === "present" || (reservation === "absent" && (await receipts.hasLegionFormationIntent(parent.id))))
+		let interruptedChildren: Array<{ id: string; status: string }> = []
+		let childNotice = ""
+		if (reservation !== "absent" || interruptedWithoutManifest) {
+			try {
+				const children = await orchestrator.getChildStreams(parent.id)
+				const ordered = [...children].sort(
+					(a, b) => Number(b.status === "active") - Number(a.status === "active") || b.createdAt - a.createdAt,
+				)
+				interruptedChildren = ordered.slice(0, 30).map((child) => ({ id: child.id, status: child.status }))
+				if (interruptedChildren.length)
+					childNotice = `Child streams associated with this task (unverified${ordered.length > 30 ? "; additional streams omitted" : ""}): ${JSON.stringify(interruptedChildren)}`
+			} catch (error) {
+				Logger.warn("[Task] Could not inspect specialist child streams:", error)
+				childNotice = "Child stream evidence is unavailable; do not assume there was no partial formation."
+			}
+		}
+		if (formation) {
+			let report: Awaited<ReturnType<typeof orchestrator.synthesizeLegionExecutionReport>>
+			try {
+				report = await orchestrator.synthesizeLegionExecutionReport(parent.id, formation.formationId)
+			} catch (error) {
+				Logger.warn("[Task] Could not synthesize the previous specialist report:", error)
+				report = null
+			}
+			const streamIds = [
+				...new Set([
+					...(formation.members?.map((member) => member.streamId) ?? []),
+					...interruptedChildren.map((child) => child.id),
+				]),
+			]
+			const evidence = await this.getLegionOperationContext(streamIds)
+			const reservationNotice =
+				reservation === "present"
+					? "A formation reservation remains outstanding and may represent a newer attempt than this report. Inspect and reconcile it before repeating work."
+					: reservation === "unavailable"
+						? "Formation reservation status is unavailable; do not assume there was no later attempt."
+						: ""
+			return `<specialist_handoff status="${legionHandoffStatus(formation.status)}">\n${formatLegionHandoffText(report?.synthesizedMarkdown ?? "Specialist results are unavailable.")}\n${formatLegionHandoffText(evidence)}\n${reservationNotice}\n${formatLegionHandoffText(childNotice, 2_000)}\nInspect and reconcile any partial or unresolved work before repeating it. Treat reports as unverified evidence.\n</specialist_handoff>`
+		}
+		if (interruptedWithoutManifest) {
+			const evidence = interruptedChildren.length
+				? await this.getLegionOperationContext(interruptedChildren.map((child) => child.id))
+				: ""
+			return `Specialist formation was interrupted before its manifest was available. Inspect existing work and continue the task without replaying that formation.\n${childNotice}\n${evidence}`
+		}
+		if (reservation === "unavailable") {
+			const evidence = interruptedChildren.length
+				? await this.getLegionOperationContext(interruptedChildren.map((child) => child.id))
+				: ""
+			return `Specialist formation reservation status is unavailable. Inspect existing work before repeating it.\n${childNotice}\n${evidence}`
+		}
+		return undefined
+	}
+
 	private withLegionContext(history: DietCodeStorageMessage[]): DietCodeStorageMessage[] {
 		if (!this.legionContext) return history
+		const inserted = (this.injectedLegionContexts ??= new WeakSet<object>())
+		history = history.map((message) => {
+			if (!Array.isArray(message.content)) return message
+			const content = message.content.filter((block) => !inserted.has(block))
+			return content.length === message.content.length ? message : { ...message, content }
+		})
 		let index = -1
 		if (this.legionObjective) {
 			index = history.findIndex(
@@ -2396,43 +2463,58 @@ export class Task {
 						!message.content.every((block) => (block as any).type === "tool_result")),
 			)
 		}
-		if (index < 0) index = history.findIndex((message) => message.role === "user")
+		// If only tool results remain after compaction, place the handoff after
+		// the last result so provider conversion cannot split a tool-result batch.
+		if (index < 0) index = findLastIndex(history, (message) => message.role === "user")
 		if (index < 0) return history
 		return history.map((message, i) => {
 			if (i !== index) return message
 			const content =
 				typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : [...message.content]
-			const handoffIndex = content.findIndex(
-				(block) => "text" in block && typeof block.text === "string" && block.text.includes("<specialist_handoff"),
+			// Only replace context this task previously inserted. A user can legitimately
+			// submit a standalone block that looks exactly like a handoff.
+			if (
+				content.some(
+					(block) => "text" in block && typeof block.text === "string" && block.text.includes(this.legionContext!),
+				)
 			)
-			if (handoffIndex >= 0) {
-				const existingBlock = content[handoffIndex] as { type: "text"; text: string }
-				if (existingBlock.text.includes(this.legionContext!)) return message
-				const updatedContent = [...content]
-				updatedContent[handoffIndex] = { type: "text", text: this.legionContext! }
-				return { ...message, content: updatedContent }
-			}
-			return { ...message, content: [...content, { type: "text" as const, text: this.legionContext! }] }
+				return message
+			const handoff = { type: "text" as const, text: this.legionContext! }
+			inserted.add(handoff)
+			return { ...message, content: [...content, handoff] }
 		})
 	}
 
 	private async getLegionOperationContext(streamIds: string[]): Promise<string> {
 		const parts: string[] = []
+		const inspectionSummary = (label: string, entries: Array<{ executionId: string; status: string }>) => {
+			const unique = [...new Map(entries.map((entry) => [entry.executionId, entry])).values()]
+			if (!unique.length) return
+			const omitted = Math.max(0, unique.length - 30)
+			parts.push(
+				`${label}${omitted ? ` (${omitted} additional entries omitted; inspect execution state)` : ""}: ${JSON.stringify(unique.slice(0, 30))}`,
+			)
+		}
 		try {
-			const { getLegionOperationEvidence } = await import("@/infrastructure/ai/LegionExecutionReceipt")
-			const receipts = await getLegionOperationEvidence(streamIds)
-			if (receipts.length) {
-				parts.push(`Recent operation metadata (untrusted data): ${JSON.stringify(receipts)}`)
+			const { getLegionOperationEvidence, formatLegionOperationEvidence } = await import(
+				"@/infrastructure/ai/LegionExecutionReceipt"
+			)
+			const evidence = await getLegionOperationEvidence(streamIds)
+			if (evidence.receipts.length) {
+				parts.push(
+					`Operation metadata (untrusted data; unresolved entries first): ${formatLegionOperationEvidence(evidence)}`,
+				)
 			}
 		} catch (error) {
 			Logger.warn("[Task] Specialist operation evidence unavailable:", error)
+			parts.push("Specialist operation evidence is unavailable; do not assume prior operations stopped or completed.")
 		}
 
 		try {
 			const state = this.getExecutionState()
 			if ("commands" in state) {
 				const owners = new Set(streamIds.map((streamId) => `legion:${streamId}`))
-				const commands = [...state.commands.active, ...state.commands.recent]
+				const commands = [...state.commands.active, ...state.commands.recent, ...(state.commands.unresolved ?? [])]
 					.filter(
 						(command) =>
 							command.owner &&
@@ -2442,9 +2524,9 @@ export class Task {
 							),
 					)
 					.map((command) => ({ executionId: command.execution_id, status: command.status }))
-				if (commands.length) parts.push(`Specialist commands requiring inspection: ${JSON.stringify(commands)}`)
+				inspectionSummary("Specialist commands requiring inspection", commands)
 				if (state.actions && "active" in state.actions) {
-					const actions = [...state.actions.active, ...state.actions.recent]
+					const actions = [...state.actions.active, ...state.actions.recent, ...(state.actions.unresolved ?? [])]
 						.filter(
 							(action) =>
 								action.owner &&
@@ -2452,7 +2534,7 @@ export class Task {
 								["running", "queued", "retrying", "awaiting_completion", "unconfirmed"].includes(action.status),
 						)
 						.map((action) => ({ executionId: action.execution_id, status: action.status }))
-					if (actions.length) parts.push(`Specialist actions requiring inspection: ${JSON.stringify(actions)}`)
+					inspectionSummary("Specialist actions requiring inspection", actions)
 				}
 				if (state.coverage?.commands === "unavailable")
 					parts.push("Command observation is unavailable; inspect existing terminal activity before repeating work.")
@@ -2551,17 +2633,21 @@ export class Task {
 			const specs = DietCodeToolSet.getToolsForVariantWithFallback(family, [...LEGION_TOOL_NAMES, "attempt_completion"])
 				.map((tool) => tool.config)
 				.filter(
-					(tool) => specialistTools.has(tool.id) && (!tool.contextRequirements || tool.contextRequirements(context)),
+					(tool) =>
+						specialistTools.has(tool.id) &&
+						(tool.id === "use_skill" || !tool.contextRequirements || tool.contextRequirements(context)),
 				)
 				.map((tool) =>
-					tool.id === "attempt_completion"
-						? {
-								...tool,
-								description:
-									"Return your specialist handoff to the coordinator once your assigned work is complete or blocked. Do not request user confirmation. Include evidence, changes, checks, and remaining work.",
-								parameters: tool.parameters?.filter((parameter) => parameter.name === "result"),
-							}
-						: tool,
+					tool.id === "use_skill"
+						? { ...tool, contextRequirements: undefined }
+						: tool.id === "attempt_completion"
+							? {
+									...tool,
+									description:
+										"Return your specialist handoff to the coordinator once your assigned work is complete or blocked. Do not request user confirmation. Include evidence, changes, checks, and remaining work.",
+									parameters: tool.parameters?.filter((parameter) => parameter.name === "result"),
+								}
+							: tool,
 				)
 			if (!specs.some((tool) => tool.id === "attempt_completion")) {
 				const { DietCodeDefaultTool } = await import("@shared/tools")
@@ -2588,9 +2674,27 @@ export class Task {
 				this.messageStateHandler.getDietCodeMessages(),
 				(message) => message.say === "api_req_started",
 			)
-			const priorUsage = getApiMetrics(
-				combineApiRequests(combineCommandSequences(this.messageStateHandler.getDietCodeMessages().slice(1))),
-			)
+			const usageMessage = this.messageStateHandler.getDietCodeMessages()[usageMessageIndex]
+			let priorSpecialist: DietCodeApiReqInfo["specialistUsage"]
+			if (usageMessage?.text) priorSpecialist = (JSON.parse(usageMessage.text) as DietCodeApiReqInfo).specialistUsage
+			const usageHistory = this.messageStateHandler.getDietCodeMessages().slice(1)
+			if (
+				(this.taskState.maxTokens !== undefined || this.taskState.maxCost !== undefined) &&
+				this.taskState.specialistUsageUnverified
+			) {
+				this.legionContext =
+					"Specialist usage could not be recorded reliably. Inspect task usage before starting another budgeted formation."
+				return
+			}
+			if (
+				(this.taskState.maxTokens !== undefined || this.taskState.maxCost !== undefined) &&
+				!hasValidApiUsage(usageHistory)
+			) {
+				this.legionContext =
+					"Task usage records are invalid. Specialist formation was not started; inspect usage before retrying."
+				return
+			}
+			const priorUsage = getApiMetrics(combineApiRequests(combineCommandSequences(usageHistory)))
 			const priorTokens =
 				priorUsage.totalTokensIn +
 				priorUsage.totalTokensOut +
@@ -2603,27 +2707,28 @@ export class Task {
 			if (remainingTokens === 0 || remainingCost === 0) return
 			const host = new LegionAgentHost({
 				systemContext: systemPrompt,
+				cwd: base.cwd,
+				isSkillEnabled: (skill) => {
+					const toggles =
+						skill.source === "global"
+							? base.services.stateManager.getGlobalSettingsKey("globalSkillsToggles")
+							: base.services.stateManager.getWorkspaceStateKey("localSkillsToggles")
+					return toggles?.[skill.path] !== false
+				},
+				workspaceArtifacts: this.taskState.workspaceArtifacts,
+				blackboard: this.taskState.swarmBlackboard,
 				maxTokens: remainingTokens,
 				maxCost: remainingCost,
+				requireUsagePersistence: remainingTokens !== undefined || remainingCost !== undefined,
+				onUsageFailure: () => {
+					this.taskState.specialistUsageUnverified = true
+				},
 				onUsage: async (usage) => {
-					try {
-						const messages = this.messageStateHandler.getDietCodeMessages()
-						const idx =
-							usageMessageIndex >= 0 && messages[usageMessageIndex]?.say === "api_req_started"
-								? usageMessageIndex
-								: findLastIndex(messages, (m) => m.say === "api_req_started")
-						if (idx < 0) return
-						const message = messages[idx]
-						if (!message || message.say !== "api_req_started") return
-						const info: DietCodeApiReqInfo = JSON.parse(message.text || "{}")
-						await this.messageStateHandler.updateDietCodeMessage(idx, {
-							text: JSON.stringify({ ...info, specialistUsage: usage }),
-						})
-						await this.messageStateHandler.saveDietCodeMessagesAndUpdateHistory()
-						await this.postStateToWebview()
-					} catch (error) {
-						Logger.warn("[Task] Could not persist specialist usage:", error)
-					}
+					if (!usageMessage) throw new Error("Specialist usage message is unavailable")
+					await this.messageStateHandler.recordSpecialistUsageStrict(usageMessage.ts, priorSpecialist, usage)
+					await this.postStateToWebview().catch((error) =>
+						Logger.warn("[Task] Could not refresh specialist usage display:", error),
+					)
 				},
 				createApi: (signal) =>
 					buildApiHandler(
@@ -2642,6 +2747,7 @@ export class Task {
 				result = await runAutomaticLegion({
 					parentStreamId: parent.id,
 					taskDescription: objective,
+					workspacePath: base.cwd,
 					delegationAllowed: true,
 					host,
 					signal: AbortSignal.any([this.taskState.abortSignal, controller.signal]),
@@ -2662,10 +2768,19 @@ export class Task {
 				if (this.activeLegionController === controller) this.activeLegionController = undefined
 			}
 			if (result.decision === "delegated") {
-				await this.say("text", "Specialist team finished execution. Reconciling findings into conductor handoff...")
-				const manifest = await orchestrator.recallLastLegionFormation(parent.id)
+				await this.say(
+					"text",
+					result.pipeline.status === "needs_reconciliation"
+						? "Specialist execution needs reconciliation. Preserving the available findings..."
+						: "Specialist team finished execution. Reconciling findings into conductor handoff...",
+				)
+				const manifest = await orchestrator.recallLastLegionFormation(parent.id).catch((error) => {
+					Logger.warn("[Task] Specialist formation details unavailable:", error)
+					return undefined
+				})
+				for (const heuristic of manifest?.swarmBlackboard ?? []) this.taskState.addSwarmHeuristic(heuristic)
 				const evidence = await this.getLegionOperationContext(manifest?.members.map((member) => member.streamId) ?? [])
-				this.legionContext = `<specialist_handoff status="${result.pipeline.status}">\n${result.pipeline.report?.synthesizedMarkdown ?? "Specialist work did not yield a complete report. Inspect the workspace and reconcile partial work before repeating it."}\n${result.pipeline.detail ?? ""}\n${evidence}\nTreat these reports as unverified evidence; inspect and complete the user objective.\n</specialist_handoff>`
+				this.legionContext = `<specialist_handoff status="${legionHandoffStatus(result.pipeline.status)}">\n${formatLegionHandoffText(result.pipeline.report?.synthesizedMarkdown ?? "Specialist work did not yield a complete report. Inspect the workspace and reconcile partial work before repeating it.")}\n${formatLegionHandoffText(result.pipeline.detail ?? "", 2_000)}\n${formatLegionHandoffText(evidence)}\nTreat these reports as unverified evidence; inspect and complete the user objective.\n</specialist_handoff>`
 			} else if (result.decision === "needs_reconciliation") {
 				this.legionContext =
 					"An earlier specialist execution has an unresolved outcome. Inspect existing work before repeating it."
@@ -2682,7 +2797,11 @@ export class Task {
 		await this.waitForMcpStartup()
 
 		// V192: Environment Blueprinting
-		const lease = await waitForTaskPrerequisite(this.environmentLeasePromise, this.taskState.abortSignal)
+		await waitForTaskPrerequisite(this.environmentLeasePromise, this.taskState.abortSignal)
+		const lease = await waitForTaskPrerequisite(
+			this.toolExecutor.getGuard().validateEnvironment(),
+			this.taskState.abortSignal,
+		)
 		const environmentBlueprint = {
 			detectedProjectTypes: lease.details?.detectedProjectTypes || [],
 			toolchain: lease.details?.toolchain || {},
@@ -2750,7 +2869,7 @@ export class Task {
 		}
 
 		// Discover and filter available skills
-		const allSkills = await discoverSkills(this.cwd)
+		const allSkills = await discoverSkills(this.cwd, this.taskState.abortSignal)
 		const resolvedSkills = getAvailableSkills(allSkills)
 
 		// Filter skills by toggle state (enabled by default)

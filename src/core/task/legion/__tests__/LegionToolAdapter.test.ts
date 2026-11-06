@@ -12,11 +12,265 @@ import { ToolHookUtils } from "@core/task/tools/utils/ToolHookUtils"
 import { DEFAULT_AUTO_APPROVAL_SETTINGS } from "@shared/AutoApprovalSettings"
 import { expect } from "chai"
 import sinon from "sinon"
+import * as operationReceipts from "@/infrastructure/ai/LegionExecutionReceipt"
 import * as pathUtils from "@/utils/path"
+import { LegionAgentHost } from "../LegionAgentHost"
 import { createLegionToolAdapter } from "../LegionToolAdapter"
 
 describe("LegionToolAdapter", () => {
 	afterEach(() => sinon.restore())
+
+	it("blocks completion when a returned operation's durable receipt cannot be settled", async () => {
+		const receipt = { tool: "read_file", paths: ["a.ts"], status: "started" as const, startedAt: Date.now() }
+		sinon.stub(operationReceipts, "beginLegionOperation").resolves(receipt)
+		sinon.stub(operationReceipts, "finishLegionOperation").rejects(new Error("storage unavailable"))
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").resolves("file contents")
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [], "specialist")
+		expect(await adapter.execute("read_file", { path: "a.ts" }, new AbortController().signal, "call-1")).to.equal(
+			"file contents",
+		)
+		expect(adapter.getPendingWork?.()).to.include("durable receipt is unconfirmed")
+		adapter.dispose?.()
+	})
+
+	it("does not dispatch when receipt creation fails and keeps its outcome unconfirmed", async () => {
+		sinon.stub(operationReceipts, "beginLegionOperation").rejects(new Error("receipt unavailable"))
+		const execute = sinon.stub(ToolExecutorCoordinator.prototype, "execute").resolves("done")
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [], "specialist")
+		try {
+			await adapter.execute("read_file", { path: "a.ts" }, new AbortController().signal, "call-1")
+			expect.fail("expected receipt failure")
+		} catch (error) {
+			expect((error as Error).message).to.equal("receipt unavailable")
+		}
+		sinon.assert.notCalled(execute)
+		expect(adapter.getPendingWork?.()).to.include("unconfirmed")
+		adapter.dispose?.()
+	})
+
+	it("keeps a thrown operation unresolved even when its uncertain receipt is recorded", async () => {
+		const receipt = { tool: "read_file", paths: [], status: "started" as const, startedAt: Date.now() }
+		sinon.stub(operationReceipts, "beginLegionOperation").resolves(receipt)
+		const finish = sinon.stub(operationReceipts, "finishLegionOperation").resolves()
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").rejects(new Error("execution lost"))
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [], "specialist")
+		try {
+			await adapter.execute("read_file", { path: "a.ts" }, new AbortController().signal, "call-1")
+			expect.fail("expected execution failure")
+		} catch (error) {
+			expect((error as Error).message).to.equal("execution lost")
+		}
+		sinon.assert.calledWith(finish, "specialist", "call-1", receipt, "uncertain")
+		expect(adapter.getPendingWork?.()).to.include("unconfirmed")
+		adapter.dispose?.()
+	})
+
+	it("settles a returned operation after its receipt is saved", async () => {
+		const receipt = { tool: "read_file", paths: [], status: "started" as const, startedAt: Date.now() }
+		sinon.stub(operationReceipts, "beginLegionOperation").resolves(receipt)
+		sinon.stub(operationReceipts, "finishLegionOperation").resolves()
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").resolves("done")
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [], "specialist")
+		await adapter.execute("read_file", { path: "a.ts" }, new AbortController().signal, "call-1")
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("tracks owned non-command actions without blocking on sibling actions", async () => {
+		let owner = ""
+		let ownedActive = true
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {
+				getExecutionState: () => ({
+					commands: { active: [], recent: [] },
+					actions: {
+						active: [
+							{ owner: "legion:sibling", execution_id: "sibling-action" },
+							...(ownedActive ? [{ owner, execution_id: "owned-action" }] : []),
+						],
+						recent: [],
+					},
+				}),
+			},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			owner = config.executionOwner!
+			return "returned while action is still settling"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("write_to_file", { path: "a.ts", content: "work" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.include("owned-action").and.not.include("sibling-action")
+		ownedActive = false
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("blocks completion on commands inherited by a resumed specialist", () => {
+		const commands = {
+			active: [{ owner: "legion:resumed", execution_id: "running", status: "running" }],
+			recent: [
+				{ owner: "legion:resumed", execution_id: "uncertain", status: "unconfirmed" },
+				{ owner: "legion:sibling", execution_id: "sibling", status: "unknown" },
+				{ owner: "legion:resumed", execution_id: "finished", status: "completed" },
+			],
+		}
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: { getExecutionState: () => ({ commands, actions: { active: [], recent: [] } }) },
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [], "resumed")
+		expect(adapter.getPendingWork?.()).to.include("running").and.include("uncertain").and.not.include("sibling")
+		commands.active = []
+		commands.recent = commands.recent.filter((entry) => entry.status === "completed")
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("keeps file-write status unresolved when action inventory is unavailable", async () => {
+		let inventoryAvailable = false
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {
+				getExecutionState: () => (inventoryAvailable ? { actions: { active: [], recent: [] } } : undefined),
+			},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").resolves("returned")
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		await adapter.execute("write_to_file", { path: "a.ts", content: "work" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.include("action status is unavailable")
+		inventoryAvailable = true
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("blocks completion for an owned recovered action even when no live action remains", async () => {
+		let owner = ""
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {
+				getExecutionState: () => ({
+					actions: { active: [], recent: [], unresolved: [{ owner, execution_id: "recovered-write" }] },
+				}),
+			},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			owner = config.executionOwner!
+			return "returned"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("write_to_file", { path: "a.ts", content: "work" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.include("recovered-write")
+		adapter.dispose?.()
+	})
+
+	it("does not accept completion while an owned non-command action is active", async () => {
+		let owner = ""
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {
+				getExecutionState: () => ({ actions: { active: [{ owner, execution_id: "write-action" }], recent: [] } }),
+			},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			owner = config.executionOwner!
+			return "action submitted"
+		})
+		let turn = 0
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					const call =
+						turn++ === 0
+							? { id: "write-1", name: "write_to_file", arguments: '{"path":"a.ts","content":"x"}' }
+							: { id: "finish-1", name: "attempt_completion", arguments: '{"result":"done"}' }
+					yield { type: "tool_calls", tool_call: { function: call } }
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			createApi: () => api,
+			createTools: async () => createLegionToolAdapter(base, api, []),
+			availableSkills: "no skills",
+			maxTurns: 2,
+		})
+		const result = await host.execute({ assignment: { title: "Specialist", focusObjective: "Write a file" } } as any, {
+			handoff: [],
+			signal: new AbortController().signal,
+		})
+		expect(result.status).to.equal("unresolved")
+		if (result.status === "unresolved") expect(result.reason).to.include("write-action")
+	})
+
+	it("prevents a specialist from completing after a receipt write fails", async () => {
+		const receipt = { tool: "read_file", paths: [], status: "started" as const, startedAt: Date.now() }
+		sinon.stub(operationReceipts, "beginLegionOperation").resolves(receipt)
+		sinon.stub(operationReceipts, "finishLegionOperation").rejects(new Error("storage unavailable"))
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").resolves("done")
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			callbacks: {},
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+		} as unknown as TaskConfig
+		let turn = 0
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					const call =
+						turn++ === 0
+							? { id: "read-1", name: "read_file", arguments: '{"path":"a.ts"}' }
+							: { id: "finish-1", name: "attempt_completion", arguments: '{"result":"all done"}' }
+					yield { type: "tool_calls", tool_call: { function: call } }
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			createApi: () => api,
+			createTools: async () => createLegionToolAdapter(base, api, [], "specialist"),
+			availableSkills: "no skills",
+			maxTurns: 2,
+		})
+		const result = await host.execute({ assignment: { title: "Specialist", focusObjective: "Read a file" } } as any, {
+			handoff: [],
+			signal: new AbortController().signal,
+		})
+		expect(result.status).to.equal("unresolved")
+		if (result.status === "unresolved") expect(result.reason).to.include("durable receipt is unconfirmed")
+	})
 	it("writes through the real handler and propagates edit evidence to the parent", async () => {
 		const cwd = await mkdtemp(join(tmpdir(), "lumi-legion-handler-"))
 		sinon.stub(pathUtils, "isLocatedInWorkspace").resolves(true)
@@ -150,14 +404,16 @@ describe("LegionToolAdapter", () => {
 					commandSignal = options.signal
 					return [false, "background", { status: "background", executionId: "command-1" }]
 				},
-				getExecutionState: (id?: string) =>
-					id
+				getExecutionState: (id?: string) => {
+					if (id && observedStatus === "unavailable") throw new Error("receipt expired")
+					return id
 						? { status: active ? "background" : observedStatus, execution_id: id }
 						: {
 								commands: { active: active ? [{ owner, execution_id: "command-1" }] : [], recent: [] },
 								actions: { active: [], recent: [] },
 								coverage: { commands: "available" },
-							},
+							}
+				},
 			},
 		} as unknown as TaskConfig
 		const original = ToolExecutorCoordinator.prototype.execute
@@ -305,7 +561,7 @@ describe("LegionToolAdapter", () => {
 		}
 	})
 
-	it("cleans up uncertain commands if executeCommandTool throws during launch", async () => {
+	it("retains an uncertain command when the callback throws without a receipt", async () => {
 		const base = {
 			cwd: process.cwd(),
 			taskState: new TaskState(),
@@ -335,6 +591,196 @@ describe("LegionToolAdapter", () => {
 				err = e as Error
 			}
 			expect(err?.message).to.include("Terminal process failed to start")
+			expect(adapter.getPendingWork?.()).to.include("unconfirmed")
+		} finally {
+			ToolExecutorCoordinator.prototype.execute = original
+		}
+	})
+
+	it("uses command notifications to reconcile a rejected callback and early completion", async () => {
+		for (const reject of [true, false]) {
+			const base = {
+				cwd: process.cwd(),
+				taskState: new TaskState(),
+				services: { dietcodeIgnoreController: { validateAccess: () => true } },
+				callbacks: {
+					executeCommandTool: async (_command: string, _timeout: unknown, options: any) => {
+						options.onStateChange({ executionId: "finished-command", status: "completed" })
+						if (reject) throw new Error("response lost")
+						return [false, "started", { status: "running", executionId: "finished-command" }]
+					},
+					getExecutionState: () => ({
+						commands: { active: [], recent: [] },
+						actions: { active: [], recent: [] },
+						coverage: { commands: "available" },
+					}),
+				},
+			} as unknown as TaskConfig
+			const original = ToolExecutorCoordinator.prototype.execute
+			ToolExecutorCoordinator.prototype.execute = async (config) => {
+				await config.callbacks.executeCommandTool("task", 1)
+				return "done"
+			}
+			try {
+				const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+				try {
+					await adapter.execute("execute_command", { command: "task" }, new AbortController().signal)
+				} catch (error) {
+					if (!reject) throw error
+				}
+				expect(adapter.getPendingWork?.()).to.equal(undefined)
+			} finally {
+				ToolExecutorCoordinator.prototype.execute = original
+			}
+		}
+	})
+
+	it("does not settle a reserved invocation from another command's notification", async () => {
+		let notify: ((state: any) => void) | undefined
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async (_command: string, _timeout: unknown, options: any) => {
+					notify = options.onStateChange
+					notify?.({ executionId: "other", status: "completed" })
+					throw new Error("response lost")
+				},
+				getExecutionState: () => ({ commands: { active: [], recent: [] }, actions: { active: [], recent: [] } }),
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			await config.callbacks.executeCommandTool("test", 1, { actionId: "own" })
+			return "done"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		try {
+			await adapter.execute("execute_command", { command: "test" }, new AbortController().signal)
+		} catch {}
+		expect(adapter.getPendingWork?.()).to.include("unconfirmed")
+		notify?.({ executionId: "own", status: "completed" })
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("keeps a reserved invocation uncertain when a different command returns a terminal result", async () => {
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async () => [false, "other", { executionId: "other", status: "completed" }],
+				getExecutionState: () => ({ commands: { active: [], recent: [] }, actions: { active: [], recent: [] } }),
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			await config.callbacks.executeCommandTool("test", 1, { actionId: "own" })
+			return "done"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("execute_command", { command: "test" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.include("unconfirmed")
+		adapter.dispose?.()
+	})
+
+	it("settles a running notification from the terminal result and ignores a late running update", async () => {
+		let notify: ((state: any) => void) | undefined
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async (_command: string, _timeout: unknown, options: any) => {
+					notify = options.onStateChange
+					notify?.({ executionId: "command-finished", status: "running" })
+					return [false, "done", { executionId: "command-finished", status: "completed", exitCode: 0 }]
+				},
+				getExecutionState: (id?: string) => {
+					if (id) throw new Error("old receipt unavailable")
+					return {
+						commands: { active: [], recent: [] },
+						actions: { active: [], recent: [] },
+						coverage: { commands: "available" },
+					}
+				},
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			await config.callbacks.executeCommandTool("test", 1)
+			return "done"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("execute_command", { command: "test" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		notify?.({ executionId: "command-finished", status: "running" })
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("does not settle a different command ID from a terminal result", async () => {
+		let notify: ((state: any) => void) | undefined
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async (_command: string, _timeout: unknown, options: any) => {
+					notify = options.onStateChange
+					notify?.({ executionId: "still-running", status: "running" })
+					return [false, "other result", { executionId: "other-command", status: "completed", exitCode: 0 }]
+				},
+				getExecutionState: (id?: string) => {
+					if (id) throw new Error("observation unavailable")
+					return {
+						commands: { active: [], recent: [] },
+						actions: { active: [], recent: [] },
+						coverage: { commands: "available" },
+					}
+				},
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			await config.callbacks.executeCommandTool("test", 1)
+			return "done"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("execute_command", { command: "test" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.include("still-running")
+		notify?.({ executionId: "still-running", status: "completed" })
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("keeps a known execution unresolved if its callback rejects after dispatch", async () => {
+		let notify: ((state: any) => void) | undefined
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async (_command: string, _timeout: unknown, options: any) => {
+					notify = options.onStateChange
+					notify?.({ executionId: "dispatched-command", status: "running" })
+					throw new Error("connection lost")
+				},
+				getExecutionState: () => ({ commands: { active: [], recent: [] }, actions: { active: [], recent: [] } }),
+			},
+		} as unknown as TaskConfig
+		const original = ToolExecutorCoordinator.prototype.execute
+		ToolExecutorCoordinator.prototype.execute = async (config) => {
+			await config.callbacks.executeCommandTool("task", 1)
+			return "done"
+		}
+		try {
+			const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+			try {
+				await adapter.execute("execute_command", { command: "task" }, new AbortController().signal)
+			} catch (error) {
+				expect((error as Error).message).to.equal("connection lost")
+			}
+			expect(adapter.getPendingWork?.()).to.include("dispatched-command")
+			notify?.({ executionId: "dispatched-command", status: "completed" })
 			expect(adapter.getPendingWork?.()).to.equal(undefined)
 		} finally {
 			ToolExecutorCoordinator.prototype.execute = original
@@ -368,6 +814,8 @@ describe("LegionToolAdapter", () => {
 			const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
 			await adapter.execute("execute_command", { command: "task" }, new AbortController().signal)
 			expect(adapter.getPendingWork?.()).to.include("tracked-cmd")
+			observedStatus = "unavailable"
+			expect(adapter.getPendingWork?.()).to.include("tracked-cmd")
 			observedStatus = "completed"
 			expect(adapter.getPendingWork?.()).to.equal(undefined)
 		} finally {
@@ -375,7 +823,71 @@ describe("LegionToolAdapter", () => {
 		}
 	})
 
-	it("dispatches cancellation to cancelRunningCommandTool on parentSignal or dispose", async () => {
+	it("requires a matching command identity before accepting an inspected terminal result", async () => {
+		let returnedId = "other"
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async () => [false, "running", { status: "running", executionId: "own" }],
+				getExecutionState: (id?: string) =>
+					id
+						? {
+								action: { execution_id: "own", status: "completed" },
+								command: { execution_id: returnedId, status: "completed" },
+							}
+						: { commands: { active: [], recent: [] }, actions: { active: [], recent: [] } },
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			await config.callbacks.executeCommandTool("test", 1)
+			return "done"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("execute_command", { command: "test" }, new AbortController().signal)
+		expect(adapter.getPendingWork?.()).to.include("own")
+		returnedId = "own"
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("reconciles a terminal output receipt through an action ID without trusting mismatched receipts", async () => {
+		let matching = false
+		let read!: (id: string) => Promise<unknown>
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				executeCommandTool: async () => [false, "running", { status: "running", executionId: "run" }],
+				readCommandOutput: async () => ({
+					execution_id: "run",
+					action_id: matching ? "action" : "other",
+					status: "completed",
+				}),
+				getExecutionState: (id?: string) => {
+					if (id) throw new Error("inspection unavailable")
+					return { commands: { active: [], recent: [] }, actions: { active: [], recent: [] } }
+				},
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config) => {
+			read = (id) => config.callbacks.readCommandOutput!(id, 0)
+			await config.callbacks.executeCommandTool("test", 1)
+			return "done"
+		})
+		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
+		await adapter.execute("execute_command", { command: "test" }, new AbortController().signal)
+		await read("action")
+		expect(adapter.getPendingWork?.()).to.include("run")
+		matching = true
+		await read("action")
+		expect(adapter.getPendingWork?.()).to.equal(undefined)
+		adapter.dispose?.()
+	})
+
+	it("does not invoke task-wide cancellation on specialist abort or disposal", async () => {
 		const cancelRunningCommandTool = sinon.stub().resolves(true)
 		const base = {
 			cwd: process.cwd(),
@@ -387,9 +899,47 @@ describe("LegionToolAdapter", () => {
 		const adapter = createLegionToolAdapter(base, {} as ApiHandler, [], "stream-1", parentCtrl.signal)
 		sinon.assert.notCalled(cancelRunningCommandTool)
 		parentCtrl.abort()
-		sinon.assert.calledOnce(cancelRunningCommandTool)
+		sinon.assert.notCalled(cancelRunningCommandTool)
 		adapter.dispose?.()
-		sinon.assert.calledTwice(cancelRunningCommandTool)
+		sinon.assert.notCalled(cancelRunningCommandTool)
+		const nextController = new AbortController()
+		const next = createLegionToolAdapter(base, {} as ApiHandler, [], "stream-2", nextController.signal)
+		next.dispose?.()
+		nextController.abort()
+		sinon.assert.notCalled(cancelRunningCommandTool)
+	})
+
+	it("aborts only the specialist's own detached command", async () => {
+		const signals = new Map<string, AbortSignal>()
+		const cancelAll = sinon.stub().resolves(true)
+		const base = {
+			cwd: process.cwd(),
+			taskState: new TaskState(),
+			services: { dietcodeIgnoreController: { validateAccess: () => true } },
+			callbacks: {
+				cancelRunningCommandTool: cancelAll,
+				executeCommandTool: async (command: string, _timeout: unknown, options: { signal: AbortSignal }) => {
+					signals.set(command, options.signal)
+					return [false, "running", { status: "background", executionId: command }]
+				},
+			},
+		} as unknown as TaskConfig
+		sinon.stub(ToolExecutorCoordinator.prototype, "execute").callsFake(async (config, block) => {
+			await config.callbacks.executeCommandTool(block.params.command!, 1)
+			return "running"
+		})
+		const firstController = new AbortController()
+		const secondController = new AbortController()
+		const first = createLegionToolAdapter(base, {} as ApiHandler, [], undefined, firstController.signal)
+		const second = createLegionToolAdapter(base, {} as ApiHandler, [], undefined, secondController.signal)
+		await first.execute("execute_command", { command: "first" }, new AbortController().signal)
+		await second.execute("execute_command", { command: "second" }, new AbortController().signal)
+		firstController.abort()
+		expect(signals.get("first")?.aborted).to.equal(true)
+		expect(signals.get("second")?.aborted).to.equal(false)
+		sinon.assert.notCalled(cancelAll)
+		first.dispose?.()
+		second.dispose?.()
 	})
 
 	it("settles unresolved commands immediately when onStateChange reports terminal status", async () => {
@@ -426,7 +976,7 @@ describe("LegionToolAdapter", () => {
 		}
 	})
 
-	it("prunes expired or untracked commands when getExecutionState throws", async () => {
+	it("retains expired or untracked commands as unresolved when observation fails", async () => {
 		const base = {
 			cwd: process.cwd(),
 			taskState: new TaskState(),
@@ -451,14 +1001,17 @@ describe("LegionToolAdapter", () => {
 		try {
 			const adapter = createLegionToolAdapter(base, {} as ApiHandler, [])
 			await adapter.execute("execute_command", { command: "task" }, new AbortController().signal)
-			expect(adapter.getPendingWork?.()).to.equal(undefined)
+			expect(adapter.getPendingWork?.()).to.include("expired-cmd")
 		} finally {
 			ToolExecutorCoordinator.prototype.execute = original
 		}
 	})
 
-	it("settles unresolved commands when getExecutionState returns nested action or command status", async () => {
+	it("requires terminal evidence rather than an action-only completion for a command", async () => {
 		let currentStatus = "running"
+		let commandStatus = "running"
+		let commandId: string | undefined
+		let observation: "nested-action" | "direct-action" | "command" = "nested-action"
 		const base = {
 			cwd: process.cwd(),
 			taskState: new TaskState(),
@@ -467,7 +1020,11 @@ describe("LegionToolAdapter", () => {
 				executeCommandTool: async () => [false, "ok", { status: "running", executionId: "nested-cmd" }],
 				getExecutionState: (id?: string) => {
 					if (id === "nested-cmd") {
-						return { action: { status: currentStatus }, command: undefined }
+						if (observation === "direct-action") return { kind: "command", status: currentStatus }
+						return {
+							action: { status: currentStatus },
+							command: observation === "command" ? { status: commandStatus, execution_id: commandId } : undefined,
+						}
 					}
 					return {
 						commands: { active: [], recent: [] },
@@ -487,6 +1044,14 @@ describe("LegionToolAdapter", () => {
 			await adapter.execute("execute_command", { command: "nested-task" }, new AbortController().signal)
 			expect(adapter.getPendingWork?.()).to.include("nested-cmd")
 			currentStatus = "completed"
+			expect(adapter.getPendingWork?.()).to.include("nested-cmd")
+			observation = "direct-action"
+			expect(adapter.getPendingWork?.()).to.include("nested-cmd")
+			observation = "command"
+			expect(adapter.getPendingWork?.()).to.include("nested-cmd")
+			commandStatus = "completed"
+			expect(adapter.getPendingWork?.()).to.include("nested-cmd")
+			commandId = "nested-cmd"
 			expect(adapter.getPendingWork?.()).to.equal(undefined)
 		} finally {
 			ToolExecutorCoordinator.prototype.execute = original

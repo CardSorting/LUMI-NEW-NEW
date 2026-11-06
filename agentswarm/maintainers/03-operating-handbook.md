@@ -7,11 +7,14 @@ When you are operating or debugging Agent Swarm & The Legion on a developer mach
 ## 1. Where the SQLite Database Lives on Disk
 
 In `src/core/controller/index.ts` (lines 199–203) and `src/infrastructure/db/Config.ts`:
+
 - **Inside VS Code (Production / Extension Development Host):**
   `Controller` initializes the database at:
+
   ```text
   <context.storageUri || context.globalStorageUri>/joyzoning.sqlite
   ```
+
   Typical OS paths for VS Code `workspaceStorage` / `globalStorage`:
   - **macOS:** `~/Library/Application Support/Code/User/workspaceStorage/<workspace-hash>/lumi.lumi/joyzoning.sqlite` (or under `globalStorage/lumi.lumi/joyzoning.sqlite` if no workspace folder is open).
   - **Linux:** `~/.config/Code/User/workspaceStorage/<workspace-hash>/lumi.lumi/joyzoning.sqlite`
@@ -20,11 +23,13 @@ In `src/core/controller/index.ts` (lines 199–203) and `src/infrastructure/db/C
   Defaults to `<process.cwd()>/dietcode.db`.
 
 ### Find the active database file on macOS/Linux in one command
+
 ```bash
 find ~/Library/Application\ Support/Code/User -name "joyzoning.sqlite" -exec ls -lh {} + 2>/dev/null
 ```
 
 ### SQLite Runtime Pragmas & Automatic Corruption Recovery (`Config.ts`)
+
 - Every connection opens with:
   - `PRAGMA journal_mode = WAL;` (Write-Ahead Logging — creates `joyzoning.sqlite-wal` and `joyzoning.sqlite-shm` alongside the main file; **you can safely run read-only `sqlite3` queries while the extension is running**).
   - `PRAGMA synchronous = NORMAL;`
@@ -58,19 +63,19 @@ When inspecting the database or reading code, keep three `BufferedDbPool` (`src/
 
 When viewing the **LUMI** output channel or Extension Host console logs, filter by these exact prefixes:
 
-| Prefix | Source File | What It Logs |
-|---|---|---|
-| `[HierarchicalDefer]` | `HierarchicalDeferCoordinator.ts` | Hierarchy suspension requests, child acknowledgements, barrier releases, failure reconciliations, and resume completions |
-| `[CriticalCompletionReview]` | `CriticalCompletionReview.ts` | Review cycle start, finding classification counts, 4-way decision (`ACCEPT`, `ACCEPT_WITH_NOTE`, `REMEDIATE`, `ESCALATE`), corrective task IDs |
-| `[LegionCoordinator]` | `LegionCoordinator.ts` | Task classification scores, formation creation, stage promotions, file reservation conflicts, specialist failover reroutes, and synthesis reports |
-| `[EngageSwarm]` | `EngageSwarmHandler.ts` | Conductor tool invocations, parameter extraction, pipeline completion, and handoff synthesis |
-| `[LegionPipelineRunner]` | `LegionPipelineRunner.ts` | Stage transitions, ready specialist claims, durable barriers, and failover dispatches |
-| `[Task]` | `src/core/task/index.ts` | Automatic Legion gating decisions, specialist operation evidence, and usage accounting |
-| `[Orchestrator]` | `Orchestrator.ts` | Stream creation/completion/failure, task dispatch blocks on suspended streams, reservation releases |
-| `[DbPool]` | `BufferedDbPool.ts` | Shadow commit/rollback, expired shadow cleanup, and any SQLite transaction error on `flush()` |
-| `[Config]` | `src/infrastructure/db/Config.ts` | SQLite initialization path, WAL mode confirmation, or `.corrupt.<timestamp>` recovery |
-| `[ExecuteCommand]` | `ExecuteCommandToolHandler.ts` | Terminal command execution, approval checks, and heredoc file write pre-execution interception (`command_permission_denied`) |
-| `[TerminalProcess]` | `VscodeTerminalProcess.ts` | Shell integration events, multiline heredoc fallback to managed terminal, and circuit-breaker refusals |
+| Prefix                       | Source File                       | What It Logs                                                                                                                                      |
+| ---------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[HierarchicalDefer]`        | `HierarchicalDeferCoordinator.ts` | Hierarchy suspension requests, child acknowledgements, barrier releases, failure reconciliations, and resume completions                          |
+| `[CriticalCompletionReview]` | `CriticalCompletionReview.ts`     | Review cycle start, finding classification counts, 4-way decision (`ACCEPT`, `ACCEPT_WITH_NOTE`, `REMEDIATE`, `ESCALATE`), corrective task IDs    |
+| `[LegionCoordinator]`        | `LegionCoordinator.ts`            | Task classification scores, formation creation, stage promotions, file reservation conflicts, specialist failover reroutes, and synthesis reports |
+| `[EngageSwarm]`              | `EngageSwarmHandler.ts`           | Conductor tool invocations, parameter extraction, pipeline completion, and handoff synthesis                                                      |
+| `[LegionPipelineRunner]`     | `LegionPipelineRunner.ts`         | Stage transitions, ready specialist claims, durable barriers, and failover dispatches                                                             |
+| `[Task]`                     | `src/core/task/index.ts`          | Automatic Legion gating decisions, specialist operation evidence, and usage accounting                                                            |
+| `[Orchestrator]`             | `Orchestrator.ts`                 | Stream creation/completion/failure, task dispatch blocks on suspended streams, reservation releases                                               |
+| `[DbPool]`                   | `BufferedDbPool.ts`               | Shadow commit/rollback, expired shadow cleanup, and any SQLite transaction error on `flush()`                                                     |
+| `[Config]`                   | `src/infrastructure/db/Config.ts` | SQLite initialization path, WAL mode confirmation, or `.corrupt.<timestamp>` recovery                                                             |
+| `[ExecuteCommand]`           | `ExecuteCommandToolHandler.ts`    | Terminal command execution, approval checks, and heredoc file write pre-execution interception (`command_permission_denied`)                      |
+| `[TerminalProcess]`          | `VscodeTerminalProcess.ts`        | Shell integration events, multiline heredoc fallback to managed terminal, and circuit-breaker refusals                                            |
 
 ---
 
@@ -83,6 +88,7 @@ DB="/path/to/joyzoning.sqlite"
 ```
 
 ### `Q1` — Inspect all agent streams and their hierarchy tree
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -95,6 +101,7 @@ ORDER BY createdAt ASC;
 "
 ```
 **Sample Output:**
+
 ```text
 stream_id   parent_id   status      created_utc
 ----------  ----------  ----------  -------------------
@@ -107,7 +114,9 @@ legion-s2   root-1      active      2026-11-02 23:18:11
 ---
 
 ### `Q2` — Inspect per-stream suspension state & `acceptingNewWork` gate
+
 Use this when a stream refuses `dispatchTask` / `spawnSubAgent` or seems stuck waiting on children.
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -123,17 +132,20 @@ WHERE key = 'defer_agent_status';
 "
 ```
 **Sample Output:**
+
 ```text
 streamId    suspend_state  accepting_work  boundary        pending_children  acked_children  pipeline_id
 ----------  -------------  --------------  --------------  ----------------  --------------  -----------
 root-1      resumed        1               safe_boundary   0                 1               pipe-1
 child-1     resumed        1               safe_boundary   0                 0               pipe-1
 ```
+
 - **Interpretation:** `accepting_work = 0` (`false`) means `ensureStreamAcceptingWork` will block new tasks. If `suspend_state = 'waiting_for_children'` and `pending_children > 0`, run `Q3` to see which child stream ID has not acknowledged.
 
 ---
 
 ### `Q3` — Inspect pipeline suspension barriers (`deferred_pipeline_status`)
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -148,6 +160,7 @@ WHERE key = 'deferred_pipeline_status';
 "
 ```
 **Sample Output:**
+
 ```text
 root_stream  pipeline_id  phase    pending_child_ids  suspended_ids  suspended_at
 -----------  -----------  -------  -----------------  -------------  -------------
@@ -157,7 +170,9 @@ root-1       pipe-1       resumed  []                 ["child-1"]    17936614905
 ---
 
 ### `Q4` — Inspect deferred vs. active tasks across streams
+
 Confirms that deferred tasks remain `status = 'pending'` with `deferred_state = 'deferred'` rather than being aborted or cancelled.
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -175,7 +190,9 @@ ORDER BY createdAt ASC;
 ---
 
 ### `Q5` — Inspect active file reservations (`file_res:*`) and stream liveness
+
 Confirms which files are currently reserved and whether any reservation belongs to a non-active stream.
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -189,11 +206,13 @@ LEFT JOIN agent_streams s ON s.id = m.streamId
 WHERE m.key LIKE 'file_res:%';
 "
 ```
+
 - **Expected:** `0 rows` once all streams complete, or only rows where `stream_status = 'active'`. (If you ever see a `completed` stream holding a `file_res:*` row, check [PM-011](../postmortems/PM-011-completion-state-stranded-in-shadow-overlay.md) and [PM-012](../postmortems/PM-012-post-resume-reconcile-and-delete-upsert-ordering.md).)
 
 ---
 
 ### `Q6` — Inspect Legion formations and stage progress (`legion_formation:*`)
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -209,6 +228,7 @@ WHERE key LIKE 'legion_formation:%';
 "
 ```
 **Sample Output:**
+
 ```text
 parent_stream  formation_id  status     member_count  lead_recon_status  parallel_status  verification_status
 -------------  ------------  ---------  ------------  -----------------  ---------------  -------------------
@@ -218,6 +238,7 @@ root-1         form-1        completed  3             completed          complet
 ---
 
 ### `Q7` — Drill into individual Legion specialist slots inside a formation
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -236,6 +257,7 @@ WHERE m.key LIKE 'legion_formation:%';
 "
 ```
 **Sample Output:**
+
 ```text
 parent_stream  assignment_id       role                codename        stage              member_status  child_stream  attempt  rerouted_to
 -------------  ------------------  ------------------  --------------  -----------------  -------------  ------------  -------  -----------
@@ -247,6 +269,7 @@ root-1         assign-impl-1-f1    legion_implementer  VANGUARD-IMPL   parallelE
 ---
 
 ### `Q8` — Inspect Critical Completion Review cycle history & latest decision
+
 ```bash
 sqlite3 -header -column "$DB" "
 SELECT
@@ -262,5 +285,31 @@ WHERE key LIKE 'critical_review_cycle:%';
 "
 ```
 
-Next: Read **[04 — Failure Modes, War Games & Recovery Drills](04-failure-modes-and-drills.md)** for hands-on drills and mutation proofs of every defensive guard in the system.
+---
 
+### `Q9` — Inspect Dynamic Project Knowledge & Workspace Observations (`agent_knowledge`)
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+  id,
+  type,
+  json_extract(metadata, '$.workspaceScope') AS workspace_scope,
+  substr(content, 1, 60) AS observation,
+  confidence,
+  datetime(expiresAt / 1000, 'unixepoch') AS expires_utc,
+  datetime(createdAt / 1000, 'unixepoch') AS created_utc
+FROM agent_knowledge
+WHERE type = 'legion_workspace_heuristic'
+ORDER BY createdAt DESC;
+"
+```
+**Sample Output:**
+
+```text
+id        type                        workspace_scope                   observation                   confidence  expires_utc          created_utc
+--------  --------------------------  --------------------------------  ----------------------------  ----------  -------------------  -------------------
+a1b2c3d4  legion_workspace_heuristic  3f8a92bc1048... (sha256 of cwd)   use the local test fixture    0.25        2026-12-05 18:30:00  2026-11-05 18:30:00
+```
+
+Next: Read **[04 — Failure Modes, War Games & Recovery Drills](04-failure-modes-and-drills.md)** for hands-on drills and mutation proofs of every defensive guard in the system.

@@ -17,6 +17,8 @@ export interface OwnedCommand {
 	logFilePath?: string
 	logNotice?: string
 	latest: CommandExecutionState
+	/** Final evidence remains available to readers already waiting if the receipt cache evicts it. */
+	finalSnapshot?: CommandExecutionSnapshot
 	messageTs?: number | null
 	waiters: Set<() => void>
 	cancel: () => void
@@ -49,7 +51,8 @@ export class CommandRuntime {
 		this.recovery = store
 		for (const { record, observedAt } of store.entries("command")) {
 			const snapshot = restoredCommand(record, observedAt)
-			this.receipts.set(snapshot.execution_id, { snapshot, messageTs: record.messageTs })
+			if (!this.receipts.has(snapshot.execution_id))
+				this.receipts.set(snapshot.execution_id, { snapshot, messageTs: record.messageTs })
 		}
 		return store
 	}
@@ -89,7 +92,28 @@ export class CommandRuntime {
 	}
 
 	get retainedWork(): boolean {
-		return !!this.view || this.pendingLaunches > 0 || this.activeProcesses.size > 0
+		if (this.view || this.pendingLaunches > 0 || this.activeProcesses.size > 0) return true
+		// Do not discard the only available copy of uncertain effects. Healthy
+		// durable receipts can be reloaded when the task view reopens.
+		return [...this.receipts.values()].some(({ snapshot }) => {
+			if (snapshot.status !== "unconfirmed" && !(snapshot.recovery && snapshot.status === "unknown")) return false
+			if (!this.recovery || this.recovery.report.status !== "available") return true
+			const saved = this.recovery.get("command", snapshot.execution_id)
+			if (
+				!saved ||
+				saved.snapshot.command !== snapshot.command ||
+				saved.snapshot.cwd !== snapshot.cwd ||
+				saved.snapshot.owner !== snapshot.owner ||
+				saved.snapshot.action_id !== snapshot.action_id ||
+				saved.snapshot.output !== snapshot.output ||
+				saved.snapshot.detail !== snapshot.detail ||
+				saved.snapshot.log_file_path !== snapshot.log_file_path ||
+				saved.snapshot.log_notice !== snapshot.log_notice
+			)
+				return true
+			const status = restoredCommand(saved, 0).status
+			return status !== "unknown" && status !== "unconfirmed"
+		})
 	}
 
 	publish(messageTs: number | null | undefined, state: CommandExecutionState, output?: string): void {
@@ -110,7 +134,7 @@ export class CommandRuntime {
 	}
 }
 
-/** Bounded idle history; active processes and attached views are never evicted. */
+/** Bounded idle history; active or non-durable unresolved work is never evicted. */
 export class CommandRuntimeRegistry {
 	private readonly runtimes = new Map<string, CommandRuntime>()
 

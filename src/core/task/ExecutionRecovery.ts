@@ -247,12 +247,13 @@ export class ExecutionRecoveryStore {
 			throw new Error("Execution identity mismatch")
 		if (record.kind === "command" && record.snapshot.status === "completed" && record.snapshot.exit_code !== 0)
 			throw new Error("Completion has no successful exit evidence")
-		if (
-			record.kind === "action" &&
-			record.finished !==
-				["completed", "failed", "not_started", "cancelled", "unconfirmed"].includes(record.snapshot.status)
-		)
-			throw new Error("Inconsistent action lifecycle")
+		if (record.kind === "action") {
+			const terminal = ["completed", "failed", "not_started", "cancelled"].includes(record.snapshot.status)
+			// Older receipts may have finalized an unconfirmed result. New receipts
+			// retain the fence until the command outcome can be established.
+			if ((terminal && !record.finished) || (!terminal && record.snapshot.status !== "unconfirmed" && record.finished))
+				throw new Error("Inconsistent action lifecycle")
+		}
 	}
 	private matches(identity: RecoveryIdentity): boolean {
 		return (

@@ -141,6 +141,19 @@
 	],
 	"overrides": [
 		{
+			// Prompt components are string-producing test fixtures, not React components.
+			"includes": [
+				"src/core/prompts/system-prompt/__tests__/PromptBuilder.test.ts"
+			],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noComponentHookFactories": "off"
+					}
+				}
+			}
+		},
+		{
 			"includes": [
 				"**",
 				"!!**/dist",

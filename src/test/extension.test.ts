@@ -20,8 +20,11 @@ describe("DietCode Extension", () => {
 	})
 
 	it("should successfully execute the plus button command", async () => {
-		await new Promise((resolve) => setTimeout(resolve, 400))
-		await vscode.commands.executeCommand("dietcode.plusButtonClicked")
+		const packageJSON = JSON.parse(await readFile(packagePath, "utf8"))
+		const extension = vscode.extensions.getExtension(`${packageJSON.publisher}.${packageJSON.name}`)
+		should.exist(extension)
+		await extension!.activate()
+		await vscode.commands.executeCommand("lumi.plusButtonClicked")
 	})
 
 	// New test to verify xvfb and webview functionality

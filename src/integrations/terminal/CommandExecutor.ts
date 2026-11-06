@@ -103,7 +103,7 @@ export class CommandExecutor {
 		const showNotStarted = (detail: string) => {
 			if (commandMessageTs == null || this.attachment.signal.aborted) return
 			try {
-				const index = this.callbacks.getDietCodeMessages().findIndex((message) => message.ts === commandMessageTs)
+				const index = this.findCommandRow(commandMessageTs, executionId, command)
 				const commandExecution: CommandExecutionState = { status: "not_started", detail }
 				if (index >= 0)
 					void this.callbacks
@@ -142,7 +142,17 @@ export class CommandExecutor {
 						throw new Error(
 							"Execution ID already belongs to a different command or working directory. Nothing was started.",
 						)
-					this.runtime.publish(commandMessageTs, this.snapshotState(existing), existing.output)
+					const originalMessageTs =
+						[...this.runtime.activeProcesses.values()].find((state) => state.executionId === existing.execution_id)
+							?.messageTs ??
+						this.runtime.receipts.get(existing.execution_id)?.messageTs ??
+						this.runtime.recovery?.get("command", existing.execution_id)?.messageTs
+					if (commandMessageTs != null && commandMessageTs === originalMessageTs)
+						this.runtime.publish(commandMessageTs, this.snapshotState(existing), existing.output)
+					else
+						showNotStarted(
+							`Execution ${existing.execution_id} already exists (${existing.status}). No new command was started. ${this.readInstruction(existing.execution_id)}`,
+						)
 					return [
 						false,
 						`Existing execution ${existing.execution_id}: ${existing.status}. No duplicate was started.\n${this.readInstruction(existing.execution_id)}\n${existing.output}`,
@@ -152,18 +162,15 @@ export class CommandExecutor {
 			}
 			const unresolved = [...this.runtime.receipts.values()].find(
 				({ snapshot }) =>
-					snapshot.recovery &&
-					snapshot.status === "unknown" &&
+					(snapshot.status === "unconfirmed" || (snapshot.recovery && snapshot.status === "unknown")) &&
 					(snapshot.cwd === cwd || snapshot.cwd === "") &&
-					snapshot.command.trim() === command.trim(),
+					(!snapshot.command.trim() || snapshot.command.trim() === command.trim()),
 			)
 			if (unresolved) {
 				const saved = unresolved.snapshot
-				return [
-					false,
-					`Execution ${saved.execution_id} has unresolved pre-restart effects. No duplicate was started. ${this.readInstruction(saved.execution_id)}`,
-					{ ...this.snapshotState(saved), output: saved.output },
-				]
+				const detail = `Execution ${saved.execution_id} has unresolved effects${saved.command.trim() ? "" : " and its command text is unavailable"}. No new command was started. ${this.readInstruction(saved.execution_id)}`
+				showNotStarted(detail)
+				return [false, detail, { ...this.snapshotState(saved), output: saved.output }]
 			}
 			this.runtime.recovery?.assertCanExecute(options?.owner)
 			const duplicate = [...this.runtime.activeProcesses.entries()].find(
@@ -178,6 +185,15 @@ export class CommandExecutor {
 					`Command already active in terminal ${active.terminalId}; no duplicate was started. ${active.cancelled ? "A stop was requested but termination is not confirmed." : "It has not been confirmed finished."} ${this.readInstruction(active.executionId)}${output ? `\nOutput so far:\n${output}` : ""}`,
 					{ ...active.latest },
 				]
+			}
+			if (
+				[...this.runtime.receipts.values()].filter(
+					({ snapshot }) => snapshot.status === "unconfirmed" || (snapshot.recovery && snapshot.status === "unknown"),
+				).length >= MAX_COMMAND_RECEIPTS
+			) {
+				throw new Error(
+					"Command did not start: unresolved command receipt capacity is full. Inspect existing executions before continuing.",
+				)
 			}
 			if (this.runtime.activeProcesses.size >= MAX_ACTIVE_COMMANDS) {
 				throw new Error(
@@ -324,12 +340,17 @@ export class CommandExecutor {
 			if (!this.runtime.activeProcesses.has(process)) return
 			publish(next)
 			const snapshot = this.snapshot(process, state)
+			state.finalSnapshot = snapshot
 			this.runtime.persist(snapshot, state.messageTs)
 			this.runtime.receipts.set(state.executionId, { snapshot, messageTs: state.messageTs })
 			this.displaySnapshot(state.messageTs, snapshot)
 			if (this.runtime.receipts.size > MAX_COMMAND_RECEIPTS) {
 				const evictable = [...this.runtime.receipts].find(
-					([, receipt]) => !(receipt.snapshot.recovery && receipt.snapshot.status === "unknown"),
+					([, receipt]) =>
+						!(
+							receipt.snapshot.status === "unconfirmed" ||
+							(receipt.snapshot.recovery && receipt.snapshot.status === "unknown")
+						),
 				)
 				if (evictable) this.runtime.receipts.delete(evictable[0])
 			}
@@ -340,13 +361,14 @@ export class CommandExecutor {
 		const onCompleted = (details?: TerminalCompletionDetails) => {
 			if (!this.runtime.activeProcesses.has(process)) return
 			if (state.detached) {
-				const status = details?.cancelled
-					? "stopped"
-					: typeof details?.exitCode === "number"
-						? `exit code ${details.exitCode}`
-						: details?.terminalClosed
-							? "terminal closed; command exit status unknown"
-							: "finished; exit status unknown"
+				const status =
+					commandOutcome(details).status === "cancelled"
+						? "stopped"
+						: typeof details?.exitCode === "number"
+							? `exit code ${details.exitCode}`
+							: details?.terminalClosed
+								? "terminal closed; command exit status unknown"
+								: "finished; exit status unknown"
 				this.runtime.backgroundCompletions.push(
 					`Terminal ${terminalId}: ${command.slice(0, 1000)} — ${status}. Execution ID: ${state.executionId}.`,
 				)
@@ -425,7 +447,9 @@ export class CommandExecutor {
 		signal?: AbortSignal,
 	): Promise<CommandExecutionSnapshot> {
 		signal?.throwIfAborted()
-		const active = [...this.runtime.activeProcesses.entries()].find(([, state]) => state.executionId === executionId)
+		const active = [...this.runtime.activeProcesses.entries()].find(
+			([, state]) => state.executionId === executionId || state.actionId === executionId,
+		)
 		if (active) {
 			const [process, state] = active
 			const waitMs = resolveCommandReadTimeoutSeconds(timeoutSeconds) * 1000
@@ -455,9 +479,11 @@ export class CommandExecutor {
 			}
 			signal?.throwIfAborted()
 			// A retained local reference also handles receipt eviction during a concurrent burst of completions.
-			const snapshot = this.runtime.receipts.get(executionId)?.snapshot ?? this.snapshot(process, state)
-			this.runtime.persist(snapshot, state.messageTs)
-			this.displaySnapshot(state.messageTs, snapshot)
+			const snapshot = state.finalSnapshot ?? this.snapshot(process, state)
+			if (!this.attachment.signal.aborted && this.runtime.activeProcesses.get(process) === state) {
+				this.runtime.persist(snapshot, state.messageTs)
+				this.displaySnapshot(state.messageTs, snapshot)
+			}
 			return structuredClone(snapshot)
 		}
 		const receipt = this.runtime.receipts.get(executionId)
@@ -467,7 +493,7 @@ export class CommandExecutor {
 			throw new Error(
 				"Execution ID is not tracked by this task. It may be expired or from a previous session. Inspect the terminal panel; do not rerun a command just to check its status.",
 			)
-		this.displaySnapshot(receipt.messageTs, receipt.snapshot)
+		if (!this.attachment.signal.aborted) this.displaySnapshot(receipt.messageTs, receipt.snapshot)
 		return structuredClone(receipt.snapshot)
 	}
 
@@ -497,10 +523,19 @@ export class CommandExecutor {
 	}
 
 	/** Non-consuming inventory includes foreground runs and remains available to every helper. */
-	getExecutionInventory(): { active: CommandExecutionSummary[]; recent: CommandExecutionSummary[] } {
+	getExecutionInventory(): {
+		active: CommandExecutionSummary[]
+		recent: CommandExecutionSummary[]
+		unresolved: CommandExecutionSummary[]
+	} {
 		return {
 			active: [...this.runtime.activeProcesses].map(([process, state]) => this.summarize(this.snapshot(process, state))),
 			recent: [...this.runtime.receipts.values()].slice(-8).map(({ snapshot }) => this.summarize(snapshot)),
+			unresolved: [...this.runtime.receipts.values()]
+				.filter(
+					({ snapshot }) => snapshot.status === "unconfirmed" || (snapshot.recovery && snapshot.status === "unknown"),
+				)
+				.map(({ snapshot }) => this.summarize(snapshot)),
 		}
 	}
 
@@ -608,6 +643,19 @@ export class CommandExecutor {
 		this.runtime.publish(messageTs, this.snapshotState(snapshot), output)
 	}
 
+	private findCommandRow(messageTs: number, executionId?: string, command?: string): number {
+		const rows = this.callbacks.getDietCodeMessages()
+		const candidates = rows.flatMap((message, index) =>
+			message.ts === messageTs && (message.say === "command" || message.ask === "command") ? [index] : [],
+		)
+		const exact = candidates.filter((index) => executionId && rows[index].commandExecution?.executionId === executionId)
+		if (exact.length) return exact.length === 1 ? exact[0] : -1
+		const unassigned = candidates.filter((index) => !rows[index].commandExecution?.executionId)
+		if (unassigned.length === 1 && candidates.length === 1) return unassigned[0]
+		const matching = command === undefined ? [] : unassigned.filter((index) => rows[index].text === command)
+		return matching.length === 1 ? matching[0] : -1
+	}
+
 	private updateCommandMessage(
 		messageTs: number | null | undefined,
 		commandExecution: CommandExecutionState,
@@ -615,7 +663,10 @@ export class CommandExecutor {
 	): void {
 		if (messageTs == null || this.attachment.signal.aborted) return
 		try {
-			const index = this.callbacks.getDietCodeMessages().findIndex((message) => message.ts === messageTs)
+			const command = commandExecution.executionId
+				? this.getExecutionSnapshot(commandExecution.executionId)?.command
+				: undefined
+			const index = this.findCommandRow(messageTs, commandExecution.executionId, command)
 			if (index >= 0)
 				void this.callbacks
 					.updateDietCodeMessage(index, {

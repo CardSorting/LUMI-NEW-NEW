@@ -1,227 +1,31 @@
-import { ApiConfiguration } from "@shared/api"
-import { fireEvent, render, screen } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
-import { ExtensionStateContextProvider, useExtensionState } from "@/context/ExtensionStateContext"
-import ApiOptions from "../ApiOptions"
+import type { ApiConfiguration } from "@shared/api"
+import { describe, expect, it } from "vitest"
+import { validateApiConfiguration } from "@/utils/validate"
+import { normalizeApiConfiguration } from "../utils/providerUtils"
 
-vi.mock("../../../context/ExtensionStateContext", async (importOriginal) => {
-	const actual = await importOriginal()
-	return {
-		...(actual || {}),
-		// your mocked methods
-		useExtensionState: vi.fn(() => ({
-			apiConfiguration: {
-				planModeApiProvider: "requesty",
-				actModeApiProvider: "requesty",
-				requestyApiKey: "",
-				planModeRequestyModelId: "",
-				actModeRequestyModelId: "",
-			},
-			setApiConfiguration: vi.fn(),
-			requestyModels: {},
-			planActSeparateModelsSetting: false,
-		})),
-	}
-})
-
-const mockExtensionState = (apiConfiguration: Partial<ApiConfiguration>) => {
-	vi.mocked(useExtensionState).mockReturnValue({
-		apiConfiguration,
-		setApiConfiguration: vi.fn(),
-		requestyModels: {},
-		planActSeparateModelsSetting: false,
-	} as any)
-}
-
-describe("ApiOptions Component", () => {
-	vi.clearAllMocks()
-	const mockPostMessage = vi.fn()
-
-	beforeEach(() => {
-		//@ts-expect-error - vscode is not defined in the global namespace in test environment
-		global.vscode = { postMessage: mockPostMessage }
-		mockExtensionState({
-			planModeApiProvider: "requesty",
-			actModeApiProvider: "requesty",
-		})
+describe("API provider configuration", () => {
+	it("defaults a missing provider to OpenRouter", () => {
+		expect(normalizeApiConfiguration({}, "act").selectedProvider).toBe("openrouter")
 	})
 
-	it("renders Requesty API Key input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const apiKeyInput = screen.getByPlaceholderText("Enter API Key...")
-		expect(apiKeyInput).toBeInTheDocument()
+	it.each([
+		["claude-code", "claude-subscription-directsdk-experimental"],
+		["clinepass", "cline-pass"],
+		["nous-research", "nousResearch"],
+		["opencode-zen", "opencode"],
+	])("recognizes the supported legacy alias %s", (saved, expected) => {
+		const config = { planModeApiProvider: saved } as ApiConfiguration
+		expect(normalizeApiConfiguration(config, "plan").selectedProvider).toBe(expected)
 	})
 
-	it("renders Requesty Model ID input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const modelIdInput = screen.getByPlaceholderText("Search and select a model...")
-		expect(modelIdInput).toBeInTheDocument()
-	})
-})
-
-describe("ApiOptions Component", () => {
-	vi.clearAllMocks()
-	const mockPostMessage = vi.fn()
-
-	beforeEach(() => {
-		//@ts-expect-error - vscode is not defined in the global namespace in test environment
-		global.vscode = { postMessage: mockPostMessage }
-		mockExtensionState({
-			planModeApiProvider: "together",
-			actModeApiProvider: "together",
-		})
+	it("uses the provider for the requested mode", () => {
+		const config = { planModeApiProvider: "cloudflare", actModeApiProvider: "openai-codex" } as ApiConfiguration
+		expect(normalizeApiConfiguration(config, "plan").selectedProvider).toBe("cloudflare")
+		expect(normalizeApiConfiguration(config, "act").selectedProvider).toBe("openai-codex")
 	})
 
-	it("renders Together API Key input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const apiKeyInput = screen.getByPlaceholderText("Enter API Key...")
-		expect(apiKeyInput).toBeInTheDocument()
-	})
-
-	it("renders Together Model ID input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const modelIdInput = screen.getByPlaceholderText("Enter Model ID...")
-		expect(modelIdInput).toBeInTheDocument()
-	})
-})
-
-describe("ApiOptions Component", () => {
-	vi.clearAllMocks()
-	const mockPostMessage = vi.fn()
-
-	beforeEach(() => {
-		//@ts-expect-error - vscode is not defined in the global namespace in test environment
-		global.vscode = { postMessage: mockPostMessage }
-
-		mockExtensionState({
-			planModeApiProvider: "fireworks",
-			actModeApiProvider: "fireworks",
-			fireworksApiKey: "",
-			planModeFireworksModelId: "",
-			actModeFireworksModelId: "",
-			fireworksModelMaxCompletionTokens: 2000,
-			fireworksModelMaxTokens: 4000,
-		})
-	})
-
-	it("renders Fireworks API Key input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const apiKeyInput = screen.getByPlaceholderText("Enter API Key...")
-		expect(apiKeyInput).toBeInTheDocument()
-	})
-
-	it("renders Fireworks Model Select", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const modelIdSelect = screen.getByLabelText("Model")
-		expect(modelIdSelect).toBeInTheDocument()
-		expect(modelIdSelect).toHaveValue("accounts/fireworks/models/kimi-k2-instruct-0905")
-	})
-})
-
-describe("OpenApiInfoOptions", () => {
-	const mockPostMessage = vi.fn()
-
-	beforeEach(() => {
-		vi.clearAllMocks()
-		//@ts-expect-error - vscode is not defined in the global namespace in test environment
-		global.vscode = { postMessage: mockPostMessage }
-		mockExtensionState({
-			planModeApiProvider: "openai",
-			actModeApiProvider: "openai",
-		})
-	})
-
-	it("renders OpenAI Supports Images input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		fireEvent.click(screen.getByText("Model Configuration"))
-		const apiKeyInput = screen.getByText("Supports Images")
-		expect(apiKeyInput).toBeInTheDocument()
-	})
-
-	it("renders OpenAI Context Window Size input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		fireEvent.click(screen.getByText("Model Configuration"))
-		const orgIdInput = screen.getByText("Context Window Size")
-		expect(orgIdInput).toBeInTheDocument()
-	})
-
-	it("renders OpenAI Max Output Tokens input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		fireEvent.click(screen.getByText("Model Configuration"))
-		const modelInput = screen.getByText("Max Output Tokens")
-		expect(modelInput).toBeInTheDocument()
-	})
-})
-
-describe("ApiOptions Component", () => {
-	vi.clearAllMocks()
-	const mockPostMessage = vi.fn()
-
-	beforeEach(() => {
-		//@ts-expect-error - vscode is not defined in the global namespace in test environment
-		global.vscode = { postMessage: mockPostMessage }
-
-		mockExtensionState({
-			planModeApiProvider: "nebius",
-			actModeApiProvider: "nebius",
-			nebiusApiKey: "",
-		})
-	})
-
-	it("renders Nebius API Key input", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const apiKeyInput = screen.getByPlaceholderText("Enter API Key...")
-		expect(apiKeyInput).toBeInTheDocument()
-	})
-
-	it("renders Nebius Model ID select with a default model", () => {
-		render(
-			<ExtensionStateContextProvider>
-				<ApiOptions currentMode="plan" showModelOptions={true} />
-			</ExtensionStateContextProvider>,
-		)
-		const modelIdSelect = screen.getByLabelText("Model")
-		expect(modelIdSelect).toBeInTheDocument()
-		expect(modelIdSelect).toHaveValue("Qwen/Qwen2.5-32B-Instruct-fast")
+	it("rejects unavailable providers during configuration validation", () => {
+		const config = { actModeApiProvider: "openai", openRouterApiKey: "other-provider-key" } as ApiConfiguration
+		expect(validateApiConfiguration("act", config)).toContain('API provider "openai" is not supported')
 	})
 })

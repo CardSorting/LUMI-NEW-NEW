@@ -30,7 +30,7 @@ export class UseSkillToolHandler implements IToolHandler, IPartialBlockHandler {
 		}
 
 		// Discover skills on-demand (lazy loading)
-		const allSkills = await discoverSkills(config.cwd)
+		const allSkills = await discoverSkills(config.cwd, config.taskState.abortSignal)
 		const resolvedSkills = getAvailableSkills(allSkills)
 
 		// Filter by toggle state
@@ -60,9 +60,12 @@ export class UseSkillToolHandler implements IToolHandler, IPartialBlockHandler {
 		config.taskState.consecutiveMistakeCount = 0
 
 		try {
-			const skillContent = await getSkillContent(skillName, availableSkills)
+			const skillContent = await getSkillContent(skillName, availableSkills, config.taskState.abortSignal)
 
 			if (!skillContent) {
+				if (availableSkills.some((skill) => skill.name === skillName)) {
+					return `Error: Skill "${skillName}" could not be loaded. Its file may have changed, become invalid, or be unreadable. Check the skill file and retry after rediscovery.`
+				}
 				const availableNames = availableSkills.map((s: SkillMetadata) => s.name).join(", ")
 				return `Error: Skill "${skillName}" not found. Available skills: ${availableNames || "none"}`
 			}
@@ -86,8 +89,9 @@ export class UseSkillToolHandler implements IToolHandler, IPartialBlockHandler {
 ${skillContent.instructions}
 
 ---
-IMPORTANT: The skill is now loaded. Do NOT call use_skill again for this task. Simply follow the instructions above to complete the user's request. You may access other files in the skill directory using the read_file tool at: ${skillContent.path.replace(/SKILL\.md$/, "")}`
+The skill is now loaded. Follow its instructions for this task. Load other relevant skills when needed, and reload this skill only if it has changed or its instructions are no longer available. You may access other files in the skill directory using the read_file tool at: ${skillContent.path.replace(/SKILL\.md$/, "")}`
 		} catch (error) {
+			config.taskState.abortSignal?.throwIfAborted()
 			return `Error loading skill "${skillName}": ${(error as Error)?.message}`
 		}
 	}

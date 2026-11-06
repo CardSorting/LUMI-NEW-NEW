@@ -3,9 +3,9 @@ import PROVIDERS from "@shared/providers/providers.json"
 import { Mode } from "@shared/storage/types"
 import { VSCodeTextField } from "@vscode/webview-ui-toolkit/react"
 import Fuse from "fuse.js"
-import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react"
+import { KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react"
 import styled from "styled-components"
-import { normalizeApiConfiguration } from "@/components/settings/utils/providerUtils"
+import { getUnsupportedProvider, normalizeApiConfiguration } from "@/components/settings/utils/providerUtils"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { VscIcon } from "@/components/ui/vsc-icon"
 import { useExtensionState } from "@/context/ExtensionStateContext"
@@ -29,11 +29,9 @@ interface ApiOptionsProps {
 
 // This is necessary to ensure dropdown opens downward, important for when this is used in popup.
 // Canonical home is ./constants; re-exported here for backward compatibility.
-export { DROPDOWN_Z_INDEX }
-
 // DropdownContainer lives in the ./constants leaf to break the ApiOptions ↔
 // provider-component cycle. Imported above for local use + re-exported for compat.
-export { DropdownContainer }
+export { DROPDOWN_Z_INDEX, DropdownContainer }
 
 declare module "vscode" {
 	interface LanguageModelChatSelector {
@@ -49,6 +47,7 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 	const { apiConfiguration, remoteConfigSettings } = useExtensionState()
 
 	const { selectedProvider } = normalizeApiConfiguration(apiConfiguration, currentMode)
+	const unsupportedProvider = getUnsupportedProvider(apiConfiguration, currentMode)
 
 	const { handleModeFieldChange } = useApiConfigurationHandlers()
 
@@ -58,6 +57,7 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 	const [selectedIndex, setSelectedIndex] = useState(-1)
 	const [providerError, setProviderError] = useState("")
 	const [pendingProvider, setPendingProvider] = useState<string>()
+	const listboxId = useId()
 	const providerChangeInFlight = useRef(false)
 	const dropdownRef = useRef<HTMLDivElement>(null)
 	const itemRefs = useRef<(HTMLDivElement | null)[]>([])
@@ -76,9 +76,9 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 	}, [remoteConfigSettings])
 
 	const currentProviderLabel = useMemo(() => {
-		const displayedProvider = pendingProvider || selectedProvider
+		const displayedProvider = pendingProvider || unsupportedProvider || selectedProvider
 		return providerOptions.find((option) => option.value === displayedProvider)?.label || displayedProvider
-	}, [providerOptions, selectedProvider, pendingProvider])
+	}, [providerOptions, selectedProvider, pendingProvider, unsupportedProvider])
 
 	// Sync search term with current provider when not searching
 	useEffect(() => {
@@ -133,6 +133,11 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 
 	const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
 		if (!isDropdownVisible) {
+			if (event.key === "ArrowDown") {
+				event.preventDefault()
+				setSearchTerm("")
+				setIsDropdownVisible(true)
+			}
 			return
 		}
 
@@ -223,6 +228,12 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 				)}
 				<ProviderDropdownWrapper ref={dropdownRef}>
 					<VSCodeTextField
+						aria-activedescendant={
+							isDropdownVisible && selectedIndex >= 0 ? `${listboxId}-${selectedIndex}` : undefined
+						}
+						aria-autocomplete="list"
+						aria-controls={isDropdownVisible ? listboxId : undefined}
+						aria-expanded={isDropdownVisible}
 						data-testid="provider-selector-input"
 						disabled={Boolean(pendingProvider)}
 						id="api-provider"
@@ -264,11 +275,13 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 						)}
 					</VSCodeTextField>
 					{isDropdownVisible && (
-						<ProviderDropdownList ref={dropdownListRef} role="listbox">
+						<ProviderDropdownList id={listboxId} ref={dropdownListRef} role="listbox">
 							{providerSearchResults.map((item, index) => (
 								<ProviderDropdownItem
+									$selected={index === selectedIndex}
+									aria-selected={index === selectedIndex}
 									data-testid={`provider-option-${item.value}`}
-									isSelected={index === selectedIndex}
+									id={`${listboxId}-${index}`}
 									key={item.value}
 									onClick={() => handleProviderChange(item.value)}
 									onMouseEnter={() => setSelectedIndex(index)}
@@ -279,6 +292,11 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 									<span>{item.html}</span>
 								</ProviderDropdownItem>
 							))}
+							{providerSearchResults.length === 0 && (
+								<ProviderDropdownItem $selected={false} aria-disabled="true" role="option">
+									No providers found.
+								</ProviderDropdownItem>
+							)}
 						</ProviderDropdownList>
 					)}
 				</ProviderDropdownWrapper>
@@ -286,6 +304,12 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 			{providerError && (
 				<p role="alert" style={{ color: "var(--vscode-errorForeground)", fontSize: 12 }}>
 					{providerError}
+				</p>
+			)}
+			{unsupportedProvider && (
+				<p role="alert" style={{ color: "var(--vscode-errorForeground)", fontSize: 12 }}>
+					The configured provider “{unsupportedProvider}” is unavailable in this version. Choose a supported provider,
+					or contact your administrator if your organization manages this setting.
 				</p>
 			)}
 
@@ -305,7 +329,7 @@ const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, is
 				/>
 			)}
 
-			{apiConfiguration && selectedProvider === "openrouter" && (
+			{apiConfiguration && !unsupportedProvider && selectedProvider === "openrouter" && (
 				<OpenRouterProvider currentMode={currentMode} isPopup={isPopup} showModelOptions={showModelOptions} />
 			)}
 
@@ -366,13 +390,13 @@ const ProviderDropdownList = styled.div`
 	border-bottom-right-radius: 3px;
 `
 
-const ProviderDropdownItem = styled.div<{ isSelected: boolean }>`
+const ProviderDropdownItem = styled.div<{ $selected: boolean }>`
 	padding: 5px 10px;
 	cursor: pointer;
 	word-break: break-all;
 	white-space: normal;
 
-	background-color: ${({ isSelected }) => (isSelected ? "var(--vscode-list-activeSelectionBackground)" : "inherit")};
+	background-color: ${({ $selected }) => ($selected ? "var(--vscode-list-activeSelectionBackground)" : "inherit")};
 
 	&:hover {
 		background-color: var(--vscode-list-activeSelectionBackground);

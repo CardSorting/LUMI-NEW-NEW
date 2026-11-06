@@ -3,6 +3,7 @@ import { EventEmitter } from "events"
 import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { orchestrateCommandExecution } from "./CommandOrchestrator"
+import { commandOutcome } from "./commandOutcome"
 import type {
 	CommandExecutorCallbacks,
 	ITerminalManager,
@@ -79,6 +80,12 @@ function createTerminalManager(): ITerminalManager {
 }
 
 describe("CommandOrchestrator exit status messaging", () => {
+	it("preserves observed exit codes when a stop request races process completion", () => {
+		assert.equal(commandOutcome({ cancelled: true, exitCode: 0 }).status, "completed")
+		assert.equal(commandOutcome({ cancelled: true, exitCode: 7 }).status, "failed")
+		assert.equal(commandOutcome({ cancelled: true, signal: "SIGTERM" }).status, "cancelled")
+		assert.equal(commandOutcome({ terminalClosed: true }).status, "unconfirmed")
+	})
 	it("reports non-zero exit codes as command failures", async () => {
 		const process = new FakeTerminalProcess()
 		const orchestrationPromise = orchestrateCommandExecution(
@@ -287,6 +294,50 @@ describe("CommandOrchestrator lifecycle", () => {
 		process.complete({ exitCode: 0 })
 		await pending
 		assert.equal(updated, 0)
+	})
+
+	it("does not update unrelated or reassigned rows sharing the command timestamp", async () => {
+		const process = new FakeTerminalProcess()
+		const messages: Array<{
+			ts: number
+			say: string
+			text: string
+			commandExecution?: { status: "running"; executionId: string }
+		}> = [
+			{ ts: 1, say: "text", text: "unrelated" },
+			{ ts: 1, say: "command", text: "old", commandExecution: { status: "running", executionId: "old" } },
+			{ ts: 1, say: "command", text: "build" },
+		]
+		const updates = sinon.stub().resolves()
+		const callbacks = { ...createCallbacks(), getDietCodeMessages: () => messages, updateDietCodeMessage: updates }
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "build",
+			commandMessageTs: 1,
+		})
+		assert.equal(updates.lastCall.args[0], 2)
+		updates.resetHistory()
+		messages[2].commandExecution = { status: "running", executionId: "new" }
+		process.complete({ exitCode: 0 })
+		await pending
+		sinon.assert.notCalled(updates)
+	})
+
+	it("keeps the selected command row when unassigned rows share a timestamp", async () => {
+		const process = new FakeTerminalProcess()
+		const messages = [
+			{ ts: 1, say: "command", text: "old" },
+			{ ts: 1, say: "command", text: "build" },
+		]
+		const updates = sinon.stub().resolves()
+		const callbacks = { ...createCallbacks(), getDietCodeMessages: () => messages, updateDietCodeMessage: updates }
+		const pending = orchestrateCommandExecution(process.asResultPromise(), createTerminalManager(), callbacks, {
+			command: "build",
+			commandMessageTs: 1,
+		})
+		assert.equal(updates.lastCall.args[0], 1)
+		process.complete({ exitCode: 0 })
+		await pending
+		assert.ok(updates.getCalls().every((call) => call.args[0] === 1))
 	})
 
 	it("rejects from a terminal error event without waiting for a broken process promise", async () => {

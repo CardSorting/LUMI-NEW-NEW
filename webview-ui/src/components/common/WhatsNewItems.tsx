@@ -10,7 +10,20 @@ interface WhatsNewItemsProps {
 	onNavigateToModelPicker: (initialModelTab: "recommended" | "free", modelId?: string) => void
 }
 
-type InlineModelLinkProps = { pickerTab: "recommended" | "free"; modelId: string; label: string }
+type InlineModelLinkProps = {
+	pickerTab: "recommended" | "free"
+	modelId: string
+	label: string
+	onNavigate: WhatsNewItemsProps["onNavigateToModelPicker"]
+}
+
+const InlineModelLink: React.FC<InlineModelLinkProps> = ({ pickerTab, modelId, label, onNavigate }) => (
+	<span
+		onClick={() => onNavigate(pickerTab, modelId)}
+		style={{ color: "var(--vscode-textLink-foreground)", cursor: "pointer" }}>
+		{label}
+	</span>
+)
 
 export const WhatsNewItems: React.FC<WhatsNewItemsProps> = ({
 	welcomeBanners,
@@ -19,14 +32,6 @@ export const WhatsNewItems: React.FC<WhatsNewItemsProps> = ({
 	inlineCodeStyle,
 	onNavigateToModelPicker,
 }) => {
-	const InlineModelLink: React.FC<InlineModelLinkProps> = ({ pickerTab, modelId, label }) => (
-		<span
-			onClick={() => onNavigateToModelPicker(pickerTab, modelId)}
-			style={{ color: "var(--vscode-textLink-foreground)", cursor: "pointer" }}>
-			{label}
-		</span>
-	)
-
 	const hasWelcomeBanners = welcomeBanners && welcomeBanners.length > 0
 
 	return (
@@ -80,11 +85,21 @@ export const WhatsNewItems: React.FC<WhatsNewItemsProps> = ({
 					{/* Hardcoded fallback items shown when remote welcome banners feature flag is off */}
 					<li className="mb-2">
 						<strong>Try Codex 5.3:</strong> OpenAI's latest coding model, now available in LUMI!{" "}
-						<InlineModelLink label="Try now" modelId="openai/gpt-5.3-codex" pickerTab="recommended" />
+						<InlineModelLink
+							label="Try now"
+							modelId="openai/gpt-5.3-codex"
+							onNavigate={onNavigateToModelPicker}
+							pickerTab="recommended"
+						/>
 					</li>
 					<li className="mb-2">
 						<strong>Try latest SOTA coding model:</strong> Claude Sonnet 4.6 and Gemini 3.1 pro within LUMI!{" "}
-						<InlineModelLink label="Try now" modelId="anthropic/claude-sonnet-4.6" pickerTab="recommended" />
+						<InlineModelLink
+							label="Try now"
+							modelId="anthropic/claude-sonnet-4.6"
+							onNavigate={onNavigateToModelPicker}
+							pickerTab="recommended"
+						/>
 					</li>
 					<li className="mb-2">
 						<strong>Minimax M2.5 and Z.ai GLM 5:</strong> no longer free starting Feb 23, 2026

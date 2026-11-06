@@ -1,4 +1,5 @@
 const { spawnSync } = require("node:child_process")
+const { existsSync } = require("node:fs")
 const path = require("node:path")
 
 const root = path.resolve(__dirname, "..")
@@ -12,13 +13,10 @@ const backend = [
 	"src/hosts/vscode/terminal/VscodeTerminalLifecycle.test.ts",
 	"src/hosts/vscode/terminal/VscodeTerminalProcess.test.ts",
 	"src/hosts/vscode/VscodeDiffViewProvider.test.ts",
-	"src/core/task/tools/subagent/__tests__/SubagentRunner.test.ts",
-	"src/core/task/tools/subagent/__tests__/SubagentProgress.test.ts",
-	"src/core/task/__tests__/SubagentMessageState.test.ts",
 	"src/core/controller/__tests__/partial-message-delivery.test.ts",
-	"src/core/task/tools/subagent/__tests__/ToolProgressTracker.test.ts",
-	"src/shared/__tests__/subagents.test.ts",
-	"src/core/task/tools/handlers/__tests__/SubagentToolHandler.test.ts",
+	"src/core/task/__tests__/ToolProgressTracker.test.ts",
+	"src/core/task/legion/__tests__/LegionAgentHost.test.ts",
+	"src/core/task/legion/__tests__/LegionToolAdapter.test.ts",
 	"src/core/task/tools/handlers/__tests__/ApplyPatchHandler.execution.test.ts",
 	"src/integrations/editor/__tests__/DiffViewProvider.test.ts",
 	"src/integrations/editor/__tests__/FileEditProvider.test.ts",
@@ -26,6 +24,8 @@ const backend = [
 	"src/core/task/tools/handlers/__tests__/WriteToFileToolHandler.documentation.test.ts",
 	"src/core/task/tools/handlers/__tests__/WriteToFileToolHandler.execution.test.ts",
 	"src/core/task/tools/handlers/__tests__/ExecuteCommandToolHandler.approval.test.ts",
+	"src/core/task/tools/handlers/__tests__/GetExecutionStateToolHandler.test.ts",
+	"src/core/task/tools/handlers/__tests__/AttemptCompletionHandler.execution.test.ts",
 	"src/core/task/__tests__/Task.commandExecution.test.ts",
 	"src/core/task/__tests__/ExecutionState.test.ts",
 	"src/core/task/__tests__/ExecutionContext.test.ts",
@@ -34,6 +34,19 @@ const backend = [
 	"src/core/task/__tests__/ToolExecutor.observation.test.ts",
 	"src/core/task/__tests__/ExecutionRecovery.test.ts",
 ]
+const webview = ["src/components/chat/CommandOutputRow.test.tsx", "src/components/chat/chat-view/utils/messageUtils.test.ts"]
+const webviewRoot = path.join(root, "webview-ui")
+
+for (const [directory, files] of [
+	[root, backend],
+	[webviewRoot, webview],
+]) {
+	const missing = files.filter((file) => !existsSync(path.join(directory, file)))
+	if (missing.length) {
+		console.error(`Execution reliability tests are missing from ${directory}:\n${missing.join("\n")}`)
+		process.exit(1)
+	}
+}
 
 function run(args, cwd) {
 	const result = spawnSync(process.execPath, args, {
@@ -65,13 +78,4 @@ run(
 	root,
 )
 
-run(
-	[
-		"node_modules/vitest/vitest.mjs",
-		"run",
-		"src/components/chat/CommandOutputRow.test.tsx",
-		"src/components/chat/SubagentStatusRow.test.tsx",
-		"src/components/chat/chat-view/utils/messageUtils.test.ts",
-	],
-	path.join(root, "webview-ui"),
-)
+run(["node_modules/vitest/vitest.mjs", "run", ...webview], webviewRoot)

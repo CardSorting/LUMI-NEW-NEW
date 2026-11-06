@@ -4,13 +4,13 @@
 
 The hard-sounding parts ("freeze a whole agent hierarchy and resume it", "spawn the right specialist") are possible because the host already provides five primitives. The feature is a **protocol layered over them**, not a new runtime.
 
-| Existing primitive | What it gives us | Used for |
-|---|---|---|
-| **Streams** (`agent_streams`, `parentId`) | Independent execution identities with tree structure | Parent/child separation; hierarchy walks |
-| **Durable key/value memory** (`agent_memory`, PK `(streamId, key)`) | A per-stream durable scratchpad | Checkpoints, control inboxes, roadmaps, manifests, reservations |
-| **`BufferedDbPool`** | Batched, ordered, SQLite-backed writes with per-agent overlays | Persistence with no new infra; FK-safe flush |
-| **Cooperative turn/tool structure** | Natural pause points between turns and tool calls | `before_turn` / `safe_boundary` yield |
-| **Task rows** (`agent_tasks`) with JSON `metadata` | Status + free-form annotations | Marking tasks "deferred" *without* changing status; Legion specialist metadata |
+| Existing primitive                                                  | What it gives us                                               | Used for                                                                       |
+| ------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **Streams** (`agent_streams`, `parentId`)                           | Independent execution identities with tree structure           | Parent/child separation; hierarchy walks                                       |
+| **Durable key/value memory** (`agent_memory`, PK `(streamId, key)`) | A per-stream durable scratchpad                                | Checkpoints, control inboxes, roadmaps, manifests, reservations                |
+| **`BufferedDbPool`**                                                | Batched, ordered, SQLite-backed writes with per-agent overlays | Persistence with no new infra; FK-safe flush                                   |
+| **Cooperative turn/tool structure**                                 | Natural pause points between turns and tool calls              | `before_turn` / `safe_boundary` yield                                          |
+| **Task rows** (`agent_tasks`) with JSON `metadata`                  | Status + free-form annotations                                 | Marking tasks "deferred" _without_ changing status; Legion specialist metadata |
 
 Three facts make suspension safe:
 
@@ -95,13 +95,13 @@ Flow of `runReview(input)`:
 4. Classify findings (explicit findings, or derived from audit violations). Hypothetical/unverified "defects" are **downgraded** to `unverified_assumption`.
 5. Decide:
 
-| Condition | Decision |
-|---|---|
-| blocking capability unavailable ∧ (defects ∨ material risk) | `ESCALATE` |
-| confirmed defects, initial pass | `REMEDIATE` (+ prioritized corrective tasks) |
-| confirmed defects, already corrective | `ESCALATE` (stop looping) |
-| only risks/assumptions | `ACCEPT_WITH_DISCLOSED_LIMITATIONS` |
-| otherwise | `ACCEPT` |
+| Condition                                                   | Decision                                     |
+| ----------------------------------------------------------- | -------------------------------------------- |
+| blocking capability unavailable ∧ (defects ∨ material risk) | `ESCALATE`                                   |
+| confirmed defects, initial pass                             | `REMEDIATE` (+ prioritized corrective tasks) |
+| confirmed defects, already corrective                       | `ESCALATE` (stop looping)                    |
+| only risks/assumptions                                      | `ACCEPT_WITH_DISCLOSED_LIMITATIONS`          |
+| otherwise                                                   | `ACCEPT`                                     |
 
 6. Merge corrective tasks into the **existing** roadmap (no unbounded task chains); annotate each with a recommended specialist from the Legion.
 7. If the pipeline was deferred for this review and the decision isn't `ESCALATE` → `resumePipeline`.
@@ -122,7 +122,7 @@ Flow of `runReview(input)`:
 
 ### 5.2 Formation (`formAndSpawnLegion`)
 
-Checks: Legion enabled (or `forceEnable`), parent exists, parent `acceptingNewWork`. For each roster member: insert child `agent_streams` row (**direct write**, ADR-0010), write `legion_specialist_profile`, insert a `pending` `agent_tasks` row with Legion metadata (`legion_formation_id`, `legion_specialist_role`, `legion_codename`, `legion_stage`, `assigned_files` …), reserve its files **only if no other *active* stream holds them**. Then persist the manifest and update the parent roadmap.
+Checks: Legion enabled (or `forceEnable`), parent exists, parent `acceptingNewWork`. For each roster member: insert child `agent_streams` row (**direct write**, ADR-0010), write `legion_specialist_profile`, insert a `pending` `agent_tasks` row with Legion metadata (`legion_formation_id`, `legion_specialist_role`, `legion_codename`, `legion_stage`, `assigned_files` …), reserve its files **only if no other _active_ stream holds them**. Then persist the manifest and update the parent roadmap.
 
 ### 5.3 Stage gating, failover, synthesis
 
@@ -235,12 +235,65 @@ With [ADR-0015](../adr/ADR-0015-multi-tier-terminal-heredoc-defense-and-prompt-p
    - In `VscodeTerminalProcess.run`: checks `isMultilineHeredocCommand(command)`. If interactive shell integration is active, safely switches to managed terminal fallback if available, or throws an explicit error refusing execution to prevent terminal deadlock.
    - In `VscodeTerminalManager.ts`: defers microtask dispatch for multiline heredoc commands so output and completion observers attach before execution.
 
-## 6. What this design deliberately does *not* do
+### 5.8 Multi-Tier Terminal File Read Defense, Specialist Token Budget Starvation Resolution & Full Conductor-Specialist Prompt Parity (`terminalFileReadPolicy.ts`, `LegionAgentHost.ts`, `rules.ts`, `editing_files.ts`, `execute_command.ts`)
+
+With [ADR-0016](../adr/ADR-0016-terminal-file-read-defense-budget-starvation-and-conductor-prompt-parity.md) and [PM-017](../postmortems/PM-017-terminal-file-dump-specialist-starvation-and-conductor-fallback.md), LUMI introduces defense against terminal file dumping and resolves multi-turn token starvation:
+
+1. **Terminal File Read Policy Engine (`terminalFileReadPolicy.ts`):**
+   - Intercepts file reads directed to terminal stdout (`cat`, `head`, `tail`, `more`, `less`, `tac`, `bat`, `nl`, `fold`, `pr`, `view`, `pg`, `most`).
+   - Differentiates unpiped/unredirected file dumps from stream processing pipelines (`cat file | grep ...`, `cat file | jq ...`) and output redirection.
+   - Detects interactive stdin deadlock traps (`cat > file` with no input).
+   - Whitelists safe OS/kernel environment probes (`/proc/*`, `/sys/*`, `/etc/os-release`, etc.) and non-blocking streaming (`tail -f`).
+2. **Specialist Token Budget Decoupling (`LegionAgentHost.ts`):**
+   - Replaced arbitrary 100,000 token default with explicit parent task bounds: token limits are only enforced when `options.maxTokens !== undefined`.
+   - Prevents multi-turn specialist teams from starving due to accumulated conversation prompt contexts.
+3. **Conductor-Specialist Prompt Parity:**
+   - Injected File Reading rules into `LEGION_CORE_RULES`, conductor prompts (`rules.ts`, `editing_files.ts`, `execute_command.ts`), and skill loading guidance (`UseSkillToolHandler.ts`).
+
+### 5.9 Dynamic Project Knowledge, Scoped Blackboard Sharing & Credential Sanitization (`LegionKnowledge.ts`, `BufferedDbPool.ts`)
+
+With [ADR-0017](../adr/ADR-0017-dynamic-project-knowledge-blackboard-and-credential-sanitization.md), LUMI introduces durable, scoped project memory:
+
+1. **Workspace Scope Hashing:** Observations are scoped using SHA-256 digests (`legionWorkspaceScope(cwd)`) to prevent cross-workspace data leakage.
+2. **Credential Sanitization (`isReusableLegionObservation`):** Scans observations against `CREDENTIAL_PATTERNS` regex suite (GitHub, OpenAI, Anthropic, AWS, GCP, Slack, JWT, basic auth URLs, query secrets), rejecting newlines, control characters, and secret keywords.
+3. **Durable Knowledge Store:** Persists observations in `agent_knowledge` with a 30-day TTL (`LEGION_KNOWLEDGE_TTL_MS`), sorted by recency and capped at 20 items.
+4. **Swarm Blackboard Continuity:** Handoff findings (`Heuristic: ...`) accumulate in `manifest.swarmBlackboard` and propagate across stages and subsequent formations within the same workspace scope.
+5. **Atomic TTL Pruning:** `BufferedDbPool.pruneExpiredAgentKnowledge` coordinates flush barriers and mutexes to safely clean up expired records without racing buffered writes.
+
+### 5.10 Workspace Environment Integrity & Reactive Cache Invalidation (`EnvironmentIntegrity.ts`, `ApplyPatchHandler.ts`, `WriteToFileToolHandler.ts`)
+
+With [ADR-0018](../adr/ADR-0018-workspace-environment-integrity-and-manifest-fingerprinting.md), LUMI keeps environment leases synchronized with disk:
+
+1. **Manifest Fingerprinting (`getManifestFingerprint`):** Hashes stats (`size`, `mtimeMs`, `ctimeMs`) of project markers (`package.json`, `Cargo.toml`) and version manifests (`.nvmrc`, `pyproject.toml`, `setup.py`, `build.gradle.kts`, `rust-toolchain`).
+2. **Reactive Cache Invalidation:** `EnvironmentIntegrity.isManifest(filePath)` triggers `EnvironmentIntegrity.invalidateCache()` whenever file editing tools (`WriteToFileToolHandler`, `ApplyPatchHandler`, `disk.ts`) alter manifest files.
+3. **Generational Concurrency:** A `generation` counter and WeakRef registry detect concurrent file edits during active validation probes, retrying automatically.
+4. **PATH Shadowing Alerts:** Compares canonical `realpath` of `process.execPath` vs PATH-resolved Node binaries to warn when execution environments diverge.
+
+### 5.11 Terminal Supervision, Action Execution Fencing & Shadow Commit Retention (`SupervisedShell.ts`, `CommandExecutor.ts`, `ActionExecutionRegistry.ts`, `BufferedDbPool.ts`)
+
+With [ADR-0019](../adr/ADR-0019-terminal-supervision-action-fencing-and-shadow-commit-retention.md) and [PM-018](../postmortems/PM-018-unconfirmed-command-outcome-fencing-and-replacement-view-pollution.md), LUMI ensures process outcome integrity:
+
+1. **Post-Spawn Error Isolation (`SupervisedShell.ts`):** `onObservationError` logs stream errors occurring after process spawn without falsely treating the process as terminated. Process tree cancellation ensures child spawn before issuing OS termination signals.
+2. **Strict Outcome Evaluation (`commandOutcome.ts`):** Only observed `exitCode === 0` denotes `completed`; missing exit codes remain `unconfirmed`.
+3. **Action Execution Fencing (`ActionExecutionRegistry.ts`):** Unconfirmed commands retain execution identity fences, preventing premature re-execution. `commandObserved` protects fences from delayed foreground snapshots.
+4. **View Ownership & Replay Fences (`CommandExecutor.ts`):** Background readers verify view epochs before updating messages; replayed executions mark new rows `not_started`.
+5. **Shadow Commit Retention (`BufferedDbPool.ts`):** Throws `ShadowCommitError` to retain uncommitted shadows on failure; `stop()` rejects shutdown while uncommitted shadows exist; applies SQLite column affinities and value ordering in buffered queries.
+
+### 5.12 Surrogate-Safe Handoff Sanitization, Two-Phase Reservations & Unsettled State Reconciliation (`LegionHandoff.ts`, `LegionCoordinator.ts`, `LegionPipelineRunner.ts`, `skills.ts`)
+
+With [ADR-0020](../adr/ADR-0020-legion-handoff-sanitization-two-phase-reservation-and-unsettled-reconciliation.md) and [PM-019](../postmortems/PM-019-unpersisted-specialist-settlement-and-formation-dispatch-race.md), LUMI hardens specialist handoffs and concurrency:
+
+1. **Surrogate-Safe Handoff Formatting (`formatLegionHandoffText`):** XML-escapes `<` and `>`, caps encoded text to 12 KB using binary search, and guards UTF-16 surrogate pairs against midpoint splitting.
+2. **Two-Phase Formation Reservations:** `acquireFormationReservation` and `acquireAutomaticFormationToken` prevent duplicate parallel team formations across concurrent triggers.
+3. **Unsettled State Reconciliation:** When specialist host termination or SQLite settlement cannot be confirmed, `LegionPipelineRunner` returns `needs_reconciliation` and keeps members in `running` status, preventing duplicate failovers.
+4. **Skills System Hardening:** Skill discovery and loading support `AbortSignal` for immediate cancellation; system prompts frame skill descriptions as untrusted catalog data; specialist skill catalogs are size-capped.
+
+## 6. What this design deliberately does _not_ do
 
 - It does not interrupt running child tools mid-operation to pretend to be suspended (all defer/cancellation points are cooperative or cleanly cancelled via process group signals).
 - It does not share transcripts or conversational memory directly between agents (context is passed via structured summaries and receipts).
 - It does not make an LLM call to classify tasks (deterministic scoring ensures instant and predictable roster selection).
 - It does not retry specialists on transport decoding or stream syntax errors (`safeToRetry: false` ensures broken provider streams fail fast without churn).
 - It does not permit file creation or edits via terminal heredocs or stdin redirection; all workspace modifications must flow through structured tools (`write_to_file`, `replace_in_file`) to ensure dirty buffer tracking, reservation exclusivity, and shell integration reliability.
-
-
+- It does not assume an unobserved or closed terminal indicates process termination; unconfirmed commands retain semantic fences until reconciled.
+- It does not discard uncommitted transaction shadows during database shutdown or commit failures.

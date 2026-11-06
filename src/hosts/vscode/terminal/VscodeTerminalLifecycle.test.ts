@@ -1,10 +1,11 @@
 import { strict as assert } from "node:assert"
-import { EventEmitter } from "node:events"
+import { EventEmitter, once } from "node:events"
 import { afterEach, beforeEach, describe, it } from "mocha"
 import sinon from "sinon"
 import * as vscode from "vscode"
 import { CommandExecutor } from "@/integrations/terminal/CommandExecutor"
 import { CommandRuntimeRegistry } from "@/integrations/terminal/CommandRuntime"
+import { commandOutcome } from "@/integrations/terminal/commandOutcome"
 import type { CommandExecutorCallbacks, TerminalInfo } from "@/integrations/terminal/types"
 import { ManagedTerminal } from "./ManagedTerminal"
 import { VscodeTerminalManager } from "./VscodeTerminalManager"
@@ -322,6 +323,11 @@ describe("VS Code command lifecycle", () => {
 	it("keeps real supervised output and exit ownership when the terminal display breaks", async () => {
 		const managed = new ManagedTerminal("/tmp", "/bin/sh")
 		managed.terminal.show()
+		const deadline = Date.now() + 5000
+		while (!(managed as any).opened && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20))
+		}
+		assert.equal((managed as any).opened, true, "VS Code must open the terminal before testing its display")
 		const display = sinon.stub((managed as any).writeEvent, "fire").throws(new Error("display disconnected"))
 		const process = new VscodeTerminalProcess()
 		const done = new Promise<void>((resolve) => process.once("completed", () => resolve()))
@@ -334,6 +340,28 @@ describe("VS Code command lifecycle", () => {
 		assert.equal(process.getCompletionDetails().exitCode, 7)
 		sinon.assert.calledOnce(display)
 		managed.terminal.dispose()
+	})
+	it("reports post-spawn supervised errors while retaining late exit ownership", async () => {
+		const managed = new ManagedTerminal("/tmp", "/bin/sh")
+		const process = new VscodeTerminalProcess()
+		const unavailable = sinon.spy()
+		const failure = sinon.spy()
+		process.on("no_shell_integration", unavailable)
+		process.on("error", failure)
+		const completed = new Promise<void>((resolve) => process.once("completed", () => resolve()))
+		try {
+			const started = process.runManaged(managed, "sleep 0.1; exit 7")
+			const child = (managed as any).execution.child
+			await once(child, "spawn")
+			await started
+			child.emit("error", new Error("observation disrupted"))
+			sinon.assert.calledOnce(unavailable)
+			sinon.assert.notCalled(failure)
+			await completed
+			assert.equal(process.getCompletionDetails().exitCode, 7)
+		} finally {
+			managed.terminal.dispose()
+		}
 	})
 	it("cleans up a supervised launch rejection without retaining a hot or busy process", async () => {
 		const target = terminal()
@@ -492,7 +520,9 @@ describe("VS Code command lifecycle", () => {
 		process.terminate!()
 		sinon.assert.calledOnce(target.dispose)
 		sinon.assert.calledOnce(completed)
-		assert.equal(process.getCompletionDetails!().cancelled, true)
+		assert.equal(process.getCompletionDetails!().cancelled, false)
+		assert.equal(process.getCompletionDetails!().terminalClosed, true)
+		assert.equal(commandOutcome(process.getCompletionDetails!()).status, "unconfirmed")
 		assert.equal(clock.countTimers(), 0)
 	})
 	it("allows a deliberate stop retry after terminal disposal throws", async () => {
@@ -511,7 +541,8 @@ describe("VS Code command lifecycle", () => {
 		assert.throws(() => process.terminate(), /host unavailable/)
 		process.terminate()
 		sinon.assert.calledTwice(dispose)
-		assert.equal(process.getCompletionDetails().cancelled, true)
+		assert.equal(process.getCompletionDetails().cancelled, false)
+		assert.equal(process.getCompletionDetails().terminalClosed, true)
 	})
 	it("does not stop sibling terminals or replay completed commands on late cancellation", async () => {
 		const first = terminal(

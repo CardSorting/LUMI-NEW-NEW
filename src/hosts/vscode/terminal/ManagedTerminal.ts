@@ -55,7 +55,10 @@ export class ManagedTerminal {
 		} else this.pending = (this.pending + text).slice(-64_000)
 	}
 
-	run(command: string, callbacks: Pick<SupervisedShellOptions, "onData" | "onComplete" | "onError">): SupervisedShell {
+	run(
+		command: string,
+		callbacks: Pick<SupervisedShellOptions, "onData" | "onComplete" | "onError" | "onObservationError">,
+	): SupervisedShell {
 		if (this.closed || this.execution) throw new Error("Command did not start: supervised terminal is closed or busy.")
 		const execution = new SupervisedShell()
 		this.execution = execution
@@ -78,6 +81,7 @@ export class ManagedTerminal {
 				this.display(`\n[not started: ${error.message}]\n`)
 				callbacks.onError(error)
 			},
+			onObservationError: callbacks.onObservationError,
 		})
 		return execution
 	}

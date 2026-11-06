@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert"
 import { spawn } from "node:child_process"
 import { EventEmitter, once } from "node:events"
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, it } from "mocha"
@@ -32,6 +32,111 @@ describe("execution recovery across extension-host restarts", () => {
 	})
 	const store = () => new ExecutionRecoveryStore(directory, identity)
 	const helperIdentity = (owner: string) => ({ kind: "helper" as const, input: { prompt: owner }, label: owner, owner })
+
+	for (const saved of [false, true])
+		it(`retains an in-memory unconfirmed command when durable evidence is ${saved ? "contradictory" : "missing"}`, () => {
+			if (saved)
+				store().put("run", {
+					kind: "command",
+					transport: { kind: "unknown" },
+					snapshot: {
+						execution_id: "run",
+						command: "build",
+						cwd: identity.cwd,
+						status: "completed",
+						exit_code: 0,
+						output: "",
+					},
+				})
+			const registry = new CommandRuntimeRegistry(0)
+			const runtime = registry.get(identity.taskId, identity.ulid)
+			runtime.receipts.set("run", {
+				snapshot: {
+					execution_id: "run",
+					command: "build",
+					cwd: identity.cwd,
+					status: "unconfirmed",
+					output: "partial",
+				},
+			})
+			runtime.enableRecovery(directory, identity.cwd)
+			assert.equal(runtime.receipts.get("run")?.snapshot.status, "unconfirmed")
+			assert.equal(runtime.retainedWork, true)
+			registry.get("other", "other")
+			assert.equal(registry.get(identity.taskId, identity.ulid), runtime)
+		})
+
+	for (const changed of ["owner", "action_id", "output", "detail", "log_file_path", "log_notice", "none"] as const)
+		it(`only evicts an unconfirmed receipt when persisted ${changed === "none" ? "evidence matches" : changed + " matches"}`, () => {
+			const snapshot = {
+				execution_id: "run",
+				action_id: "action",
+				owner: "legion:one",
+				command: "build",
+				cwd: identity.cwd,
+				status: "unconfirmed" as const,
+				output: "partial output",
+				detail: "closed",
+				log_file_path: "/tmp/log",
+				log_notice: "saved",
+			}
+			const persisted = { ...snapshot, ...(changed === "none" ? {} : { [changed]: "stale" }) }
+			store().put("run", { kind: "command", transport: { kind: "unknown" }, snapshot: persisted })
+			const runtime = new CommandRuntimeRegistry().get(identity.taskId, identity.ulid)
+			runtime.receipts.set("run", { snapshot })
+			runtime.enableRecovery(directory, identity.cwd)
+			assert.equal(runtime.retainedWork, changed !== "none")
+		})
+
+	it("persists an unconfirmed command without releasing its identity across restart", () => {
+		const first = new ActionExecutionRegistry()
+		first.attachRecovery(identity.ulid, store())
+		const command = { kind: "command" as const, input: { command: "build" }, label: "build" }
+		const entry = first.claim(identity.ulid, command)
+		first.update(entry, "running")
+		first.reconcileCommand(identity.ulid, entry.snapshot.execution_id, {
+			status: "unconfirmed",
+			terminalClosed: true,
+		})
+		assert.equal(first.list(identity.ulid).active[0].status, "unconfirmed")
+		const recovered = new ActionExecutionRegistry()
+		recovered.attachRecovery(identity.ulid, store())
+		assert.equal(recovered.get(identity.ulid, entry.snapshot.execution_id)?.status, "unconfirmed")
+		assert.throws(() => recovered.claim(identity.ulid, command), /No duplicate/)
+	})
+
+	it("keeps legacy finalized unconfirmed commands fenced after restart", () => {
+		const first = new ActionExecutionRegistry()
+		first.attachRecovery(identity.ulid, store())
+		const command = { kind: "command" as const, input: "build", label: "build" }
+		const entry = first.claim(identity.ulid, command)
+		first.finish(entry, "unconfirmed", "terminal closed")
+		const recovered = new ActionExecutionRegistry()
+		recovered.attachRecovery(identity.ulid, store())
+		assert.equal(recovered.get(identity.ulid, entry.snapshot.execution_id)?.status, "unconfirmed")
+		assert.throws(() => recovered.claim(identity.ulid, command), /No duplicate/)
+	})
+
+	it("removes evicted recovery fences when the scope is attached to a replacement store", () => {
+		const first = new ActionExecutionRegistry()
+		first.attachRecovery(identity.ulid, store())
+		const command = { kind: "command" as const, input: "build", label: "build" }
+		const pending = first.claim(identity.ulid, command)
+		first.update(pending, "running")
+		const recovered = new ActionExecutionRegistry()
+		recovered.attachRecovery(identity.ulid, store())
+		for (let i = 0; i < 128; i++) {
+			const entry = recovered.claim(identity.ulid, { kind: "file_write", input: i, label: String(i) })
+			recovered.finish(entry, "completed", "done")
+		}
+		assert.equal(recovered.list(identity.ulid).unresolved[0]?.execution_id, pending.snapshot.execution_id)
+		assert.equal(recovered.list(identity.ulid).unresolved[0]?.recovery?.authority, "none")
+		assert.throws(() => recovered.claim(identity.ulid, command), /No duplicate/)
+		const replacementDirectory = join(directory, "replacement")
+		mkdirSync(replacementDirectory)
+		recovered.attachRecovery(identity.ulid, new ExecutionRecoveryStore(replacementDirectory, identity))
+		assert.doesNotThrow(() => recovered.claim(identity.ulid, command))
+	})
 
 	it("persists new helper evidence immediately without fsyncing every provider chunk or duplicate snapshot", () => {
 		const registry = new ActionExecutionRegistry()
@@ -285,6 +390,22 @@ describe("execution recovery across extension-host restarts", () => {
 		assert.equal(saved.recovery?.observedAt, 5)
 		await restarted.executor.execute("old server", 1, { actionId: "new-id" })
 		sinon.assert.notCalled(restarted.manager.getOrCreateTerminal as sinon.SinonStub)
+	})
+
+	it("does not dispatch a command when unresolved legacy history lacks its command text", async () => {
+		const host = commandHost()
+		host.executor.restoreCommandHistory([
+			{
+				ts: 5,
+				type: "say",
+				say: "command",
+				commandExecution: { status: "background", executionId: "legacy-missing", taskId: identity.taskId },
+			},
+		])
+		const result = await host.executor.execute("any command", 1, { actionId: "new" })
+		assert.equal(result[2]?.executionId, "legacy-missing")
+		assert.match(String(result[1]), /command text is unavailable/)
+		sinon.assert.notCalled(host.manager.getOrCreateTerminal as sinon.SinonStub)
 	})
 
 	it("retains partial helper evidence when its final failure has no structured handoff", () => {

@@ -142,7 +142,7 @@ export class ActionExecutor {
 				.then(
 					(result) => {
 						if (entry?.snapshot.kind === "command" && Array.isArray(result) && result[2]?.status) {
-							this.executions.reconcileCommand(taskId, entry.snapshot.execution_id, result[2])
+							this.executions.reconcileCommand(taskId, entry.snapshot.execution_id, result[2], "result")
 							return result
 						}
 						if (
@@ -169,6 +169,16 @@ export class ActionExecutor {
 						return result
 					},
 					(error) => {
+						// A rejected foreground callback does not stop a command already
+						// observed by its host. Retain its fence for later lifecycle evidence.
+						if (entry?.snapshot.kind === "command" && entry.commandObserved && !entry.finished) {
+							this.executions.update(
+								entry,
+								"unconfirmed",
+								"Command observation failed after dispatch. Inspect the existing execution before retrying.",
+							)
+							throw error
+						}
 						retrying =
 							attempt < attempts &&
 							!options.signal?.aborted &&
@@ -194,11 +204,12 @@ export class ActionExecutor {
 				return await this.observe(work, controller, options)
 			} catch (error) {
 				if (!retrying) {
-					this.executions.update(
-						entry,
-						"awaiting_completion",
-						"Caller stopped waiting; the underlying action has not settled. Do not resubmit it.",
-					)
+					if (entry?.snapshot.status !== "unconfirmed")
+						this.executions.update(
+							entry,
+							"awaiting_completion",
+							"Caller stopped waiting; the underlying action has not settled. Do not resubmit it.",
+						)
 					throw error
 				}
 				const base = options.backoffMs ?? 500

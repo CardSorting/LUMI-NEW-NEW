@@ -1095,6 +1095,9 @@ export class AgentOrchestrator {
 				layer: "domain",
 			},
 		])
+		// Downstream stages must not observe completion before its summary and
+		// retained specialist work are durably recorded.
+		await dbPool.flush()
 
 		await hierarchicalDeferCoordinator.reconcileAfterStreamFailure(streamId).catch(() => null)
 		await this.settleLegionSpecialist(streamId, { status: "completed", summary })
@@ -1124,6 +1127,9 @@ export class AgentOrchestrator {
 	 * Mark a stream as failed and store the error reason.
 	 */
 	public async failStream(streamId: string, reason: string, options?: { skipFailover?: boolean }): Promise<void> {
+		// Preserve observations already written by the specialist before applying
+		// the final failure state and releasing its reservations.
+		await dbPool.commitWork(streamId)
 		await dbPool.push({
 			type: "update",
 			table: "agent_streams",
@@ -1135,7 +1141,9 @@ export class AgentOrchestrator {
 
 		// Auto-release all file reservations for this stream
 		await this.releaseAllReservations(streamId)
-		await dbPool.clearShadow(streamId).catch(() => null)
+		// Publish the failure and retained findings before downstream reconciliation
+		// can delegate replacement work.
+		await dbPool.flush()
 
 		await hierarchicalDeferCoordinator.reconcileAfterStreamFailure(streamId).catch(() => null)
 		await this.settleLegionSpecialist(streamId, { status: "failed", failureReason: reason }, options)
@@ -1397,11 +1405,13 @@ export class AgentOrchestrator {
 	}
 
 	/**
-	 * Reconciles orphaned child streams left active across host restarts or crashes.
-	 * Marks stale active child streams as failed with "Host terminated during execution"
-	 * so pipelines and formations do not become trapped in 'needs_reconciliation'.
+	 * Reconcile only streams whose execution has been independently confirmed stopped.
+	 * An active row alone does not establish that its owner or commands are gone.
 	 */
-	public async reconcileOrphanedStreams(reason = "Host terminated during execution"): Promise<number> {
+	public async reconcileOrphanedStreams(
+		reason = "Host terminated during execution",
+		isExecutionConfirmedStopped?: (streamId: string) => Promise<boolean>,
+	): Promise<number> {
 		const allStreams = await dbPool.selectAllFrom("agent_streams")
 		const staleChildStreams = allStreams.filter(
 			(s) => s.parentId !== null && s.parentId !== undefined && s.status === "active",
@@ -1409,10 +1419,10 @@ export class AgentOrchestrator {
 
 		if (staleChildStreams.length === 0) return 0
 
-		Logger.info(`[Orchestrator] Reconciling ${staleChildStreams.length} orphaned child stream(s) from prior session.`)
 		let reconciledCount = 0
 		for (const stream of staleChildStreams) {
 			try {
+				if (!isExecutionConfirmedStopped || !(await isExecutionConfirmedStopped(stream.id))) continue
 				const tasks = await this.getStreamTasks(stream.id)
 				for (const task of tasks) {
 					if (task.status === "running" || task.status === "pending") {
@@ -1420,7 +1430,6 @@ export class AgentOrchestrator {
 					}
 				}
 				await this.failStream(stream.id, reason, { skipFailover: true })
-				await dbPool.clearShadow(stream.id).catch(() => null)
 				reconciledCount++
 			} catch (err) {
 				Logger.warn(
@@ -1428,7 +1437,7 @@ export class AgentOrchestrator {
 				)
 			}
 		}
-		await dbPool.flush()
+		if (reconciledCount) await dbPool.flush()
 		return reconciledCount
 	}
 
@@ -1628,6 +1637,7 @@ export class AgentOrchestrator {
 		manifest?: LegionFormationManifest
 		classification: LegionClassificationResult
 		reason?: string
+		requiresReconciliation?: boolean
 	}> {
 		const res = await legionCoordinator.formAndSpawnLegion(parentStreamId, options)
 		if (res.formed && res.manifest) {

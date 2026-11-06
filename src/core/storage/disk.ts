@@ -331,11 +331,15 @@ export async function getSavedDietCodeMessages(taskId: string): Promise<DietCode
 	return []
 }
 
+export async function saveDietCodeMessagesStrict(taskId: string, uiMessages: DietCodeMessage[]): Promise<void> {
+	const taskDir = await ensureTaskDirectoryExists(taskId)
+	const filePath = path.join(taskDir, GlobalFileNames.uiMessages)
+	await atomicWriteFile(filePath, JSON.stringify(uiMessages))
+}
+
 export async function saveDietCodeMessages(taskId: string, uiMessages: DietCodeMessage[]) {
 	try {
-		const taskDir = await ensureTaskDirectoryExists(taskId)
-		const filePath = path.join(taskDir, GlobalFileNames.uiMessages)
-		await atomicWriteFile(filePath, JSON.stringify(uiMessages))
+		await saveDietCodeMessagesStrict(taskId, uiMessages)
 	} catch (error) {
 		Logger.error("Failed to save ui messages:", error)
 	}

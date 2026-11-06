@@ -8,7 +8,11 @@ import ContextMenu from "@/components/chat/ContextMenu"
 import { CHAT_CONSTANTS } from "@/components/chat/chat-view/constants"
 import SlashCommandMenu from "@/components/chat/SlashCommandMenu"
 import Thumbnails from "@/components/common/Thumbnails"
-import { getModeSpecificFields, normalizeApiConfiguration } from "@/components/settings/utils/providerUtils"
+import {
+	getModeSpecificFields,
+	getUnsupportedProvider,
+	normalizeApiConfiguration,
+} from "@/components/settings/utils/providerUtils"
 import { Icon } from "@/components/ui/icons"
 import { useExtensionState } from "@/context/ExtensionStateContext"
 import { cn } from "@/lib/utils"
@@ -643,6 +647,8 @@ const ChatTextArea = forwardRef<HTMLTextAreaElement, ChatTextAreaProps>(
 
 		// Get model display name
 		const modelDisplayName = useMemo(() => {
+			const unavailableProvider = getUnsupportedProvider(apiConfiguration, mode)
+			if (unavailableProvider) return `${unavailableProvider}: unavailable`
 			const { selectedProvider, selectedModelId } = normalizeApiConfiguration(apiConfiguration, mode)
 			const {
 				vsCodeLmModelSelector,

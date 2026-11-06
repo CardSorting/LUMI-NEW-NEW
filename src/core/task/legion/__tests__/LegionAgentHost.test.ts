@@ -7,6 +7,206 @@ import { LEGION_CORE_RULES, LegionAgentHost } from "../LegionAgentHost"
 const member = { assignment: { title: "Researcher", focusObjective: "Inspect the code" } } as SpawnedLegionMember
 
 describe("LegionAgentHost", () => {
+	it("does not create provider or tools when already cancelled", async () => {
+		const controller = new AbortController()
+		controller.abort()
+		const createApi = sinon.spy()
+		const createTools = sinon.spy()
+		const host = new LegionAgentHost({ createApi, createTools })
+		const result = await host.execute(member, { handoff: [], signal: controller.signal })
+		expect(result.status).to.equal("cancelled")
+		sinon.assert.notCalled(createApi)
+		sinon.assert.notCalled(createTools)
+	})
+
+	it("reports unresolved initialization on cancellation and disposes a late adapter", async () => {
+		const controller = new AbortController()
+		const dispose = sinon.spy()
+		const createMessage = sinon.spy()
+		let started!: () => void
+		let resolveTools!: (tools: any) => void
+		const initialized = new Promise<void>((resolve) => {
+			started = resolve
+		})
+		const factory = new Promise<any>((resolve) => {
+			resolveTools = resolve
+		})
+		const host = new LegionAgentHost({
+			createApi: () => ({ createMessage }) as unknown as ApiHandler,
+			createTools: async () => {
+				started()
+				return factory
+			},
+		})
+		const execution = host.execute(member, { handoff: [], signal: controller.signal })
+		await initialized
+		controller.abort()
+		const result = await execution
+		expect(result.status).to.equal("unresolved")
+		if (result.status === "unresolved") expect(result.safeToRetry).to.equal(false)
+		resolveTools({ definitions: [], allowedNames: new Set(), execute: async () => "", dispose })
+		await new Promise((resolve) => setImmediate(resolve))
+		sinon.assert.calledOnce(dispose)
+		sinon.assert.notCalled(createMessage)
+	})
+
+	it("retains committed artifact evidence when a specialist is cancelled", async () => {
+		const controller = new AbortController()
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "write", name: "write_to_file", arguments: '{"path":"saved.ts"}' } },
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			createApi: () => api,
+			createTools: async () => ({
+				definitions: [],
+				allowedNames: new Set(["write_to_file"]),
+				execute: async () => {
+					controller.abort()
+					return "saved"
+				},
+				getModifiedArtifacts: () => ["saved.ts"],
+			}),
+		})
+		const result = await host.execute(member, { handoff: [], signal: controller.signal })
+		expect(result.status).to.equal("cancelled")
+		if (result.status === "cancelled") expect(result.reason).to.include("saved.ts")
+	})
+	it("discovers enabled skills in the project and supplies newly recorded artifacts to later specialists", async () => {
+		const systems: string[] = []
+		const histories: string[] = []
+		const discover = sinon.stub().resolves([
+			{ name: "enabled", description: "project skill", path: "/project/enabled/SKILL.md", source: "project" },
+			{ name: "disabled", description: "disabled skill", path: "/project/disabled/SKILL.md", source: "project" },
+		])
+		const artifacts: string[] = []
+		const api = {
+			createMessage: (system: string, history: unknown) => {
+				systems.push(system)
+				histories.push(JSON.stringify(history))
+				return (async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})()
+			},
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			cwd: "/project",
+			discoverSkills: discover,
+			isSkillEnabled: (skill) => skill.name !== "disabled",
+			workspaceArtifacts: artifacts,
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+		})
+		await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		artifacts.push("src/new.ts")
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(discover.alwaysCalledWith("/project", sinon.match.instanceOf(AbortSignal))).to.equal(true)
+		expect(systems[0]).to.include("project skill").and.not.include("disabled skill")
+		expect(systems[1]).not.to.include("src/new.ts")
+		expect(histories[1]).to.include("src/new.ts")
+		expect(result).to.deep.equal({ status: "completed", summary: "Done" })
+	})
+	it("respects toggles and intentional emptiness for configured skill lists", async () => {
+		const systems: string[] = []
+		const discover = sinon
+			.stub()
+			.resolves([{ name: "unexpected", description: "unexpected", path: "/u/SKILL.md", source: "project" }])
+		const api = {
+			createMessage: (system: string) => {
+				systems.push(system)
+				return (async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})()
+			},
+		} as unknown as ApiHandler
+		const common = {
+			discoverSkills: discover,
+			isSkillEnabled: (skill: any) => skill.name !== "disabled",
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set<string>(), execute: async () => "" }),
+		}
+		const configured = new LegionAgentHost({
+			...common,
+			availableSkills: [
+				{ name: "enabled", description: "allowed skill", path: "/e/SKILL.md", source: "project" },
+				{ name: "disabled", description: "disabled skill", path: "/d/SKILL.md", source: "project" },
+			],
+		})
+		const empty = new LegionAgentHost({ ...common, availableSkills: [] })
+		await configured.execute(member, { handoff: [], signal: new AbortController().signal })
+		await empty.execute(member, { handoff: [], signal: new AbortController().signal })
+		sinon.assert.notCalled(discover)
+		expect(systems[0]).to.include("allowed skill").and.not.include("disabled skill")
+		expect(systems[1]).not.to.include("<available_skills>")
+	})
+	it("refreshes the discovered skill catalog between specialist turns", async () => {
+		const systems: string[] = []
+		const discover = sinon.stub()
+		discover.onFirstCall().resolves([{ name: "old", description: "old skill", path: "/old/SKILL.md", source: "project" }])
+		discover.onSecondCall().resolves([{ name: "new", description: "new skill", path: "/new/SKILL.md", source: "project" }])
+		const api = {
+			createMessage: (system: string) => {
+				systems.push(system)
+				const first = systems.length === 1
+				return (async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: first ? "read" : "done",
+								name: first ? "read_file" : "attempt_completion",
+								arguments: first ? '{"path":"file"}' : '{"result":"Done"}',
+							},
+						},
+					}
+				})()
+			},
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			discoverSkills: discover,
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(["read_file"]), execute: async () => "contents" }),
+		})
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("completed")
+		sinon.assert.calledTwice(discover)
+		expect(systems[0]).to.include("old skill").and.not.include("new skill")
+		expect(systems[1]).to.include("new skill").and.not.include("old skill")
+	})
+	it("cancels stalled skill discovery and disposes the tool adapter", async () => {
+		const controller = new AbortController()
+		const dispose = sinon.spy()
+		const createMessage = sinon.spy()
+		let started!: () => void
+		const discoveryStarted = new Promise<void>((resolve) => {
+			started = resolve
+		})
+		const host = new LegionAgentHost({
+			createApi: () => ({ createMessage }) as unknown as ApiHandler,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "", dispose }),
+			discoverSkills: async () => {
+				started()
+				return await new Promise<never>(() => {})
+			},
+		})
+		const execution = host.execute(member, { handoff: [], signal: controller.signal })
+		await discoveryStarted
+		controller.abort()
+		expect((await execution).status).to.equal("cancelled")
+		sinon.assert.calledOnce(dispose)
+		sinon.assert.notCalled(createMessage)
+	})
 	it("runs an isolated tool conversation and returns an explicit completion", async () => {
 		const messages: unknown[] = []
 		let request = 0
@@ -158,6 +358,143 @@ describe("LegionAgentHost", () => {
 		expect(requests).to.equal(2)
 	})
 
+	for (const invalid of [-100, Number.NaN]) {
+		it(`does not let ${String(invalid)} token usage disable the budget guard`, async () => {
+			const api = {
+				createMessage: () =>
+					(async function* () {
+						yield { type: "usage", inputTokens: 10, outputTokens: 0 }
+						yield { type: "usage", inputTokens: invalid, outputTokens: 0 }
+						yield { type: "usage", inputTokens: 11, outputTokens: 0 }
+						yield {
+							type: "tool_calls",
+							tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+						}
+					})(),
+			} as unknown as ApiHandler
+			const host = new LegionAgentHost({
+				availableSkills: [],
+				maxTokens: 20,
+				createApi: () => api,
+				createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+			})
+			const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+			expect(result.status).to.equal("failed")
+			if (result.status === "failed") expect(result.reason).to.include("budget exhausted")
+		})
+	}
+
+	it("never reduces accumulated cost when provider totals decrease", async () => {
+		const costs: number[] = []
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield { type: "usage", inputTokens: 1, outputTokens: 0, totalCost: 0.1 }
+					yield { type: "usage", inputTokens: 0, outputTokens: 1, totalCost: 0.01 }
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+			onUsage: async (usage) => {
+				costs.push(usage.cost ?? 0)
+			},
+		})
+		expect((await host.execute(member, { handoff: [], signal: new AbortController().signal })).status).to.equal("completed")
+		expect(costs).to.deep.equal([0.1, 0.1])
+	})
+
+	it("estimates missing tokens when a stream reports cost only", async () => {
+		const snapshots: Array<{ tokensIn: number; cost?: number }> = []
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield { type: "usage", inputTokens: 0, outputTokens: 0, totalCost: 0.05 }
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			maxTokens: 5,
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+			onUsage: async (usage) => {
+				snapshots.push(usage)
+			},
+		})
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("failed")
+		expect(snapshots.at(-1)!.tokensIn).to.be.greaterThan(0)
+		expect(snapshots.at(-1)!.cost).to.equal(0.05)
+	})
+
+	it("counts generated tool arguments before dispatch when provider usage is absent", async () => {
+		const execute = sinon.stub().resolves("saved")
+		const snapshots: Array<{ tokensOut: number }> = []
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: {
+							function: {
+								id: "write",
+								name: "write_to_file",
+								arguments: JSON.stringify({ path: "large.txt", content: "x".repeat(20_000) }),
+							},
+						},
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			maxTokens: 3_000,
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(["write_to_file"]), execute }),
+			onUsage: async (usage) => {
+				snapshots.push(usage)
+			},
+		})
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("failed")
+		if (result.status === "failed") expect(result.reason).to.include("budget exhausted")
+		expect(snapshots.at(-1)!.tokensOut).to.be.greaterThan(5_000)
+		sinon.assert.notCalled(execute)
+	})
+
+	it("uses fallback token usage after a cost-only stream event", async () => {
+		const snapshots: Array<{ tokensIn: number; cost?: number }> = []
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield { type: "usage", inputTokens: 0, outputTokens: 0, totalCost: 0.05 }
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})(),
+			getApiStreamUsage: async () => ({ type: "usage", inputTokens: 7, outputTokens: 1, totalCost: 0.05 }),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+			onUsage: async (usage) => {
+				snapshots.push(usage)
+			},
+		})
+		expect((await host.execute(member, { handoff: [], signal: new AbortController().signal })).status).to.equal("completed")
+		expect(snapshots.at(-1)).to.include({ tokensIn: 7, cost: 0.05 })
+	})
+
 	it("reports team usage and treats repeated request cost as a cumulative value", async () => {
 		const snapshots: Array<{ tokensIn: number; cost?: number }> = []
 		const host = new LegionAgentHost({
@@ -210,6 +547,57 @@ describe("LegionAgentHost", () => {
 		})
 		expect((await host.execute(member, { handoff: [], signal: new AbortController().signal })).status).to.equal("completed")
 		expect(snapshots[0]).to.include({ tokensIn: 7, cost: 0.03 })
+	})
+
+	it("preserves completion when the fallback usage lookup throws synchronously", async () => {
+		const snapshots: Array<{ tokensIn: number }> = []
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})(),
+			getApiStreamUsage: () => {
+				throw new Error("lookup unavailable")
+			},
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+			onUsage: async (usage) => {
+				snapshots.push(usage)
+			},
+		})
+		expect((await host.execute(member, { handoff: [], signal: new AbortController().signal })).status).to.equal("completed")
+		expect(snapshots.at(-1)!.tokensIn).to.be.greaterThan(0)
+	})
+
+	it("does not wait for a stalled fallback usage lookup after cancellation", async () => {
+		const controller = new AbortController()
+		const dispose = sinon.spy()
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})(),
+			getApiStreamUsage: async () => {
+				controller.abort()
+				return await new Promise<never>(() => {})
+			},
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "", dispose }),
+		})
+		expect((await host.execute(member, { handoff: [], signal: controller.signal })).status).to.equal("cancelled")
+		sinon.assert.calledOnce(dispose)
 	})
 
 	it("stops promptly on steering even if the provider does not settle", async () => {
@@ -550,6 +938,83 @@ describe("LegionAgentHost", () => {
 		if (result.status === "completed") {
 			expect(result.summary).to.equal("Success despite onUsage error")
 		}
+	})
+
+	it("continues after a stalled usage callback", async () => {
+		const callback = sinon.stub().returns(new Promise<void>(() => {}))
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield { type: "usage", inputTokens: 10, outputTokens: 2 }
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "done", name: "attempt_completion", arguments: '{"result":"Done"}' } },
+					}
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "" }),
+			onUsage: callback,
+		})
+		expect((await host.execute(member, { handoff: [], signal: new AbortController().signal })).status).to.equal("completed")
+		sinon.assert.calledOnce(callback)
+	})
+
+	it("stops before dispatch when required usage persistence fails", async () => {
+		const execute = sinon.spy()
+		const notify = sinon.spy()
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield { type: "usage", inputTokens: 10, outputTokens: 1 }
+					yield {
+						type: "tool_calls",
+						tool_call: { function: { id: "write", name: "write_to_file", arguments: '{"path":"file"}' } },
+					}
+				})(),
+		} as unknown as ApiHandler
+		const createApi = sinon.stub().returns(api)
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			requireUsagePersistence: true,
+			onUsageFailure: notify,
+			createApi,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(["write_to_file"]), execute }),
+			onUsage: async () => {
+				throw new Error("storage unavailable")
+			},
+		})
+		const result = await host.execute(member, { handoff: [], signal: new AbortController().signal })
+		expect(result.status).to.equal("failed")
+		if (result.status === "failed") expect(result.reason).to.include("usage could not be persisted")
+		sinon.assert.calledOnce(notify)
+		sinon.assert.notCalled(execute)
+		expect((await host.execute(member, { handoff: [], signal: new AbortController().signal })).status).to.equal("failed")
+		sinon.assert.calledOnce(createApi)
+	})
+
+	it("does not wait for a stalled usage callback after cancellation", async () => {
+		const controller = new AbortController()
+		const dispose = sinon.spy()
+		const api = {
+			createMessage: () =>
+				(async function* () {
+					yield { type: "usage", inputTokens: 10, outputTokens: 2 }
+				})(),
+		} as unknown as ApiHandler
+		const host = new LegionAgentHost({
+			availableSkills: [],
+			createApi: () => api,
+			createTools: async () => ({ definitions: [], allowedNames: new Set(), execute: async () => "", dispose }),
+			onUsage: async () => {
+				controller.abort()
+				await new Promise<void>(() => {})
+			},
+		})
+		expect((await host.execute(member, { handoff: [], signal: controller.signal })).status).to.equal("cancelled")
+		sinon.assert.calledOnce(dispose)
 	})
 
 	it("flags transport decoding errors with safeToRetry: false to prevent futile specialist failovers", async () => {

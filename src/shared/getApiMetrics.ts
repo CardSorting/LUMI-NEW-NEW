@@ -8,6 +8,35 @@ interface ApiMetrics {
 	totalCost: number
 }
 
+/** Budget decisions must not silently ignore malformed or negative recorded usage. */
+export function hasValidApiUsage(messages: DietCodeMessage[]): boolean {
+	const fields = ["tokensIn", "tokensOut", "cacheWrites", "cacheReads", "cost"] as const
+	const validFields = (value: Record<string, unknown>) =>
+		fields.every((field) => {
+			const amount = value[field]
+			return amount == null || (typeof amount === "number" && Number.isFinite(amount) && amount >= 0)
+		})
+	return messages.every((message) => {
+		if (message.type !== "say" || !["api_req_started", "api_req_finished", "deleted_api_reqs"].includes(message.say ?? ""))
+			return true
+		try {
+			const data: unknown = JSON.parse(message.text || "{}")
+			if (!data || typeof data !== "object" || Array.isArray(data)) return false
+			const record = data as Record<string, unknown>
+			if (!validFields(record)) return false
+			const specialist = record.specialistUsage
+			return (
+				specialist == null ||
+				(typeof specialist === "object" &&
+					!Array.isArray(specialist) &&
+					validFields(specialist as Record<string, unknown>))
+			)
+		} catch {
+			return false
+		}
+	})
+}
+
 /**
  * Calculates API metrics from an array of DietCodeMessages.
  *

@@ -3,6 +3,7 @@
  * The host is responsible for providing an isolated, permission-scoped agent execution.
  */
 
+import { Logger } from "@/shared/services/Logger"
 import { dbPool } from "../db/BufferedDbPool"
 import type { EffectiveAgentSwarmFeatureState } from "./AgentSwarmConfig"
 import { type LegionSynthesisReport, legionCoordinator, type SpawnedLegionMember } from "./LegionCoordinator"
@@ -151,6 +152,49 @@ async function drivePipeline(
 ): Promise<LegionPipelineResult> {
 	let ownsFormation = false
 	let lastReportedStage: string | undefined
+	let progressAvailable = true
+	const settlePreStartCancellation = async (streamId: string): Promise<LegionPipelineResult> => {
+		try {
+			await orchestrator.failStream(streamId, "Cancelled before specialist execution started", { skipFailover: true })
+			return { status: "cancelled" }
+		} catch (error) {
+			Logger.warn("[Legion] Pre-start cancellation could not be settled; reconciliation required", error)
+			return {
+				status: "needs_reconciliation",
+				detail: "The specialist was not started, but its claimed cancellation could not be recorded. Reconcile the claim before retrying.",
+			}
+		}
+	}
+	const notifyProgress = async (event: Parameters<LegionProgressCallback>[0]) => {
+		if (!progressAvailable || !options?.onProgress || signal.aborted) return
+		let timeout: ReturnType<typeof setTimeout> | undefined
+		let onAbort: () => void = () => {}
+		try {
+			const outcome = await Promise.race([
+				Promise.resolve()
+					.then(() => (signal.aborted ? undefined : options.onProgress!(event)))
+					.then(() => "delivered" as const),
+				new Promise<"timeout">((resolve) => {
+					timeout = setTimeout(() => resolve("timeout"), 1000)
+				}),
+				new Promise<"cancelled">((resolve) => {
+					onAbort = () => resolve("cancelled")
+					signal.addEventListener("abort", onAbort, { once: true })
+					if (signal.aborted) onAbort()
+				}),
+			])
+			if (outcome === "timeout") {
+				progressAvailable = false
+				Logger.warn("[Legion] Progress callback timed out; continuing without further updates")
+			}
+		} catch (error) {
+			progressAvailable = false
+			Logger.warn("[Legion] Progress callback failed; continuing without further updates", error)
+		} finally {
+			clearTimeout(timeout)
+			signal.removeEventListener("abort", onAbort)
+		}
+	}
 	for (;;) {
 		if (signal.aborted) return { status: "cancelled" }
 		const progress = await orchestrator.getLegionStageProgression(parentStreamId, formationId)
@@ -165,7 +209,7 @@ async function drivePipeline(
 		if (ambiguous) return { status: "needs_reconciliation" }
 		if (progress.allStagesCompleted || (progress.hasFailures && progress.readyToExecuteMembers.length === 0)) {
 			const report = (await orchestrator.synthesizeLegionExecutionReport(parentStreamId, formationId)) ?? undefined
-			await options?.onProgress?.({
+			await notifyProgress({
 				stage: "synthesis",
 				status: progress.allStagesCompleted ? "formation_completed" : "formation_failed",
 				detail: `Legion squad finished (${progress.allStagesCompleted ? "all stages completed" : "partial failure"}). Synthesizing execution report.`,
@@ -179,12 +223,13 @@ async function drivePipeline(
 		)?.stage
 		if (currentActiveStage && currentActiveStage !== lastReportedStage) {
 			lastReportedStage = currentActiveStage
-			await options?.onProgress?.({
+			await notifyProgress({
 				stage: currentActiveStage,
 				status: "stage_started",
 				detail: `Entering Legion Stage: ${currentActiveStage}`,
 			})
 		}
+		if (signal.aborted) return { status: "cancelled" }
 
 		// Never replay a possibly live execution after restart. An external host must
 		// reconcile it with its own execution handle before the pipeline can resume.
@@ -222,41 +267,63 @@ async function drivePipeline(
 		}
 		if (signal.aborted) {
 			// No execution was started; record a failure rather than leaving a false running owner.
-			await orchestrator.failStream(member.streamId, "Cancelled before specialist execution started", {
-				skipFailover: true,
-			})
-			return { status: "cancelled" }
+			return settlePreStartCancellation(member.streamId)
 		}
 
-		await options?.onProgress?.({
+		await notifyProgress({
 			stage: member.stage ?? "execution",
 			member,
 			status: "member_started",
 			detail: `Starting specialist ${member.assignment.codename} (${member.assignment.title})`,
 		})
+		if (signal.aborted) {
+			return settlePreStartCancellation(member.streamId)
+		}
 
 		let result: LegionExecutionResult
 		try {
 			result = await host.execute(member, { handoff: progress.priorStageHandoffContext, signal })
 		} catch (error) {
-			result = { status: "failed", reason: error instanceof Error ? error.message : String(error) }
+			Logger.warn("[Legion] Specialist host rejected without a settled outcome; reconciliation required", error)
+			return {
+				status: "needs_reconciliation",
+				detail: "The specialist host stopped reporting without confirming that execution stopped. Inspect existing work and running operations before retrying.",
+			}
 		}
 		if (result.status === "unresolved") return { status: "needs_reconciliation", detail: result.reason }
 		if (result.status === "completed" && result.summary.trim()) {
-			await orchestrator.completeStream(member.streamId, result.summary)
-			await options?.onProgress?.({
+			try {
+				await orchestrator.completeStream(member.streamId, result.summary)
+			} catch (error) {
+				Logger.warn("[Legion] Completed specialist could not be settled; reconciliation required", error)
+				return {
+					status: "needs_reconciliation",
+					detail: `The specialist reported completion, but its settlement could not be confirmed. Inspect persisted state and existing work before repeating it. Unverified result excerpt: ${result.summary.slice(0, 1800)}`,
+				}
+			}
+			await notifyProgress({
 				stage: member.stage ?? "execution",
 				member,
 				status: "member_completed",
 				detail: `Specialist ${member.assignment.codename} completed successfully.`,
 			})
 		} else {
-			await orchestrator.failStream(
-				member.streamId,
-				result.status === "failed" ? result.reason : "Specialist returned an empty result",
-				{ skipFailover: signal.aborted || result.status !== "failed" || result.safeToRetry !== true },
-			)
-			await options?.onProgress?.({
+			try {
+				await orchestrator.failStream(
+					member.streamId,
+					result.status === "failed" || result.status === "cancelled"
+						? (result.reason ?? "Specialist execution cancelled")
+						: "Specialist returned an empty result",
+					{ skipFailover: signal.aborted || result.status !== "failed" || result.safeToRetry !== true },
+				)
+			} catch (error) {
+				Logger.warn("[Legion] Specialist failure could not be settled; reconciliation required", error)
+				return {
+					status: "needs_reconciliation",
+					detail: "The specialist stopped, but its failure state could not be confirmed. Inspect persisted state and existing work before repeating it.",
+				}
+			}
+			await notifyProgress({
 				stage: member.stage ?? "execution",
 				member,
 				status: "member_failed",
@@ -271,6 +338,7 @@ export interface AutomaticLegionInput {
 	parentStreamId: string
 	taskDescription: string
 	targetFiles?: string[]
+	workspacePath?: string
 	/** Host policy must explicitly allow delegation before any formation is created. */
 	delegationAllowed: boolean
 	host?: LegionExecutionHost
@@ -307,7 +375,7 @@ async function decideAndRunLegion(input: AutomaticLegionInput): Promise<Automati
 	const previous = await orchestrator.recallLastLegionFormation(input.parentStreamId)
 	if (previous && previous.status === "active") {
 		const progress = await orchestrator.getLegionStageProgression(input.parentStreamId, previous.formationId)
-		if (progress && !progress.allStagesCompleted && progress.readyToExecuteMembers.length > 0) {
+		if (!progress || !progress.allStagesCompleted) {
 			return { decision: "needs_reconciliation", formationId: previous.formationId }
 		}
 	} else if (previous && previous.status === "deferred") {
@@ -335,21 +403,23 @@ async function decideAndRunLegion(input: AutomaticLegionInput): Promise<Automati
 		return { decision: "local", reason: "Task does not warrant a specialist team" }
 	}
 	if (input.signal.aborted) return { decision: "local", reason: "Task cancelled" }
+	let formed: Awaited<ReturnType<typeof orchestrator.formLegion>>
 	try {
-		await dbPool.flush()
 		if (!(await legionCoordinator.acquireAutomaticFormationToken(input.parentStreamId, input.taskDescription))) {
 			return { decision: "needs_reconciliation" }
 		}
+		formed = await orchestrator.formLegion(input.parentStreamId, {
+			taskDescription: input.taskDescription,
+			workspacePath: input.workspacePath,
+			targetFiles: input.targetFiles,
+			strategy: state.legionStrategy,
+			maxSpecialists: state.legionMaxSpecialists,
+			resolvedFeatureState: state,
+		})
 	} catch {
 		return { decision: "needs_reconciliation" }
 	}
-	const formed = await orchestrator.formLegion(input.parentStreamId, {
-		taskDescription: input.taskDescription,
-		targetFiles: input.targetFiles,
-		strategy: state.legionStrategy,
-		maxSpecialists: state.legionMaxSpecialists,
-		resolvedFeatureState: state,
-	})
+	if (formed.requiresReconciliation) return { decision: "needs_reconciliation" }
 	if (!formed.formed || !formed.manifest) return { decision: "local", reason: formed.reason ?? "Formation unavailable" }
 	return {
 		decision: "delegated",

@@ -1,9 +1,13 @@
 import { ApiConfiguration, ModelInfo, openRouterDefaultModelId } from "@shared/api"
 import { Mode } from "@shared/storage/types"
-import { getModeSpecificFields } from "@/components/settings/utils/providerUtils"
+import { getModeSpecificFields, getUnsupportedProvider } from "@/components/settings/utils/providerUtils"
 
 export function validateApiConfiguration(currentMode: Mode, apiConfiguration?: ApiConfiguration): string | undefined {
 	if (apiConfiguration) {
+		const unsupportedProvider = getUnsupportedProvider(apiConfiguration, currentMode)
+		if (unsupportedProvider) {
+			return `API provider "${unsupportedProvider}" is not supported in this version. Choose a supported provider or contact your administrator.`
+		}
 		const {
 			apiProvider,
 			openAiModelId,

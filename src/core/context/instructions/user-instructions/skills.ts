@@ -18,27 +18,41 @@ function parseFrontmatter(fileContent: string): { data: Record<string, unknown>;
 /**
  * Scan a directory for skill subdirectories containing SKILL.md files.
  */
-async function scanSkillsDirectory(dirPath: string, source: "global" | "project"): Promise<SkillMetadata[]> {
+async function scanSkillsDirectory(
+	dirPath: string,
+	source: "global" | "project",
+	signal?: AbortSignal,
+): Promise<SkillMetadata[]> {
 	const skills: SkillMetadata[] = []
 
-	if (!(await fileExistsAtPath(dirPath)) || !(await isDirectory(dirPath))) {
+	signal?.throwIfAborted()
+	const exists = await fileExistsAtPath(dirPath)
+	signal?.throwIfAborted()
+	if (!exists) return skills
+	const directory = await isDirectory(dirPath)
+	signal?.throwIfAborted()
+	if (!directory) {
 		return skills
 	}
 
 	try {
 		const entries = await fs.readdir(dirPath)
+		signal?.throwIfAborted()
 
 		for (const entryName of entries) {
+			signal?.throwIfAborted()
 			const entryPath = path.join(dirPath, entryName)
 			const stats = await fs.stat(entryPath).catch(() => null)
+			signal?.throwIfAborted()
 			if (!stats?.isDirectory()) continue
 
-			const skill = await loadSkillMetadata(entryPath, source, entryName)
+			const skill = await loadSkillMetadata(entryPath, source, entryName, signal)
 			if (skill) {
 				skills.push(skill)
 			}
 		}
 	} catch (error: unknown) {
+		signal?.throwIfAborted()
 		if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EACCES") {
 			Logger.warn(`Permission denied reading skills directory: ${dirPath}`)
 		}
@@ -54,12 +68,19 @@ async function loadSkillMetadata(
 	skillDir: string,
 	source: "global" | "project",
 	skillName: string,
+	signal?: AbortSignal,
 ): Promise<SkillMetadata | null> {
 	const skillMdPath = path.join(skillDir, "SKILL.md")
-	if (!(await fileExistsAtPath(skillMdPath))) return null
+	signal?.throwIfAborted()
+	const exists = await fileExistsAtPath(skillMdPath)
+	signal?.throwIfAborted()
+	if (!exists) return null
 
 	try {
-		const fileContent = await fs.readFile(skillMdPath, "utf-8")
+		const fileContent = signal
+			? await fs.readFile(skillMdPath, { encoding: "utf-8", signal })
+			: await fs.readFile(skillMdPath, "utf-8")
+		signal?.throwIfAborted()
 		const { data: frontmatter } = parseFrontmatter(fileContent)
 
 		// Validate required fields
@@ -85,6 +106,7 @@ async function loadSkillMetadata(
 			source,
 		}
 	} catch (error) {
+		signal?.throwIfAborted()
 		Logger.warn(`Failed to load skill at ${skillDir}:`, error)
 		return null
 	}
@@ -95,16 +117,19 @@ async function loadSkillMetadata(
  * Returns skills in order: project skills first, then global skills.
  * Global skills take precedence over project skills with the same name.
  */
-export async function discoverSkills(cwd: string): Promise<SkillMetadata[]> {
+export async function discoverSkills(cwd: string, signal?: AbortSignal): Promise<SkillMetadata[]> {
 	const skills: SkillMetadata[] = []
 
+	signal?.throwIfAborted()
 	const scanDirs = getSkillsDirectoriesForScan(cwd)
 
 	for (const dir of scanDirs) {
-		const dirSkills = await scanSkillsDirectory(dir.path, dir.source)
+		signal?.throwIfAborted()
+		const dirSkills = await scanSkillsDirectory(dir.path, dir.source, signal)
 		skills.push(...dirSkills)
 	}
 
+	signal?.throwIfAborted()
 	return skills
 }
 
@@ -130,19 +155,33 @@ export function getAvailableSkills(skills: SkillMetadata[]): SkillMetadata[] {
 /**
  * Get full skill content including instructions.
  */
-export async function getSkillContent(skillName: string, availableSkills: SkillMetadata[]): Promise<SkillContent | null> {
+export async function getSkillContent(
+	skillName: string,
+	availableSkills: SkillMetadata[],
+	signal?: AbortSignal,
+): Promise<SkillContent | null> {
+	signal?.throwIfAborted()
 	const skill = availableSkills.find((s) => s.name === skillName)
 	if (!skill) return null
 
 	try {
-		const fileContent = await fs.readFile(skill.path, "utf-8")
-		const { content: body } = parseFrontmatter(fileContent)
+		const fileContent = signal
+			? await fs.readFile(skill.path, { encoding: "utf-8", signal })
+			: await fs.readFile(skill.path, "utf-8")
+		signal?.throwIfAborted()
+		const { data: frontmatter, content: body } = parseFrontmatter(fileContent)
+		if (frontmatter.name !== skillName || typeof frontmatter.description !== "string" || !frontmatter.description) {
+			Logger.warn(`Skill ${skillName} changed or has invalid metadata; rediscover skills before use.`)
+			return null
+		}
 
 		return {
 			...skill,
+			description: frontmatter.description,
 			instructions: body.trim(),
 		}
 	} catch {
+		signal?.throwIfAborted()
 		return null
 	}
 }

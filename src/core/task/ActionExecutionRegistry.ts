@@ -54,6 +54,7 @@ interface Entry {
 	key: string
 	snapshot: ActionExecutionSnapshot
 	finished: boolean
+	commandObserved?: boolean
 }
 
 function snapshot(entry: Entry): ActionExecutionSnapshot {
@@ -211,10 +212,18 @@ export class ActionExecutionRegistry {
 				this.completed.delete(entry.snapshot.execution_id)
 				this.keys.delete(entry.key)
 			}
+		// A recovered reservation can outlive its bounded completed-receipt cache.
+		for (const [key, entry] of this.keys)
+			if (entry.scope === scope) {
+				entry.finished = true
+				this.keys.delete(key)
+			}
 		this.recovery.set(scope, store)
 		for (const { record, observedAt } of store.entries("action")) {
 			const saved = record.snapshot
-			const unresolved = !record.finished
+			// Legacy hosts finalized unconfirmed command receipts even though the
+			// command outcome was unknown. Preserve their semantic fence as well.
+			const unresolved = !record.finished || (saved.kind === "command" && saved.status === "unconfirmed")
 			const entry: Entry = {
 				scope,
 				key: record.key,
@@ -323,11 +332,25 @@ export class ActionExecutionRegistry {
 	}
 
 	/** A foreground return is not process completion. Retain the identity until host confirmation. */
-	reconcileCommand(scope: string, executionId: string | undefined, state: CommandExecutionState): void {
+	reconcileCommand(
+		scope: string,
+		executionId: string | undefined,
+		state: CommandExecutionState,
+		source: "notification" | "result" = "notification",
+	): void {
 		if (!executionId) return
 		const entry = this.active.get(executionId)
 		if (!entry || entry.scope !== scope || entry.snapshot.kind !== "command") return
 		if (state.executionId && state.executionId !== executionId) {
+			if (source === "notification") return
+			if (entry.commandObserved) {
+				this.update(
+					entry,
+					"unconfirmed",
+					"Command result refers to a different execution after this command was observed. Inspect both before retrying.",
+				)
+				return
+			}
 			// The command owner deduplicated this request against another run. It cannot
 			// complete a second active claim when that existing process eventually exits.
 			this.finish(entry, "not_started", {
@@ -336,7 +359,14 @@ export class ActionExecutionRegistry {
 			})
 			return
 		}
-		if (isActiveCommandExecution(state)) {
+		if (source === "notification" && state.status !== "not_started") entry.commandObserved = true
+		if (state.status === "unconfirmed") {
+			// Losing the terminal is not evidence that the command stopped. Keep the
+			// identity fenced until a later authoritative result resolves it.
+			this.update(entry, "unconfirmed", state.detail ?? "Command outcome is unconfirmed; reconcile it before retrying.")
+		} else if (isActiveCommandExecution(state)) {
+			// A delayed foreground snapshot must not overwrite newer lost-outcome evidence.
+			if (entry.snapshot.status === "unconfirmed") return
 			this.update(
 				entry,
 				state.status === "running" ? "running" : "awaiting_completion",
@@ -344,7 +374,7 @@ export class ActionExecutionRegistry {
 					`Command ${state.status}. Inspect execution ${state.executionId ?? executionId}; do not launch it again.`,
 			)
 		} else {
-			this.finish(entry, state.status as "completed" | "failed" | "not_started" | "cancelled" | "unconfirmed", state)
+			this.finish(entry, state.status as "completed" | "failed" | "not_started" | "cancelled", state)
 		}
 	}
 
@@ -368,8 +398,16 @@ export class ActionExecutionRegistry {
 		}
 	}
 
-	list(scope: string): { active: ActionExecutionSnapshot[]; recent: ActionExecutionSnapshot[] } {
+	list(scope: string): {
+		active: ActionExecutionSnapshot[]
+		recent: ActionExecutionSnapshot[]
+		unresolved: ActionExecutionSnapshot[]
+	} {
 		const snapshots = (entries: Entry[]) => entries.filter((entry) => entry.scope === scope).map(snapshot)
-		return { active: snapshots([...this.active.values()]), recent: snapshots([...this.completed.values()]).slice(-8) }
+		return {
+			active: snapshots([...this.active.values()]),
+			recent: snapshots([...this.completed.values()]).slice(-8),
+			unresolved: snapshots([...this.keys.values()].filter((entry) => entry.finished)),
+		}
 	}
 }

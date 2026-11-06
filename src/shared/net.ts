@@ -180,7 +180,10 @@ export const fetch: typeof globalThis.fetch = (() => {
 			const res = await engine.compressPayload(originalBody)
 			const headers = new Headers(init?.headers)
 			headers.set("Content-Encoding", "gzip")
-			headers.set("Content-Length", res.compressedSize.toString())
+			// The fetch implementation supplies the byte length for the new body.
+			// A caller's original length describes the uncompressed request and can
+			// also be rejected by a dispatcher from a different undici version.
+			headers.delete("Content-Length")
 
 			compressedInit = {
 				...init,

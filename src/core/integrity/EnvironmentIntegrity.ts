@@ -21,6 +21,7 @@ async function probeCommand(file: string, args: string[]): Promise<{ stdout: str
 
 export interface EnvironmentLease {
 	fingerprint: string
+	manifestFingerprint?: string
 	timestamp: number
 	success: boolean
 	error?: string
@@ -49,9 +50,10 @@ export interface EnvironmentLease {
 export class EnvironmentIntegrity {
 	private lease: EnvironmentLease | null = null
 	private probePromise: Promise<EnvironmentLease> | null = null
+	private generation = 0
 	private readonly LEASE_DURATION = 1000 * 60 * 60 // 1 hour lease
 
-	private static readonly activeInstances = new Set<EnvironmentIntegrity>()
+	private static readonly activeInstances = new Set<WeakRef<EnvironmentIntegrity>>()
 
 	public static readonly PROJECT_MARKERS: Record<string, { manifest: string; binary: string; args: string[] }> = {
 		node: { manifest: "package.json", binary: "node", args: ["-v"] },
@@ -68,8 +70,10 @@ export class EnvironmentIntegrity {
 	}
 
 	public static invalidateCache(): void {
-		for (const instance of EnvironmentIntegrity.activeInstances) {
-			instance.revokeLease()
+		for (const reference of EnvironmentIntegrity.activeInstances) {
+			const instance = reference.deref()
+			if (instance) instance.revokeLease()
+			else EnvironmentIntegrity.activeInstances.delete(reference)
 		}
 	}
 
@@ -78,7 +82,7 @@ export class EnvironmentIntegrity {
 		private readonly stateManager?: StateManager,
 		private readonly runCommand = probeCommand,
 	) {
-		EnvironmentIntegrity.activeInstances.add(this)
+		EnvironmentIntegrity.activeInstances.add(new WeakRef(this))
 	}
 
 	public getFingerprint(): string {
@@ -91,7 +95,7 @@ export class EnvironmentIntegrity {
 			process.platform,
 			process.arch,
 			process.version,
-			"v3",
+			"v4",
 		].join("|")
 		return createHash("sha256").update(data).digest("hex")
 	}
@@ -116,8 +120,8 @@ export class EnvironmentIntegrity {
 	}
 
 	public revokeLease(): void {
+		this.generation++
 		this.lease = null
-		this.probePromise = null
 		if (this.stateManager) {
 			this.stateManager.setGlobalState("environmentalLease", undefined)
 		}
@@ -128,27 +132,83 @@ export class EnvironmentIntegrity {
 		if (this.probePromise) {
 			return this.probePromise
 		}
-
-		const cachedLease = this.getL0Lease()
-		if (this.isLeaseValid(cachedLease)) {
-			this.lease = cachedLease
-			return cachedLease as EnvironmentLease
-		}
-
-		this.probePromise = this.performFullProbe()
+		const probe = this.validateCurrentEnvironment()
+		this.probePromise = probe
 		try {
-			const result = await this.probePromise
-			return result
+			return await probe
 		} finally {
-			this.probePromise = null
+			if (this.probePromise === probe) this.probePromise = null
+		}
+	}
+
+	private async getManifestFingerprint(): Promise<string> {
+		const names = new Set([
+			...Object.values(EnvironmentIntegrity.PROJECT_MARKERS).map((marker) => marker.manifest),
+			...Object.values(EnvironmentIntegrity.VERSION_MANIFESTS).flat(),
+		])
+		const entries = await Promise.all(
+			[...names].sort().map(async (name) => {
+				try {
+					const stat = await fs.stat(path.join(this.cwd, name))
+					return `${name}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") return `${name}:missing`
+					throw error
+				}
+			}),
+		)
+		return createHash("sha256").update(entries.join("\n")).digest("hex")
+	}
+
+	private async validateCurrentEnvironment(): Promise<EnvironmentLease> {
+		try {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const generation = this.generation
+				const fingerprint = await this.getManifestFingerprint()
+				const cached = this.getL0Lease()
+				if (generation !== this.generation) continue
+				if (this.isLeaseValid(cached) && cached?.manifestFingerprint === fingerprint) {
+					this.lease = cached
+					return cached
+				}
+				const result = await this.performFullProbe()
+				const currentFingerprint = await this.getManifestFingerprint()
+				if (generation !== this.generation || fingerprint !== currentFingerprint) continue
+				result.manifestFingerprint = fingerprint
+				this.lease = result
+				this.stateManager?.setGlobalState("environmentalLease", result)
+				return result
+			}
+			return {
+				fingerprint: this.getFingerprint(),
+				timestamp: Date.now(),
+				success: false,
+				error: "Project manifests kept changing during environment validation. Wait for changes to settle and retry.",
+			}
+		} catch (error) {
+			return {
+				fingerprint: this.getFingerprint(),
+				timestamp: Date.now(),
+				success: false,
+				error: `Environment validation failed: ${error instanceof Error ? error.message : String(error)}`,
+			}
 		}
 	}
 
 	private static readonly VERSION_MANIFESTS: Record<string, string[]> = {
 		node: [".nvmrc", ".node-version"],
-		python: [".python-version", "Pipfile"],
+		python: [".python-version", "Pipfile", "pyproject.toml", "setup.py"],
+		gradle: ["build.gradle.kts"],
 		rust: ["rust-toolchain", "rust-toolchain.toml"],
 		ruby: [".ruby-version", ".tool-versions"],
+	}
+
+	public static isManifest(filePath: string): boolean {
+		const name = path.basename(filePath)
+		return (
+			Object.values(this.PROJECT_MARKERS).some((marker) => marker.manifest === name) ||
+			Object.values(this.VERSION_MANIFESTS).some((names) => names.includes(name))
+		)
 	}
 
 	private async performFullProbe(): Promise<EnvironmentLease> {
@@ -241,39 +301,32 @@ export class EnvironmentIntegrity {
 								)
 							}
 						}
-					} catch {
-						if (type === "node") {
-							// The extension's own runtime is known; do not launch another IDE process as a fallback.
-							details.toolchain![type] = { status: "found", version: process.version, path: process.execPath }
-							details.shadowingAlerts?.push("Node.js is unavailable on PATH; reporting the extension runtime.")
-						} else {
-							details.toolchain![type] = { status: "missing" }
+					} catch (error) {
+						// The extension runtime does not establish that a usable CLI is on PATH.
+						details.toolchain![type] = {
+							status: (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : "broken",
 						}
 					}
 				}),
 			)
 
+			if (details.detectedProjectTypes?.includes("node")) details.hasNodeModules = rootFiles.includes("node_modules")
 			if (details.toolchain?.node?.status === "found") {
 				const execPath = process.execPath
 				const nodeBinPath = details.toolchain.node.path
-				if (nodeBinPath && !execPath.includes(path.basename(nodeBinPath))) {
+				const canonical = async (file: string) => fs.realpath(file).catch(() => path.resolve(file))
+				if (nodeBinPath && (await canonical(execPath)) !== (await canonical(nodeBinPath))) {
 					details.shadowingAlerts?.push(
 						`⚠️ INTEGRITY: Active Node binary (${execPath}) differs from PATH Node (${nodeBinPath}).`,
 					)
 				}
 				details.nodeVersion = details.toolchain.node.version
 				details.nodePath = nodeBinPath
-				details.hasNodeModules = rootFiles.includes("node_modules")
 			}
 		} catch (e) {
 			const error = e as Error
 			lease.success = false
 			lease.error = `Structural Forensic Failure: ${error.message}`
-		}
-
-		this.lease = lease
-		if (this.stateManager) {
-			this.stateManager.setGlobalState("environmentalLease", lease)
 		}
 
 		if (lease.success) {

@@ -4,8 +4,8 @@ import type { ActionExecutionSnapshot } from "./ActionExecutionRegistry"
 import type { ActionQueueSnapshot } from "./ActionExecutor"
 
 export interface ExecutionState {
-	commands: { active: CommandExecutionSummary[]; recent: CommandExecutionSummary[] }
-	actions: { active: ActionExecutionSnapshot[]; recent: ActionExecutionSnapshot[] }
+	commands: { active: CommandExecutionSummary[]; recent: CommandExecutionSummary[]; unresolved?: CommandExecutionSummary[] }
+	actions: { active: ActionExecutionSnapshot[]; recent: ActionExecutionSnapshot[]; unresolved?: ActionExecutionSnapshot[] }
 	queues?: ActionQueueSnapshot[]
 	coverage?: { commands: "available" | "unavailable"; scope: "task_in_current_extension_host" | "task_with_persisted_evidence" }
 	recovery?: { status: "available" | "blocked"; restoredRecords: number; issues: string[] }
@@ -85,8 +85,16 @@ export function formatExecutionState(state: ExecutionState, observer = "parent",
 				: 1)
 	const byPriority = (a: OwnedExecution, b: OwnedExecution) => priority(a) - priority(b)
 	const queues = state.queues ?? []
-	const commands: { active: ContextRow[]; recent: ContextRow[] } = { active: [], recent: [] }
-	const actions: { active: ContextRow[]; recent: ContextRow[] } = { active: [], recent: [] }
+	const commands: { active: ContextRow[]; recent: ContextRow[]; unresolved: ContextRow[] } = {
+		active: [],
+		recent: [],
+		unresolved: [],
+	}
+	const actions: { active: ContextRow[]; recent: ContextRow[]; unresolved: ContextRow[] } = {
+		active: [],
+		recent: [],
+		unresolved: [],
+	}
 	const shownQueues: ContextRow[] = []
 	const authority = state.authority
 	let shownAuthority: ContextRow | undefined = authority
@@ -100,7 +108,9 @@ export function formatExecutionState(state: ExecutionState, observer = "parent",
 		: undefined
 	const totals = {
 		active_commands: state.commands.active.length,
+		unresolved_commands: state.commands.unresolved?.length ?? 0,
 		active_actions: state.actions.active.length,
+		unresolved_actions: state.actions.unresolved?.length ?? 0,
 		recent_commands: state.commands.recent.length,
 		recent_actions: state.actions.recent.length,
 		queues: queues.length,
@@ -119,7 +129,9 @@ export function formatExecutionState(state: ExecutionState, observer = "parent",
 			queues: shownQueues,
 			omitted: {
 				active_commands: totals.active_commands - commands.active.length,
+				unresolved_commands: totals.unresolved_commands - commands.unresolved.length,
 				active_actions: totals.active_actions - actions.active.length,
+				unresolved_actions: totals.unresolved_actions - actions.unresolved.length,
 				recent_commands: totals.recent_commands - commands.recent.length,
 				recent_actions: totals.recent_actions - actions.recent.length,
 				queues: totals.queues - shownQueues.length,
@@ -175,10 +187,18 @@ export function formatExecutionState(state: ExecutionState, observer = "parent",
 			.sort(byPriority)
 			.slice(0, 12)
 			.map((item) => ({ item, target: commands.active, row: commandRow(item) })),
+		...[...(state.commands.unresolved ?? [])]
+			.sort(byPriority)
+			.slice(0, 12)
+			.map((item) => ({ item, target: commands.unresolved, row: commandRow(item) })),
 		...[...state.actions.active]
 			.sort(byPriority)
 			.slice(0, 24)
 			.map((item) => ({ item, target: actions.active, row: actionRow(item) })),
+		...[...(state.actions.unresolved ?? [])]
+			.sort(byPriority)
+			.slice(0, 24)
+			.map((item) => ({ item, target: actions.unresolved, row: actionRow(item) })),
 	].sort((a, b) => byPriority(a.item, b.item))
 	for (const { item, target, row } of active) include(target, row, { ...item })
 

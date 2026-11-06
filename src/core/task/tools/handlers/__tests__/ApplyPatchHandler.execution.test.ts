@@ -80,6 +80,7 @@ describe("patch execution receipts", () => {
 			return true
 		})
 		assert.equal(await readFile(join(cwd, "first.txt"), "utf8"), "first")
+		assert.deepEqual(config.taskState.workspaceArtifacts, ["first.txt"])
 		await assert.rejects(stat(join(cwd, "second.txt")), { code: "ENOENT" })
 	})
 	it("preserves the source when a move is cancelled after its destination was committed", async () => {

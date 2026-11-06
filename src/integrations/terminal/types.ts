@@ -293,7 +293,13 @@ export interface CommandExecutorCallbacks {
 		updates: { commandCompleted?: boolean; commandExecution?: CommandExecutionState; commandOutput?: string; text?: string },
 	) => Promise<void>
 	/** Get dietcode messages array */
-	getDietCodeMessages: () => Array<{ ts?: number; ask?: string; say?: string; text?: string }>
+	getDietCodeMessages: () => Array<{
+		ts?: number
+		ask?: string
+		say?: string
+		text?: string
+		commandExecution?: CommandExecutionState
+	}>
 	/** Add content to user message for next API request */
 	addToUserMessageContent: (content: { type: string; text: string }) => void
 }

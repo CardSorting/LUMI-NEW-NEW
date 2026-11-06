@@ -271,6 +271,7 @@ describe("AgentOrchestrator audit ergonomics", () => {
 			{
 				commitWork: async () => undefined,
 				pushBatch: async () => undefined,
+				flush: async () => undefined,
 				selectWhere: async () => [],
 			},
 			() => orchestrator.completeStream("stream-xml", `Use <xml> & "quotes" safely.`),
@@ -587,7 +588,7 @@ describe("AgentOrchestrator audit ergonomics", () => {
 		expect(collision).to.include("Collision detected: File 'target.ts' is reserved by active Stream stream-a")
 	})
 
-	it("reconciles orphaned child streams from prior crashed sessions on initialize or warmup", async () => {
+	it("reconciles a child only when its execution is confirmed stopped", async () => {
 		const pushedOps: any[] = []
 		const count = await withPatchedDbPool(
 			{
@@ -614,7 +615,7 @@ describe("AgentOrchestrator audit ergonomics", () => {
 				clearShadow: async () => {},
 				flush: async () => {},
 			},
-			() => orchestrator.reconcileOrphanedStreams(),
+			() => orchestrator.reconcileOrphanedStreams("Confirmed stopped", async () => true),
 		)
 
 		expect(count).to.equal(1)
@@ -622,6 +623,35 @@ describe("AgentOrchestrator audit ergonomics", () => {
 			(op) => op.table === "agent_streams" && op.values?.status === "failed" && op.where?.value === "stream-orphaned-child",
 		)
 		expect(failedStreamOp).to.not.equal(undefined)
+	})
+
+	it("leaves active children untouched when ownership or execution state is unknown", async () => {
+		const writes: any[] = []
+		let shadowClears = 0
+		await withPatchedDbPool(
+			{
+				selectAllFrom: async () => [
+					{ id: "root", parentId: null, status: "active" },
+					{ id: "live-child", parentId: "root", status: "active" },
+				],
+				push: async (op) => {
+					writes.push(op)
+				},
+				pushBatch: async (ops) => {
+					writes.push(...ops)
+				},
+				clearShadow: async () => {
+					shadowClears++
+				},
+				flush: async () => {},
+			},
+			async () => {
+				expect(await orchestrator.reconcileOrphanedStreams()).to.equal(0)
+				expect(await orchestrator.reconcileOrphanedStreams("unknown", async () => false)).to.equal(0)
+			},
+		)
+		expect(writes).to.deep.equal([])
+		expect(shadowClears).to.equal(0)
 	})
 
 	after(async () => {

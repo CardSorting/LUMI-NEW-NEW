@@ -67,13 +67,24 @@ export async function orchestrateCommandExecution(
 	}
 	observe("Status display unavailable", () => callbacks.updateBackgroundCommandState(true))
 	let commandRow: ReturnType<CommandExecutorCallbacks["getDietCodeMessages"]>[number] | undefined
+	let commandRowExecutionId: string | undefined
+	let commandRowText: string | undefined
 	if (!suppressUserInteraction && !options.onStateChange)
 		observe("Command row unavailable", () => {
 			const messages = callbacks.getDietCodeMessages()
 			commandRow =
 				options.commandMessageTs !== undefined
-					? messages.find((message) => message.ts === options.commandMessageTs)
+					? messages[
+							findLastIndex(
+								messages,
+								(message) =>
+									message.ts === options.commandMessageTs &&
+									(message.ask === "command" || message.say === "command"),
+							)
+						]
 					: messages[findLastIndex(messages, (message) => message.ask === "command" || message.say === "command")]
+			commandRowExecutionId = commandRow?.commandExecution?.executionId
+			commandRowText = commandRow?.text
 		})
 	let commandStateCleared = false
 	const updateCommandState = (state: CommandExecutionState) => {
@@ -83,9 +94,20 @@ export async function orchestrateCommandExecution(
 		}
 		if (!commandRow) return
 		observe("Command row update unavailable", () => {
-			const index = callbacks
-				.getDietCodeMessages()
-				.findIndex((message) => (commandRow!.ts !== undefined ? message.ts === commandRow!.ts : message === commandRow))
+			const messages = callbacks.getDietCodeMessages()
+			const matches = (message: (typeof messages)[number]) =>
+				message.ts === commandRow!.ts &&
+				(message.ask === "command" || message.say === "command") &&
+				message.commandExecution?.executionId === commandRowExecutionId &&
+				message.text === commandRowText
+			const originalIndex = messages.indexOf(commandRow!)
+			const candidates = messages.flatMap((message, index) => (matches(message) ? [index] : []))
+			const index =
+				originalIndex >= 0 && matches(messages[originalIndex])
+					? originalIndex
+					: candidates.length === 1
+						? candidates[0]
+						: -1
 			if (index >= 0)
 				return callbacks.updateDietCodeMessage(index, {
 					commandCompleted: ["completed", "failed", "cancelled", "not_started", "unconfirmed"].includes(state.status),

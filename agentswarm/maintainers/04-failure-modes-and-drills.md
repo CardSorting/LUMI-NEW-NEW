@@ -237,3 +237,57 @@ Terminal heredoc file creation detected for '<filename>'. Writing files through 
    - If a multiline heredoc slipped past handlers, check `VscodeTerminalProcess.ts`: `isMultilineHeredocCommand` must route the command to `runManaged` fallback or throw `Command execution blocked: multiline heredoc commands cannot be safely executed via interactive shell integration without deadlocking`.
 4. **Resolution:**
    - Ensure the agent receives the error message instructing it to use `write_to_file`. Verify the agent calls `write_to_file` on the subsequent turn.
+
+---
+
+## Drill 9 — Diagnosing Unconfirmed Command Fences & Terminal Disconnects (PM-018, ADR-0019)
+
+### When to Use
+
+A command execution terminated without an explicit exit code (e.g. terminal tab closed, extension host reloaded, or process pipe disconnected), and the coordinator displays:
+
+```text
+Command unconfirmed. Outcome is unconfirmed; reconcile it before retrying.
+```
+
+### Symptom
+
+- The execution status in `ActionExecutionRegistry` and `ExecutionState` is `unconfirmed`.
+- The command fence remains active; replaying or re-executing the same command is blocked to avoid concurrent process collisions.
+
+### Root-Cause Checklist ([PM-018](../postmortems/PM-018-unconfirmed-command-outcome-fencing-and-replacement-view-pollution.md), [ADR-0019](../adr/ADR-0019-terminal-supervision-action-fencing-and-shadow-commit-retention.md))
+
+1. **Check Process State with OS Tools:**
+   - Run `ps aux | grep <command>` to check if the OS process is still running in the background.
+2. **Inspect View Epoch:**
+   - Ensure `CommandExecutor` has fenced any background output readers from publishing into replacement task chat views.
+3. **Resolution:**
+   - If the process exited cleanly, manually verify the build/test output.
+   - If the process is dead or orphaned, terminate it via `kill` and clear the unconfirmed receipt in the coordinator before retrying.
+
+---
+
+## Drill 10 — Recovering from Unsettled Specialist State & Formation Races (PM-019, ADR-0020)
+
+### When to Use
+
+A Legion pipeline halts with `status: "needs_reconciliation"`, or logs:
+
+```text
+The specialist reported completion, but its settlement could not be confirmed. Inspect persisted state and existing work before repeating it.
+```
+
+### Symptom
+
+- The formation does not advance to the next DAG stage.
+- The specialist member stream remains in `status: "running"` rather than being erroneously flipped to `failed` or triggering an unwanted failover replacement.
+
+### Root-Cause Checklist ([PM-019](../postmortems/PM-019-unpersisted-specialist-settlement-and-formation-dispatch-race.md), [ADR-0020](../adr/ADR-0020-legion-handoff-sanitization-two-phase-reservation-and-unsettled-reconciliation.md))
+
+1. **Inspect SQLite Status (`Q6`, `Q7` in 03-operating-handbook.md):**
+   - Check if `agent_streams` row for the specialist exists and has `status = 'completed'` or `'active'`.
+2. **Inspect Durable Receipts:**
+   - Check `legion_op_receipt:*` and `legion_op_outcome:*` in `agent_memory` to determine which tools finished before the settlement interruption.
+3. **Resolution:**
+   - If the specialist completed all work and changes exist on disk, call `orchestrator.completeStream(memberStreamId, summary)` directly and resume the formation.
+   - If the specialist crashed mid-tool, call `orchestrator.failStream(memberStreamId, "Settlement failure reconciled")` to initiate bounded failover.

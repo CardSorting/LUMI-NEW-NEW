@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
 import type { ToolUse } from "@core/assistant-message"
+import { EnvironmentIntegrity } from "@core/integrity/EnvironmentIntegrity"
 import { formatResponse } from "@core/prompts/responses"
 import { resolveWorkspacePath } from "@core/workspace"
 import { processFilesIntoText } from "@integrations/misc/extract-text"
@@ -330,6 +331,8 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 				const fileResult = await this.saveFileChange(change, operationPath)
 				if (fileResult) {
 					committedPaths.push(operationPath)
+					config.taskState.trackWorkspaceArtifact(operationPath)
+					if (EnvironmentIntegrity.isManifest(operationPath)) EnvironmentIntegrity.invalidateCache()
 					config.taskState.didEditFile = true
 					config.taskState.workspaceRevision++
 					// For move operations, we need to handle both old and new paths
@@ -338,6 +341,8 @@ export class ApplyPatchHandler implements IFullyManagedTool {
 						// Delete the old file after saving the new one
 						await this.providerOps?.deleteFile(originalPath, true, change.oldContent)
 						committedPaths.push(originalPath)
+						config.taskState.trackWorkspaceArtifact(originalPath)
+						if (EnvironmentIntegrity.isManifest(originalPath)) EnvironmentIntegrity.invalidateCache()
 						applyResults[originalPath] = { deleted: true }
 					} else {
 						applyResults[originalPath] = fileResult

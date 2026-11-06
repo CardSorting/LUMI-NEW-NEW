@@ -66,7 +66,8 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		if (this.terminal === terminal) return
 		this.terminal = terminal
 		const disposable = vscode.window.onDidCloseTerminal?.((closed) => {
-			if (closed === terminal) this.finish({ ...this.completion, terminalClosed: true, cancelled: this.stopRequested })
+			if (closed === terminal)
+				this.finish({ ...this.completion, terminalClosed: true, cancelled: !this.dispatched && this.stopRequested })
 		})
 		if (disposable) this.disposables.push(disposable)
 	}
@@ -107,7 +108,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 		}
 	}
 
-	/** Disposal requests a stop. The host's close event confirms it; never invent a signal. */
+	/** Disposal requests a stop; terminal closure alone does not confirm process termination. */
 	terminate(): void | Promise<void> {
 		if (this.stopped || this.stopRequested || (this.hostEnded && typeof this.completion.exitCode === "number")) return
 		this.stopRequested = true
@@ -178,6 +179,7 @@ export class VscodeTerminalProcess extends EventEmitter<TerminalProcessEvents> i
 				onData: (data) => this.appendOutput(decoder.write(data)),
 				onComplete: (details) => this.finish(details),
 				onError: (error) => this.failBeforeDispatch(error),
+				onObservationError: (error) => this.trackingLost(`Supervised shell reported an error: ${error.message}.`),
 			})
 			this.dispatched = true
 		} catch (error) {

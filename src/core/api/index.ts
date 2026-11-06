@@ -9,11 +9,27 @@ import { NousResearchHandler } from "./providers/nous-research"
 import { OpenAiCodexHandler } from "./providers/openai-codex"
 import { OpencodeHandler } from "./providers/opencode"
 import { OpenRouterHandler } from "./providers/openrouter"
+import { ApiStream } from "./transform/stream"
 import { ApiHandler, ApiHandlerModel, ApiProviderInfo, CommonApiHandlerOptions, SingleCompletionHandler } from "./types"
 
 // Re-export the API handler contract for backward compatibility.
 // The canonical definitions live in ./types to break the provider↔index cycle.
 export type { ApiHandler, ApiHandlerModel, ApiProviderInfo, CommonApiHandlerOptions, SingleCompletionHandler }
+
+/** Preserve task history and surface an actionable error without sending data to another provider. */
+class UnsupportedProviderHandler implements ApiHandler {
+	constructor(private readonly provider: string) {}
+
+	getModel(): ApiHandlerModel {
+		return { id: "unavailable", info: { name: "Unavailable provider", supportsPromptCache: false } }
+	}
+
+	async *createMessage(): ApiStream {
+		throw new Error(
+			`API provider "${this.provider}" is not supported in this version. Choose a supported provider in settings or contact your administrator.`,
+		)
+	}
+}
 
 function createHandlerForProvider(
 	apiProvider: string | undefined,
@@ -60,6 +76,8 @@ function createHandlerForProvider(
 	}
 
 	switch (apiProvider) {
+		case undefined:
+		case "":
 		case "openrouter":
 			return new OpenRouterHandler({
 				onRetryAttempt: options.onRetryAttempt,
@@ -100,17 +118,7 @@ function createHandlerForProvider(
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
 			})
 		default:
-			return new OpenRouterHandler({
-				onRetryAttempt: options.onRetryAttempt,
-				getRetrySignal: options.getRetrySignal,
-				openRouterApiKey: options.openRouterApiKey,
-				openRouterModelId: mode === "plan" ? options.planModeOpenRouterModelId : options.actModeOpenRouterModelId,
-				openRouterModelInfo: mode === "plan" ? options.planModeOpenRouterModelInfo : options.actModeOpenRouterModelInfo,
-				openRouterProviderSorting: options.openRouterProviderSorting,
-				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
-				thinkingBudgetTokens:
-					mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
-			})
+			return new UnsupportedProviderHandler(apiProvider)
 	}
 }
 
@@ -149,17 +157,6 @@ export function buildApiHandler(configuration: ApiConfiguration, mode: Mode): Ap
 		Logger.error("buildApiHandler: CRITICAL failure in createHandlerForProvider", error)
 		// Provider selection expresses the user's account and billing intent.
 		// Never turn a setup or construction failure into a different provider.
-		if (
-			apiProvider === "openai-codex" ||
-			apiProvider === "claude-code" ||
-			apiProvider === "claude-subscription-directsdk-experimental" ||
-			isClinePassProvider(apiProvider) ||
-			isNousResearchProvider(apiProvider) ||
-			isOpencodeProvider(apiProvider)
-		) {
-			throw error
-		}
-		// Keep the legacy safe default for stale unsupported values.
-		return createHandlerForProvider("openrouter", options, mode)
+		throw error
 	}
 }

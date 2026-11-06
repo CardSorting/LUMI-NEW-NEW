@@ -113,6 +113,22 @@ describe("ActionExecutor", () => {
 			{ execution: { kind: "command", input: "test", label: "test" } },
 		)
 		assert.equal(executor.executions.get("task", id)?.status, "unconfirmed")
+		assert.equal(executor.executions.list("task").active.length, 1)
+		await assert.rejects(
+			executor.execute("task", async () => "duplicate", {
+				execution: { kind: "command", input: "test", label: "test" },
+			}),
+			ActionAlreadyActiveError,
+		)
+		executor.executions.reconcileCommand("task", id, { status: "completed", executionId: id, exitCode: 0 })
+		assert.equal(executor.executions.get("task", id)?.status, "completed")
+		assert.equal(executor.executions.list("task").active.length, 0)
+		assert.equal(
+			await executor.execute("task", async () => "allowed", {
+				execution: { kind: "command", input: "test", label: "test" },
+			}),
+			"allowed",
+		)
 	})
 	it("does not strand an action claim when the command owner returns an existing execution", async () => {
 		const executor = new ActionExecutor()
@@ -142,6 +158,54 @@ describe("ActionExecutor", () => {
 		)
 		executor.executions.reconcileCommand("task", original, { status: "completed", exitCode: 0 })
 		assert.equal(executor.executions.list("task").active.length, 0)
+	})
+	it("does not release a command for a mismatched notification or contradictory result", async () => {
+		const executor = new ActionExecutor()
+		let id = ""
+		const execution = { kind: "command" as const, input: "build", label: "build" }
+		await executor.execute(
+			"task",
+			async (_signal, actionId) => {
+				id = actionId!
+				executor.executions.reconcileCommand("task", id, { status: "running", executionId: id })
+				executor.executions.reconcileCommand("task", id, { status: "completed", executionId: "other", exitCode: 0 })
+				assert.equal(executor.executions.list("task").active.length, 1)
+				return [false, "different command", { status: "background", executionId: "other" }]
+			},
+			{ execution },
+		)
+		assert.equal(executor.executions.get("task", id)?.status, "unconfirmed")
+		await assert.rejects(
+			executor.execute("task", async () => "duplicate", { execution }),
+			ActionAlreadyActiveError,
+		)
+		executor.executions.reconcileCommand("task", id, { status: "completed", executionId: id, exitCode: 0 })
+		assert.equal(executor.executions.get("task", id)?.status, "completed")
+	})
+	it("retains an observed command if its foreground callback rejects", async () => {
+		const executor = new ActionExecutor()
+		let id = ""
+		const execution = { kind: "command" as const, input: "build", label: "build" }
+		await assert.rejects(
+			executor.execute(
+				"task",
+				async (_signal, actionId) => {
+					id = actionId!
+					executor.executions.reconcileCommand("task", id, { status: "running", executionId: id })
+					throw new Error("foreground connection lost")
+				},
+				{ execution, idempotent: true, maxRetries: 3 },
+			),
+			/foreground connection lost/,
+		)
+		assert.equal(executor.executions.get("task", id)?.status, "unconfirmed")
+		assert.deepEqual(executor.getQueues("task"), [])
+		await assert.rejects(
+			executor.execute("task", async () => "duplicate", { execution }),
+			ActionAlreadyActiveError,
+		)
+		executor.executions.reconcileCommand("task", id, { status: "completed", executionId: id, exitCode: 0 })
+		assert.equal(executor.executions.get("task", id)?.status, "completed")
 	})
 	it("reports cancelled helpers as cancelled receipts", async () => {
 		const executor = new ActionExecutor()

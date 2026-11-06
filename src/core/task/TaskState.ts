@@ -12,6 +12,8 @@ export class TaskState {
 	public recursionDepth = 0
 	public maxTokens?: number
 	public maxCost?: number
+	/** In-session fence when specialist usage could not be recorded reliably. */
+	public specialistUsageUnverified = false
 
 	// Task-level timing
 	taskStartTimeMs = Date.now()
